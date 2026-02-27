@@ -44,7 +44,7 @@ Metric names:
 
 ## Retry and validation config
 
-Use `config.yaml` to control retry and response validation behavior.
+Use `config.yaml` to control retry, response validation, pacing, lifecycle, and idempotency safeguards.
 
 ```yaml
 replay:
@@ -59,6 +59,19 @@ replay:
     headers: false
     body: false
     ignore_headers: [x-request-id, date]
+  pacing:
+    enabled: false
+    max_sleep_delta: 30s
+  lifecycle:
+    require_open: true
+    require_close: true
+  idempotency:
+    enabled: true
+    block_methods: [POST, PUT, PATCH, DELETE]
+    require_header_for_allow: [idempotency-key, x-idempotency-key]
 ```
 
 When a recorded response exists for a request (`connection_id` + `sequence`), mismatches increment `validation_failed` and produce `partial_success`.
+
+When idempotency safeguards are enabled, mutation methods are skipped unless one of the allow headers is present.
+Lifecycle checks require both `connection_open` and `connection_close` events per replayed connection.

@@ -16,6 +16,16 @@ replay:
     headers: false
     body: false
     ignore_headers: [x-request-id, date]
+  pacing:
+    enabled: false
+    max_sleep_delta: 30s
+  lifecycle:
+    require_open: true
+    require_close: true
+  idempotency:
+    enabled: true
+    block_methods: [POST, PUT, PATCH, DELETE]
+    require_header_for_allow: [idempotency-key, x-idempotency-key]
 
 metrics:
   enabled: true

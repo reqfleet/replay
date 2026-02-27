@@ -76,6 +76,9 @@ func (e *Engine) Replay(ctx context.Context, events []model.Event) (Summary, err
 	if len(groups) == 0 {
 		return Summary{Outcome: RunFailed}, fmt.Errorf("no request events found")
 	}
+	if err := e.validateLifecycleRequirements(groups, events); err != nil {
+		return Summary{Outcome: RunFailed}, err
+	}
 	responseExpectations := groupResponseEventsByConnectionSequence(events)
 
 	e.metrics.SeedEngineLabels(e.cfg.Labels)
@@ -127,7 +130,7 @@ func (e *Engine) Replay(ctx context.Context, events []model.Event) (Summary, err
 	if final.ValidationFailed > 0 && final.Outcome == RunSuccess {
 		final.Outcome = RunPartialSuccess
 	}
-	if final.RequestsSent == 0 {
+	if final.RequestsSent == 0 && final.Skipped == 0 {
 		final.Outcome = RunFailed
 	}
 	return final, nil
@@ -174,6 +177,9 @@ func (e *Engine) replayConnection(ctx context.Context, requests []model.Event, r
 		return result
 	}
 
+	var previousTimestamp time.Time
+	previousTimestampSet := false
+
 	for _, requestEvent := range requests {
 		select {
 		case <-ctx.Done():
@@ -181,6 +187,21 @@ func (e *Engine) replayConnection(ctx context.Context, requests []model.Event, r
 			result.Outcome = RunFailed
 			return result
 		default:
+		}
+
+		if sleepErr := e.sleepForPacing(ctx, previousTimestamp, previousTimestampSet, requestEvent.Timestamp); sleepErr != nil {
+			result.ConnectionsAborted++
+			result.Outcome = RunFailed
+			return result
+		}
+		if parsedTimestamp, ok := parseTimestamp(requestEvent.Timestamp); ok {
+			previousTimestamp = parsedTimestamp
+			previousTimestampSet = true
+		}
+
+		if e.shouldSkipByIdempotencyPolicy(requestEvent) {
+			result.Skipped++
+			continue
 		}
 
 		exec, err := e.sendRequest(ctx, requestEvent)
@@ -237,11 +258,138 @@ func (e *Engine) replayConnection(ctx context.Context, requests []model.Event, r
 		result.ConnectionsDone = 1
 		if result.ValidationFailed > 0 {
 			result.Outcome = RunPartialSuccess
+		} else if result.RequestsSent == 0 && result.Skipped > 0 {
+			result.Outcome = RunSuccess
 		} else if result.Outcome == "" {
 			result.Outcome = RunSuccess
 		}
 	}
 	return result
+}
+
+func (e *Engine) validateLifecycleRequirements(requestGroups map[string][]model.Event, events []model.Event) error {
+	lifecycles := collectLifecycleByConnection(events)
+	for connectionID := range requestGroups {
+		lifecycle := lifecycles[connectionID]
+		if e.cfg.Replay.Lifecycle.RequireOpen && !lifecycle.hasOpen {
+			return fmt.Errorf("connection %q missing connection_open event", connectionID)
+		}
+		if e.cfg.Replay.Lifecycle.RequireClose && !lifecycle.hasClose {
+			return fmt.Errorf("connection %q missing connection_close event", connectionID)
+		}
+	}
+	return nil
+}
+
+type connectionLifecycle struct {
+	hasOpen  bool
+	hasClose bool
+}
+
+func collectLifecycleByConnection(events []model.Event) map[string]connectionLifecycle {
+	byConnection := make(map[string]connectionLifecycle)
+	for _, event := range events {
+		if event.ConnectionID == "" {
+			continue
+		}
+		lifecycle := byConnection[event.ConnectionID]
+		switch event.Type {
+		case model.EventConnectionOpen:
+			lifecycle.hasOpen = true
+		case model.EventConnectionClose:
+			lifecycle.hasClose = true
+		default:
+			continue
+		}
+		byConnection[event.ConnectionID] = lifecycle
+	}
+	return byConnection
+}
+
+func (e *Engine) sleepForPacing(ctx context.Context, previous time.Time, previousSet bool, currentRaw string) error {
+	if !e.cfg.Replay.Pacing.Enabled || !previousSet {
+		return nil
+	}
+	current, ok := parseTimestamp(currentRaw)
+	if !ok || !current.After(previous) {
+		return nil
+	}
+
+	delta := current.Sub(previous)
+	if max := e.cfg.Replay.Pacing.MaxSleepDelta; max > 0 && delta > max {
+		delta = max
+	}
+
+	timer := time.NewTimer(delta)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func parseTimestamp(raw string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return parsed, true
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return parsed, true
+}
+
+func (e *Engine) shouldSkipByIdempotencyPolicy(request model.Event) bool {
+	policy := e.cfg.Replay.Idempotency
+	if !policy.Enabled {
+		return false
+	}
+
+	method := strings.ToUpper(strings.TrimSpace(request.HTTP.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+
+	blockedMethods := make(map[string]struct{}, len(policy.BlockMethods))
+	for _, m := range policy.BlockMethods {
+		blockedMethods[strings.ToUpper(strings.TrimSpace(m))] = struct{}{}
+	}
+	if _, blocked := blockedMethods[method]; !blocked {
+		return false
+	}
+
+	if len(policy.RequireHeaderForAllow) == 0 {
+		return true
+	}
+	for _, headerName := range policy.RequireHeaderForAllow {
+		if hasHeaderValue(request.Headers, headerName) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasHeaderValue(headers map[string][]string, name string) bool {
+	if len(headers) == 0 || name == "" {
+		return false
+	}
+	target := strings.ToLower(name)
+	for header, values := range headers {
+		if strings.ToLower(header) != target {
+			continue
+		}
+		for _, value := range values {
+			if strings.TrimSpace(value) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (e *Engine) sendRequest(ctx context.Context, requestEvent model.Event) (requestExecution, error) {

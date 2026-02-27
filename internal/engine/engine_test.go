@@ -41,6 +41,7 @@ func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
 		{
 			Type:         model.EventRequest,
 			ConnectionID: "c1",
@@ -52,6 +53,7 @@ func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 				Path:      "/",
 			},
 		},
+		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
 	summary, err := eng.Replay(context.Background(), events)
@@ -85,6 +87,7 @@ func TestReplayMarksValidationFailedOnStatusMismatch(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
 		{
 			Type:         model.EventRequest,
 			ConnectionID: "c1",
@@ -102,6 +105,7 @@ func TestReplayMarksValidationFailedOnStatusMismatch(t *testing.T) {
 			Sequence:     1,
 			Status:       http.StatusOK,
 		},
+		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
 	summary, err := eng.Replay(context.Background(), events)
@@ -139,6 +143,7 @@ func TestReplayHeaderValidationIgnoresConfiguredHeaders(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
 		{
 			Type:         model.EventRequest,
 			ConnectionID: "c1",
@@ -160,6 +165,7 @@ func TestReplayHeaderValidationIgnoresConfiguredHeaders(t *testing.T) {
 				"x-request-id": {"expected-other-id"},
 			},
 		},
+		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
 	summary, err := eng.Replay(context.Background(), events)
@@ -194,6 +200,7 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
 		{
 			Type:         model.EventRequest,
 			ConnectionID: "c1",
@@ -215,6 +222,7 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 				Content:  base64.StdEncoding.EncodeToString([]byte("expected-body")),
 			},
 		},
+		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
 	summary, err := eng.Replay(context.Background(), events)
@@ -226,5 +234,92 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 	}
 	if summary.Outcome != RunPartialSuccess {
 		t.Fatalf("summary.Outcome = %s, want %s", summary.Outcome, RunPartialSuccess)
+	}
+}
+
+func TestReplaySkipsMutationWithoutIdempotencyHeader(t *testing.T) {
+	var attempts int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&attempts, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: "c1",
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodPost,
+				Scheme:    target.Scheme,
+				Authority: target.Host,
+				Path:      "/mutate",
+			},
+		},
+		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+	}
+
+	summary, err := eng.Replay(context.Background(), events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if summary.Skipped != 1 {
+		t.Fatalf("summary.Skipped = %d, want 1", summary.Skipped)
+	}
+	if summary.RequestsSent != 0 {
+		t.Fatalf("summary.RequestsSent = %d, want 0", summary.RequestsSent)
+	}
+	if summary.Outcome != RunSuccess {
+		t.Fatalf("summary.Outcome = %s, want %s", summary.Outcome, RunSuccess)
+	}
+	if atomic.LoadInt64(&attempts) != 0 {
+		t.Fatalf("attempt count = %d, want 0", attempts)
+	}
+}
+
+func TestReplayFailsWhenLifecycleCloseMissing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: "c1",
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    target.Scheme,
+				Authority: target.Host,
+				Path:      "/",
+			},
+		},
+	}
+
+	_, err = eng.Replay(context.Background(), events)
+	if err == nil {
+		t.Fatal("expected lifecycle validation error")
 	}
 }

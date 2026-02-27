@@ -24,6 +24,9 @@ type ReplayConfig struct {
 	Timeout                       TimeoutConfig    `yaml:"timeout"`
 	Retry                         RetryConfig      `yaml:"retry"`
 	Validation                    ValidationConfig `yaml:"validation"`
+	Pacing                        PacingConfig     `yaml:"pacing"`
+	Lifecycle                     LifecycleConfig  `yaml:"lifecycle"`
+	Idempotency                   IdempotencyConfig `yaml:"idempotency"`
 }
 
 type TimeoutConfig struct {
@@ -45,6 +48,22 @@ type ValidationConfig struct {
 	Headers       bool     `yaml:"headers"`
 	Body          bool     `yaml:"body"`
 	IgnoreHeaders []string `yaml:"ignore_headers"`
+}
+
+type PacingConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	MaxSleepDelta time.Duration `yaml:"max_sleep_delta"`
+}
+
+type LifecycleConfig struct {
+	RequireOpen  bool `yaml:"require_open"`
+	RequireClose bool `yaml:"require_close"`
+}
+
+type IdempotencyConfig struct {
+	Enabled               bool     `yaml:"enabled"`
+	BlockMethods          []string `yaml:"block_methods"`
+	RequireHeaderForAllow []string `yaml:"require_header_for_allow"`
 }
 
 type MetricsConfig struct {
@@ -87,6 +106,19 @@ func Default() Config {
 			Validation: ValidationConfig{
 				Enabled: true,
 				Status:  true,
+			},
+			Pacing: PacingConfig{
+				Enabled:       false,
+				MaxSleepDelta: 30 * time.Second,
+			},
+			Lifecycle: LifecycleConfig{
+				RequireOpen:  true,
+				RequireClose: true,
+			},
+			Idempotency: IdempotencyConfig{
+				Enabled:               true,
+				BlockMethods:          []string{"POST", "PUT", "PATCH", "DELETE"},
+				RequireHeaderForAllow: []string{"idempotency-key", "x-idempotency-key"},
 			},
 		},
 		Metrics: MetricsConfig{
@@ -138,6 +170,9 @@ func (c Config) Validate() error {
 	}
 	if c.Replay.Retry.MaxAttempts <= 0 {
 		return errors.New("replay.retry.max_attempts must be > 0")
+	}
+	if c.Replay.Pacing.MaxSleepDelta < 0 {
+		return errors.New("replay.pacing.max_sleep_delta must be >= 0")
 	}
 	if c.Metrics.Path == "" {
 		return errors.New("metrics.path is required")
