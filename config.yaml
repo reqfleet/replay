@@ -1,6 +1,9 @@
 replay:
   max_virtual_users_per_engine: 20
   max_active_connections_per_engine: 200
+  http2:
+    mode: serialized
+    max_concurrent_streams: 16
   timeout:
     connect: 3s
     request: 30s

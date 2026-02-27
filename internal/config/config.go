@@ -21,6 +21,7 @@ type Config struct {
 type ReplayConfig struct {
 	MaxVirtualUsersPerEngine      int               `yaml:"max_virtual_users_per_engine"`
 	MaxActiveConnectionsPerEngine int               `yaml:"max_active_connections_per_engine"`
+	HTTP2                         HTTP2Config       `yaml:"http2"`
 	Timeout                       TimeoutConfig     `yaml:"timeout"`
 	Retry                         RetryConfig       `yaml:"retry"`
 	Validation                    ValidationConfig  `yaml:"validation"`
@@ -35,6 +36,11 @@ type TimeoutConfig struct {
 	Connect        time.Duration `yaml:"connect"`
 	Request        time.Duration `yaml:"request"`
 	IdleConnection time.Duration `yaml:"idle_connection"`
+}
+
+type HTTP2Config struct {
+	Mode                 string `yaml:"mode"`
+	MaxConcurrentStreams int    `yaml:"max_concurrent_streams"`
 }
 
 type RetryConfig struct {
@@ -105,6 +111,10 @@ func Default() Config {
 		Replay: ReplayConfig{
 			MaxVirtualUsersPerEngine:      20,
 			MaxActiveConnectionsPerEngine: 200,
+			HTTP2: HTTP2Config{
+				Mode:                 "serialized",
+				MaxConcurrentStreams: 16,
+			},
 			Timeout: TimeoutConfig{
 				Connect:        3 * time.Second,
 				Request:        30 * time.Second,
@@ -186,6 +196,14 @@ func (c Config) Validate() error {
 	}
 	if c.Replay.Retry.MaxAttempts <= 0 {
 		return errors.New("replay.retry.max_attempts must be > 0")
+	}
+	switch c.Replay.HTTP2.Mode {
+	case "", "serialized", "multiplexed":
+	default:
+		return errors.New("replay.http2.mode must be one of: serialized, multiplexed")
+	}
+	if c.Replay.HTTP2.MaxConcurrentStreams <= 0 {
+		return errors.New("replay.http2.max_concurrent_streams must be > 0")
 	}
 	if c.Replay.Pacing.MaxSleepDelta < 0 {
 		return errors.New("replay.pacing.max_sleep_delta must be >= 0")

@@ -48,6 +48,9 @@ Use `config.yaml` to control retry, response validation, pacing, lifecycle, and 
 
 ```yaml
 replay:
+  http2:
+    mode: serialized  # serialized|multiplexed
+    max_concurrent_streams: 16
   retry:
     max_attempts: 2
     backoff: exponential  # none|fixed|exponential
@@ -83,3 +86,5 @@ Lifecycle checks require both `connection_open` and `connection_close` events pe
 
 Sharding routes connections by `connection_id` hash (`shard_index` / `shard_count`) and only replays the local shard.
 If `checkpoint.file` is set, completed sequences are persisted and skipped on the next run.
+For HTTP/2 traffic, `serialized` replays requests sequentially, while `multiplexed`
+replays by stream with bounded stream concurrency.

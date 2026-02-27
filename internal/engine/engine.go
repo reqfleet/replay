@@ -185,6 +185,13 @@ func (e *Engine) replayConnection(ctx context.Context, requests []model.Event, r
 }
 
 func (e *Engine) replayConnectionWithCheckpoint(ctx context.Context, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
+	if e.shouldUseHTTP2MultiplexedMode(requests) {
+		return e.replayConnectionHTTP2Multiplexed(ctx, requests, responsesBySequence, checkpoints)
+	}
+	return e.replayConnectionSerialized(ctx, requests, responsesBySequence, checkpoints)
+}
+
+func (e *Engine) replayConnectionSerialized(ctx context.Context, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
 	result := Summary{}
 	if len(requests) == 0 {
 		return result
@@ -293,6 +300,89 @@ func (e *Engine) replayConnectionWithCheckpoint(ctx context.Context, requests []
 		}
 	}
 	return result
+}
+
+func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
+	streams := groupRequestsByStream(requests)
+	if len(streams) == 0 {
+		return Summary{ConnectionsDone: 1, Outcome: RunSuccess}
+	}
+
+	streamSem := make(chan struct{}, e.cfg.Replay.HTTP2.MaxConcurrentStreams)
+	results := make(chan Summary, len(streams))
+	var wg sync.WaitGroup
+
+	for _, streamRequests := range streams {
+		streamRequests := streamRequests
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case <-ctx.Done():
+				results <- Summary{ConnectionsAborted: 1, Outcome: RunFailed}
+				return
+			case streamSem <- struct{}{}:
+			}
+			defer func() { <-streamSem }()
+			results <- e.replayConnectionSerialized(ctx, streamRequests, responsesBySequence, checkpoints)
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	aggregated := Summary{Outcome: RunSuccess}
+	for streamResult := range results {
+		aggregated.RequestsSent += streamResult.RequestsSent
+		aggregated.ResponsesReceived += streamResult.ResponsesReceived
+		aggregated.SendErrors += streamResult.SendErrors
+		aggregated.ValidationFailed += streamResult.ValidationFailed
+		aggregated.Skipped += streamResult.Skipped
+		aggregated.ConnectionsAborted += streamResult.ConnectionsAborted
+	}
+
+	if aggregated.ConnectionsAborted > 0 {
+		aggregated.Outcome = RunPartialSuccess
+	}
+	if aggregated.ValidationFailed > 0 && aggregated.Outcome == RunSuccess {
+		aggregated.Outcome = RunPartialSuccess
+	}
+	if aggregated.RequestsSent == 0 && aggregated.Skipped == 0 {
+		aggregated.Outcome = RunFailed
+	}
+	if aggregated.ConnectionsAborted == 0 {
+		aggregated.ConnectionsDone = 1
+	}
+	return aggregated
+}
+
+func groupRequestsByStream(requests []model.Event) map[int][]model.Event {
+	grouped := make(map[int][]model.Event)
+	for _, req := range requests {
+		streamID := req.StreamID
+		if streamID == 0 {
+			streamID = 1
+		}
+		grouped[streamID] = append(grouped[streamID], req)
+	}
+	for streamID := range grouped {
+		sort.Slice(grouped[streamID], func(i, j int) bool {
+			return grouped[streamID][i].Sequence < grouped[streamID][j].Sequence
+		})
+	}
+	return grouped
+}
+
+func (e *Engine) shouldUseHTTP2MultiplexedMode(requests []model.Event) bool {
+	if !strings.EqualFold(e.cfg.Replay.HTTP2.Mode, "multiplexed") {
+		return false
+	}
+	for _, req := range requests {
+		if strings.Contains(strings.ToUpper(req.HTTP.Version), "HTTP/2") {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) filterGroupsByShard(groups map[string][]model.Event) map[string][]model.Event {

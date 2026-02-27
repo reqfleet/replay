@@ -3,13 +3,14 @@ package engine
 import (
 	"context"
 	"encoding/base64"
-	"os"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/reqfleet/replay/internal/config"
 	"github.com/reqfleet/replay/internal/metrics"
@@ -435,5 +436,96 @@ func TestReplaySkipsAlreadyCheckpointedSequence(t *testing.T) {
 	}
 	if atomic.LoadInt64(&attempts) != 0 {
 		t.Fatalf("attempt count = %d, want 0", attempts)
+	}
+}
+
+func TestReplayHTTP2SerializedMode(t *testing.T) {
+	var maxInFlight int64
+	var inFlight int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.AddInt64(&inFlight, 1)
+		for {
+			previous := atomic.LoadInt64(&maxInFlight)
+			if current <= previous || atomic.CompareAndSwapInt64(&maxInFlight, previous, current) {
+				break
+			}
+		}
+		time.Sleep(80 * time.Millisecond)
+		atomic.AddInt64(&inFlight, -1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.HTTP2.Mode = "serialized"
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventRequest, ConnectionID: "c1", StreamID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"}},
+		{Type: model.EventRequest, ConnectionID: "c1", StreamID: 3, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"}},
+		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+	}
+
+	_, err = eng.Replay(context.Background(), events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if atomic.LoadInt64(&maxInFlight) != 1 {
+		t.Fatalf("max in-flight = %d, want 1 for serialized mode", maxInFlight)
+	}
+}
+
+func TestReplayHTTP2MultiplexedMode(t *testing.T) {
+	var maxInFlight int64
+	var inFlight int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.AddInt64(&inFlight, 1)
+		for {
+			previous := atomic.LoadInt64(&maxInFlight)
+			if current <= previous || atomic.CompareAndSwapInt64(&maxInFlight, previous, current) {
+				break
+			}
+		}
+		time.Sleep(80 * time.Millisecond)
+		atomic.AddInt64(&inFlight, -1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.HTTP2.Mode = "multiplexed"
+	cfg.Replay.HTTP2.MaxConcurrentStreams = 8
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventRequest, ConnectionID: "c1", StreamID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"}},
+		{Type: model.EventRequest, ConnectionID: "c1", StreamID: 3, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"}},
+		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+	}
+
+	_, err = eng.Replay(context.Background(), events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if atomic.LoadInt64(&maxInFlight) < 2 {
+		t.Fatalf("max in-flight = %d, want >= 2 for multiplexed mode", maxInFlight)
 	}
 }
