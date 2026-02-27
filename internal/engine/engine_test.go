@@ -3,9 +3,11 @@ package engine
 import (
 	"context"
 	"encoding/base64"
+	"os"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
@@ -321,5 +323,117 @@ func TestReplayFailsWhenLifecycleCloseMissing(t *testing.T) {
 	_, err = eng.Replay(context.Background(), events)
 	if err == nil {
 		t.Fatal("expected lifecycle validation error")
+	}
+}
+
+func TestReplayRespectsShardAssignment(t *testing.T) {
+	var attempts int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&attempts, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Sharding.ShardCount = 2
+	cfg.Replay.Sharding.ShardIndex = 0
+
+	connections := []string{"c1", "c2", "c3", "c4"}
+	events := []model.Event{{Type: model.EventMeta}}
+	expectedSent := int64(0)
+	for i, conn := range connections {
+		events = append(events,
+			model.Event{Type: model.EventConnectionOpen, ConnectionID: conn},
+			model.Event{
+				Type:         model.EventRequest,
+				ConnectionID: conn,
+				Sequence:     i + 1,
+				HTTP: model.HTTPRequestMeta{
+					Method:    http.MethodGet,
+					Scheme:    target.Scheme,
+					Authority: target.Host,
+					Path:      "/",
+				},
+			},
+			model.Event{Type: model.EventConnectionClose, ConnectionID: conn},
+		)
+		if connectionBelongsToShard(conn, cfg.Replay.Sharding.ShardIndex, cfg.Replay.Sharding.ShardCount) {
+			expectedSent++
+		}
+	}
+
+	eng := New(cfg, metrics.New())
+	summary, err := eng.Replay(context.Background(), events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if summary.RequestsSent != expectedSent {
+		t.Fatalf("summary.RequestsSent = %d, want %d", summary.RequestsSent, expectedSent)
+	}
+	if atomic.LoadInt64(&attempts) != expectedSent {
+		t.Fatalf("attempt count = %d, want %d", attempts, expectedSent)
+	}
+}
+
+func TestReplaySkipsAlreadyCheckpointedSequence(t *testing.T) {
+	var attempts int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&attempts, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	checkpointPath := filepath.Join(tmpDir, "checkpoint.json")
+	checkpointPayload := `{"version":1,"connections":{"c1":1}}`
+	if err := os.WriteFile(checkpointPath, []byte(checkpointPayload), 0o644); err != nil {
+		t.Fatalf("write checkpoint failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Checkpoint.File = checkpointPath
+
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: "c1",
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    target.Scheme,
+				Authority: target.Host,
+				Path:      "/",
+			},
+		},
+		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+	}
+
+	summary, err := eng.Replay(context.Background(), events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if summary.Skipped != 1 {
+		t.Fatalf("summary.Skipped = %d, want 1", summary.Skipped)
+	}
+	if summary.RequestsSent != 0 {
+		t.Fatalf("summary.RequestsSent = %d, want 0", summary.RequestsSent)
+	}
+	if atomic.LoadInt64(&attempts) != 0 {
+		t.Fatalf("attempt count = %d, want 0", attempts)
 	}
 }

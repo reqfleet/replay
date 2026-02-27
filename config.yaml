@@ -26,6 +26,11 @@ replay:
     enabled: true
     block_methods: [POST, PUT, PATCH, DELETE]
     require_header_for_allow: [idempotency-key, x-idempotency-key]
+  sharding:
+    shard_index: 0
+    shard_count: 1
+  checkpoint:
+    file: ""
 
 metrics:
   enabled: true

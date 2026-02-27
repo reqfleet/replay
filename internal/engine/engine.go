@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net"
 	"net/http"
@@ -76,10 +77,18 @@ func (e *Engine) Replay(ctx context.Context, events []model.Event) (Summary, err
 	if len(groups) == 0 {
 		return Summary{Outcome: RunFailed}, fmt.Errorf("no request events found")
 	}
+	groups = e.filterGroupsByShard(groups)
+	if len(groups) == 0 {
+		return Summary{Outcome: RunSuccess}, nil
+	}
 	if err := e.validateLifecycleRequirements(groups, events); err != nil {
 		return Summary{Outcome: RunFailed}, err
 	}
 	responseExpectations := groupResponseEventsByConnectionSequence(events)
+	checkpoints, err := newCheckpointStore(e.cfg.Replay.Checkpoint.File)
+	if err != nil {
+		return Summary{Outcome: RunFailed}, err
+	}
 
 	e.metrics.SeedEngineLabels(e.cfg.Labels)
 	vus := e.cfg.Replay.MaxVirtualUsersPerEngine
@@ -99,7 +108,7 @@ func (e *Engine) Replay(ctx context.Context, events []model.Event) (Summary, err
 					continue
 				case connSem <- struct{}{}:
 				}
-				s := e.replayConnection(ctx, job.requests, job.responsesBySequence)
+				s := e.replayConnectionWithCheckpoint(ctx, job.requests, job.responsesBySequence, checkpoints)
 				<-connSem
 				results <- s
 			}
@@ -172,6 +181,10 @@ func groupResponseEventsByConnectionSequence(events []model.Event) map[string]ma
 }
 
 func (e *Engine) replayConnection(ctx context.Context, requests []model.Event, responsesBySequence map[int]model.Event) Summary {
+	return e.replayConnectionWithCheckpoint(ctx, requests, responsesBySequence, nil)
+}
+
+func (e *Engine) replayConnectionWithCheckpoint(ctx context.Context, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
 	result := Summary{}
 	if len(requests) == 0 {
 		return result
@@ -199,8 +212,18 @@ func (e *Engine) replayConnection(ctx context.Context, requests []model.Event, r
 			previousTimestampSet = true
 		}
 
+		if checkpoints.alreadyProcessed(requestEvent.ConnectionID, requestEvent.Sequence) {
+			result.Skipped++
+			continue
+		}
+
 		if e.shouldSkipByIdempotencyPolicy(requestEvent) {
 			result.Skipped++
+			if err := checkpoints.markProcessed(requestEvent.ConnectionID, requestEvent.Sequence); err != nil {
+				result.ConnectionsAborted++
+				result.Outcome = RunFailed
+				return result
+			}
 			continue
 		}
 
@@ -219,6 +242,11 @@ func (e *Engine) replayConnection(ctx context.Context, requests []model.Event, r
 
 		result.RequestsSent++
 		result.ResponsesReceived++
+		if err := checkpoints.markProcessed(requestEvent.ConnectionID, requestEvent.Sequence); err != nil {
+			result.ConnectionsAborted++
+			result.Outcome = RunFailed
+			return result
+		}
 		if expected, ok := responsesBySequence[requestEvent.Sequence]; ok {
 			if e.responseValidationFailed(expected, exec) {
 				result.ValidationFailed++
@@ -265,6 +293,30 @@ func (e *Engine) replayConnection(ctx context.Context, requests []model.Event, r
 		}
 	}
 	return result
+}
+
+func (e *Engine) filterGroupsByShard(groups map[string][]model.Event) map[string][]model.Event {
+	sharding := e.cfg.Replay.Sharding
+	if sharding.ShardCount <= 1 {
+		return groups
+	}
+	filtered := make(map[string][]model.Event)
+	for connectionID, requests := range groups {
+		if !connectionBelongsToShard(connectionID, sharding.ShardIndex, sharding.ShardCount) {
+			continue
+		}
+		filtered[connectionID] = requests
+	}
+	return filtered
+}
+
+func connectionBelongsToShard(connectionID string, shardIndex, shardCount int) bool {
+	if shardCount <= 1 {
+		return true
+	}
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(connectionID))
+	return int(hasher.Sum32()%uint32(shardCount)) == shardIndex
 }
 
 func (e *Engine) validateLifecycleRequirements(requestGroups map[string][]model.Event, events []model.Event) error {

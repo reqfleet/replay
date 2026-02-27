@@ -19,14 +19,16 @@ type Config struct {
 }
 
 type ReplayConfig struct {
-	MaxVirtualUsersPerEngine      int              `yaml:"max_virtual_users_per_engine"`
-	MaxActiveConnectionsPerEngine int              `yaml:"max_active_connections_per_engine"`
-	Timeout                       TimeoutConfig    `yaml:"timeout"`
-	Retry                         RetryConfig      `yaml:"retry"`
-	Validation                    ValidationConfig `yaml:"validation"`
-	Pacing                        PacingConfig     `yaml:"pacing"`
-	Lifecycle                     LifecycleConfig  `yaml:"lifecycle"`
+	MaxVirtualUsersPerEngine      int               `yaml:"max_virtual_users_per_engine"`
+	MaxActiveConnectionsPerEngine int               `yaml:"max_active_connections_per_engine"`
+	Timeout                       TimeoutConfig     `yaml:"timeout"`
+	Retry                         RetryConfig       `yaml:"retry"`
+	Validation                    ValidationConfig  `yaml:"validation"`
+	Pacing                        PacingConfig      `yaml:"pacing"`
+	Lifecycle                     LifecycleConfig   `yaml:"lifecycle"`
 	Idempotency                   IdempotencyConfig `yaml:"idempotency"`
+	Sharding                      ShardingConfig    `yaml:"sharding"`
+	Checkpoint                    CheckpointConfig  `yaml:"checkpoint"`
 }
 
 type TimeoutConfig struct {
@@ -64,6 +66,15 @@ type IdempotencyConfig struct {
 	Enabled               bool     `yaml:"enabled"`
 	BlockMethods          []string `yaml:"block_methods"`
 	RequireHeaderForAllow []string `yaml:"require_header_for_allow"`
+}
+
+type ShardingConfig struct {
+	ShardIndex int `yaml:"shard_index"`
+	ShardCount int `yaml:"shard_count"`
+}
+
+type CheckpointConfig struct {
+	File string `yaml:"file"`
 }
 
 type MetricsConfig struct {
@@ -120,6 +131,11 @@ func Default() Config {
 				BlockMethods:          []string{"POST", "PUT", "PATCH", "DELETE"},
 				RequireHeaderForAllow: []string{"idempotency-key", "x-idempotency-key"},
 			},
+			Sharding: ShardingConfig{
+				ShardIndex: 0,
+				ShardCount: 1,
+			},
+			Checkpoint: CheckpointConfig{},
 		},
 		Metrics: MetricsConfig{
 			Enabled:       true,
@@ -173,6 +189,12 @@ func (c Config) Validate() error {
 	}
 	if c.Replay.Pacing.MaxSleepDelta < 0 {
 		return errors.New("replay.pacing.max_sleep_delta must be >= 0")
+	}
+	if c.Replay.Sharding.ShardCount <= 0 {
+		return errors.New("replay.sharding.shard_count must be > 0")
+	}
+	if c.Replay.Sharding.ShardIndex < 0 || c.Replay.Sharding.ShardIndex >= c.Replay.Sharding.ShardCount {
+		return errors.New("replay.sharding.shard_index must be within [0, shard_count)")
 	}
 	if c.Metrics.Path == "" {
 		return errors.New("metrics.path is required")

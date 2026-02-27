@@ -69,9 +69,17 @@ replay:
     enabled: true
     block_methods: [POST, PUT, PATCH, DELETE]
     require_header_for_allow: [idempotency-key, x-idempotency-key]
+  sharding:
+    shard_index: 0
+    shard_count: 1
+  checkpoint:
+    file: "./checkpoint.json"
 ```
 
 When a recorded response exists for a request (`connection_id` + `sequence`), mismatches increment `validation_failed` and produce `partial_success`.
 
 When idempotency safeguards are enabled, mutation methods are skipped unless one of the allow headers is present.
 Lifecycle checks require both `connection_open` and `connection_close` events per replayed connection.
+
+Sharding routes connections by `connection_id` hash (`shard_index` / `shard_count`) and only replays the local shard.
+If `checkpoint.file` is set, completed sequences are persisted and skipped on the next run.
