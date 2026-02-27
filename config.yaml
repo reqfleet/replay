@@ -1,0 +1,41 @@
+replay:
+  max_virtual_users_per_engine: 20
+  max_active_connections_per_engine: 200
+  timeout:
+    connect: 3s
+    request: 30s
+    idle_connection: 60s
+  retry:
+    max_attempts: 2
+    backoff: exponential
+    retry_on_statuses: [429, 502, 503, 504]
+    retry_on_errors: [timeout, connection_reset, network, tls]
+  validation:
+    enabled: true
+    status: true
+    headers: false
+    body: false
+    ignore_headers: [x-request-id, date]
+
+metrics:
+  enabled: true
+  listen_address: "0.0.0.0:9102"
+  path: "/metrics"
+
+env:
+  TARGET_ENV: "staging"
+  AUTH_MODE: "token-rewrite"
+
+labels:
+  collection_id: "demo-collection"
+  plan_id: "demo-plan"
+  run_id: "demo-run"
+  engine_no: "1"
+  zone: "local"
+
+target:
+  override_url: ""
+
+header_rewrite:
+  drop: [authorization, cookie]
+  set: {}
