@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -22,6 +23,7 @@ type ReplayConfig struct {
 	MaxVirtualUsersPerEngine      int               `yaml:"max_virtual_users_per_engine"`
 	MaxActiveConnectionsPerEngine int               `yaml:"max_active_connections_per_engine"`
 	HTTP2                         HTTP2Config       `yaml:"http2"`
+	DryRun                        bool              `yaml:"dry_run"`
 	Timeout                       TimeoutConfig     `yaml:"timeout"`
 	Retry                         RetryConfig       `yaml:"retry"`
 	Validation                    ValidationConfig  `yaml:"validation"`
@@ -99,6 +101,7 @@ type CommonMetricLabelSet struct {
 
 type TargetOverrideConfig struct {
 	OverrideURL string `yaml:"override_url"`
+	Require     bool   `yaml:"require_override"`
 }
 
 type HeaderRewriteConfig struct {
@@ -115,6 +118,7 @@ func Default() Config {
 				Mode:                 "serialized",
 				MaxConcurrentStreams: 16,
 			},
+			DryRun: false,
 			Timeout: TimeoutConfig{
 				Connect:        3 * time.Second,
 				Request:        30 * time.Second,
@@ -221,4 +225,49 @@ func (c Config) Validate() error {
 		return errors.New("metrics.listen_address is required")
 	}
 	return nil
+}
+
+// ApplyEnv applies well-known environment variable overrides to the config.
+// Precedence order is: defaults -> YAML -> environment -> CLI (applied by caller).
+func (c *Config) ApplyEnv() {
+	if v, ok := os.LookupEnv("REPLAY_DRY_RUN"); ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Replay.DryRun = b
+		}
+	}
+	if v, ok := os.LookupEnv("REPLAY_OVERRIDE_URL"); ok && v != "" {
+		c.Target.OverrideURL = v
+	}
+	if v, ok := os.LookupEnv("REPLAY_REQUIRE_OVERRIDE"); ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Target.Require = b
+		}
+	}
+	if v, ok := os.LookupEnv("METRICS_ENABLED"); ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Metrics.Enabled = b
+		}
+	}
+	if v, ok := os.LookupEnv("METRICS_LISTEN_ADDRESS"); ok && v != "" {
+		c.Metrics.ListenAddress = v
+	}
+	if v, ok := os.LookupEnv("METRICS_PATH"); ok && v != "" {
+		c.Metrics.Path = v
+	}
+
+	if v, ok := os.LookupEnv("REPLAY_LABEL_COLLECTION_ID"); ok && v != "" {
+		c.Labels.CollectionID = v
+	}
+	if v, ok := os.LookupEnv("REPLAY_LABEL_PLAN_ID"); ok && v != "" {
+		c.Labels.PlanID = v
+	}
+	if v, ok := os.LookupEnv("REPLAY_LABEL_RUN_ID"); ok && v != "" {
+		c.Labels.RunID = v
+	}
+	if v, ok := os.LookupEnv("REPLAY_LABEL_ENGINE_NO"); ok && v != "" {
+		c.Labels.EngineNo = v
+	}
+	if v, ok := os.LookupEnv("REPLAY_LABEL_ZONE"); ok && v != "" {
+		c.Labels.Zone = v
+	}
 }

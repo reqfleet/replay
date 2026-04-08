@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -527,5 +528,135 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 	}
 	if atomic.LoadInt64(&maxInFlight) < 2 {
 		t.Fatalf("max in-flight = %d, want >= 2 for multiplexed mode", maxInFlight)
+	}
+}
+
+func TestPerConnectionSocketOwnership(t *testing.T) {
+	var mu sync.Mutex
+	addrs := make(map[string]struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		addrs[r.RemoteAddr] = struct{}{}
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventRequest, ConnectionID: "c1", Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}},
+		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: "c2"},
+		{Type: model.EventRequest, ConnectionID: "c2", Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}},
+		{Type: model.EventConnectionClose, ConnectionID: "c2"},
+	}
+
+	summary, err := eng.Replay(context.Background(), events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if summary.RequestsSent != 2 {
+		t.Fatalf("summary.RequestsSent = %d, want 2", summary.RequestsSent)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(addrs) != 2 {
+		t.Fatalf("expected 2 distinct remote addresses, got %d", len(addrs))
+	}
+}
+
+func TestDryRunNoNetwork(t *testing.T) {
+	var attempts int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&attempts, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.DryRun = true
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventRequest, ConnectionID: "c1", Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}},
+		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+	}
+
+	summary, err := eng.Replay(context.Background(), events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if summary.RequestsSent != 0 {
+		t.Fatalf("summary.RequestsSent = %d, want 0", summary.RequestsSent)
+	}
+	if summary.Skipped != 1 {
+		t.Fatalf("summary.Skipped = %d, want 1", summary.Skipped)
+	}
+	if atomic.LoadInt64(&attempts) != 0 {
+		t.Fatalf("attempt count = %d, want 0", attempts)
+	}
+}
+
+func TestOverrideHostRewrite(t *testing.T) {
+	var seenHost string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHost = r.Host
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	// recorded event has a different authority than the override
+	recordedAuthority := "api.prod.example.com"
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Target.OverrideURL = srv.URL
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventRequest, ConnectionID: "c1", Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: "https", Authority: recordedAuthority, Path: "/"}, Headers: map[string][]string{"Host": {recordedAuthority}}},
+		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+	}
+
+	summary, err := eng.Replay(context.Background(), events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if summary.RequestsSent != 1 {
+		t.Fatalf("summary.RequestsSent = %d, want 1", summary.RequestsSent)
+	}
+	// the server should observe the override host
+	expectedHost := target.Host
+	if seenHost != expectedHost {
+		t.Fatalf("seen host = %q, want %q", seenHost, expectedHost)
 	}
 }

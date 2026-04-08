@@ -33,7 +33,7 @@ replay:
     shard_index: 0
     shard_count: 1
   checkpoint:
-    file: ""
+    file: "./checkpoint.json"
 
 metrics:
   enabled: true
@@ -53,6 +53,7 @@ labels:
 
 target:
   override_url: ""
+  require_override: false
 
 header_rewrite:
   drop: [authorization, cookie]

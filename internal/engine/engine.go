@@ -30,6 +30,40 @@ const (
 	RunFailed         RunOutcome = "failed"
 )
 
+type RequestOutcome string
+
+const (
+	RequestSent             RequestOutcome = "sent"
+	RequestSendError        RequestOutcome = "send_error"
+	RequestResponseReceived RequestOutcome = "response_received"
+	RequestValidationFailed RequestOutcome = "validation_failed"
+	RequestSkipped          RequestOutcome = "skipped"
+)
+
+type ConnectionOutcome string
+
+const (
+	ConnectionCompleted ConnectionOutcome = "completed"
+	ConnectionAborted   ConnectionOutcome = "aborted"
+)
+
+type RequestResult struct {
+	ConnectionID     string         `json:"connection_id"`
+	Sequence         int            `json:"sequence"`
+	Outcome          RequestOutcome `json:"outcome"`
+	StatusCode       int            `json:"status_code,omitempty"`
+	Error            string         `json:"error,omitempty"`
+	LatencyMS        float64        `json:"latency_ms,omitempty"`
+	ValidationFailed bool           `json:"validation_failed,omitempty"`
+	Skipped          bool           `json:"skipped,omitempty"`
+}
+
+type ConnectionResult struct {
+	ConnectionID string            `json:"connection_id"`
+	Outcome      ConnectionOutcome `json:"outcome"`
+	Requests     []RequestResult   `json:"requests"`
+}
+
 type Summary struct {
 	RequestsSent       int64
 	ResponsesReceived  int64
@@ -39,6 +73,8 @@ type Summary struct {
 	ConnectionsDone    int64
 	ConnectionsAborted int64
 	Outcome            RunOutcome
+	RequestResults     []RequestResult
+	ConnectionResults  []ConnectionResult
 }
 
 type Engine struct {
@@ -124,6 +160,7 @@ func (e *Engine) Replay(ctx context.Context, events []model.Event) (Summary, err
 	close(results)
 
 	final := Summary{Outcome: RunSuccess}
+	var allRequestResults []RequestResult
 	for s := range results {
 		final.RequestsSent += s.RequestsSent
 		final.ResponsesReceived += s.ResponsesReceived
@@ -132,7 +169,14 @@ func (e *Engine) Replay(ctx context.Context, events []model.Event) (Summary, err
 		final.Skipped += s.Skipped
 		final.ConnectionsDone += s.ConnectionsDone
 		final.ConnectionsAborted += s.ConnectionsAborted
+		if len(s.RequestResults) > 0 {
+			allRequestResults = append(allRequestResults, s.RequestResults...)
+		}
+		if len(s.ConnectionResults) > 0 {
+			final.ConnectionResults = append(final.ConnectionResults, s.ConnectionResults...)
+		}
 	}
+	final.RequestResults = allRequestResults
 	if final.ConnectionsAborted > 0 {
 		final.Outcome = RunPartialSuccess
 	}
@@ -180,22 +224,45 @@ func groupResponseEventsByConnectionSequence(events []model.Event) map[string]ma
 	return grouped
 }
 
-func (e *Engine) replayConnection(ctx context.Context, requests []model.Event, responsesBySequence map[int]model.Event) Summary {
-	return e.replayConnectionWithCheckpoint(ctx, requests, responsesBySequence, nil)
-}
-
 func (e *Engine) replayConnectionWithCheckpoint(ctx context.Context, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
+	// Create a per-connection client/transport to ensure socket isolation per connection_id.
+	client, transport := e.makePerConnectionClient()
+	defer func() {
+		if transport != nil {
+			transport.CloseIdleConnections()
+		}
+	}()
+
 	if e.shouldUseHTTP2MultiplexedMode(requests) {
-		return e.replayConnectionHTTP2Multiplexed(ctx, requests, responsesBySequence, checkpoints)
+		return e.replayConnectionHTTP2Multiplexed(ctx, client, requests, responsesBySequence, checkpoints)
 	}
-	return e.replayConnectionSerialized(ctx, requests, responsesBySequence, checkpoints)
+	return e.replayConnectionSerialized(ctx, client, requests, responsesBySequence, checkpoints)
 }
 
-func (e *Engine) replayConnectionSerialized(ctx context.Context, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
+func (e *Engine) makePerConnectionClient() (*http.Client, *http.Transport) {
+	dialer := &net.Dialer{Timeout: e.cfg.Replay.Timeout.Connect, KeepAlive: e.cfg.Replay.Timeout.IdleConnection}
+	tr := &http.Transport{
+		DialContext:         dialer.DialContext,
+		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
+		IdleConnTimeout:     e.cfg.Replay.Timeout.IdleConnection,
+		MaxIdleConns:        2,
+		MaxIdleConnsPerHost: 1,
+	}
+	client := &http.Client{
+		Timeout:   e.cfg.Replay.Timeout.Request,
+		Transport: tr,
+	}
+	return client, tr
+}
+
+func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Client, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
 	result := Summary{}
 	if len(requests) == 0 {
 		return result
 	}
+
+	connID := requests[0].ConnectionID
+	connResult := ConnectionResult{ConnectionID: connID, Outcome: ConnectionCompleted, Requests: []RequestResult{}}
 
 	var previousTimestamp time.Time
 	previousTimestampSet := false
@@ -219,22 +286,45 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, requests []mode
 			previousTimestampSet = true
 		}
 
+		reqRes := RequestResult{ConnectionID: requestEvent.ConnectionID, Sequence: requestEvent.Sequence}
+
 		if checkpoints.alreadyProcessed(requestEvent.ConnectionID, requestEvent.Sequence) {
 			result.Skipped++
+			reqRes.Outcome = RequestSkipped
+			reqRes.Skipped = true
+			connResult.Requests = append(connResult.Requests, reqRes)
+			result.RequestResults = append(result.RequestResults, reqRes)
 			continue
 		}
 
 		if e.shouldSkipByIdempotencyPolicy(requestEvent) {
 			result.Skipped++
+			reqRes.Outcome = RequestSkipped
+			reqRes.Skipped = true
 			if err := checkpoints.markProcessed(requestEvent.ConnectionID, requestEvent.Sequence); err != nil {
 				result.ConnectionsAborted++
 				result.Outcome = RunFailed
+				reqRes.Error = err.Error()
+				connResult.Requests = append(connResult.Requests, reqRes)
+				result.RequestResults = append(result.RequestResults, reqRes)
 				return result
 			}
+			connResult.Requests = append(connResult.Requests, reqRes)
+			result.RequestResults = append(result.RequestResults, reqRes)
 			continue
 		}
 
-		exec, err := e.sendRequest(ctx, requestEvent)
+		// Dry-run: do not send network requests; count as skipped (do not persist checkpoint)
+		if e.cfg.Replay.DryRun {
+			result.Skipped++
+			reqRes.Outcome = RequestSkipped
+			reqRes.Skipped = true
+			connResult.Requests = append(connResult.Requests, reqRes)
+			result.RequestResults = append(result.RequestResults, reqRes)
+			continue
+		}
+
+		exec, err := e.sendRequest(ctx, client, requestEvent)
 		label := requestEvent.HTTP.Path
 		if label == "" {
 			label = "unknown"
@@ -244,24 +334,39 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, requests []mode
 			result.SendErrors++
 			result.ConnectionsAborted++
 			result.Outcome = RunPartialSuccess
+			reqRes.Outcome = RequestSendError
+			reqRes.Error = err.Error()
+			connResult.Requests = append(connResult.Requests, reqRes)
+			result.RequestResults = append(result.RequestResults, reqRes)
 			continue
 		}
 
 		result.RequestsSent++
 		result.ResponsesReceived++
+		reqRes.Outcome = RequestResponseReceived
+		reqRes.StatusCode = exec.statusCode
+		reqRes.LatencyMS = exec.latencyMS
+
 		if err := checkpoints.markProcessed(requestEvent.ConnectionID, requestEvent.Sequence); err != nil {
 			result.ConnectionsAborted++
 			result.Outcome = RunFailed
+			reqRes.Error = err.Error()
+			connResult.Requests = append(connResult.Requests, reqRes)
+			result.RequestResults = append(result.RequestResults, reqRes)
 			return result
 		}
 		if expected, ok := responsesBySequence[requestEvent.Sequence]; ok {
 			if e.responseValidationFailed(expected, exec) {
 				result.ValidationFailed++
+				reqRes.Outcome = RequestValidationFailed
+				reqRes.ValidationFailed = true
 				if result.Outcome == "" {
 					result.Outcome = RunPartialSuccess
 				}
 			}
 		}
+		connResult.Requests = append(connResult.Requests, reqRes)
+		result.RequestResults = append(result.RequestResults, reqRes)
 		e.metrics.LabelLatencyHistogram.WithLabelValues(
 			e.cfg.Labels.CollectionID,
 			label,
@@ -299,10 +404,17 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, requests []mode
 			result.Outcome = RunSuccess
 		}
 	}
+	// finalize connection result outcome
+	if result.ConnectionsAborted > 0 {
+		connResult.Outcome = ConnectionAborted
+	} else {
+		connResult.Outcome = ConnectionCompleted
+	}
+	result.ConnectionResults = append(result.ConnectionResults, connResult)
 	return result
 }
 
-func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
+func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *http.Client, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
 	streams := groupRequestsByStream(requests)
 	if len(streams) == 0 {
 		return Summary{ConnectionsDone: 1, Outcome: RunSuccess}
@@ -324,7 +436,7 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, requests 
 			case streamSem <- struct{}{}:
 			}
 			defer func() { <-streamSem }()
-			results <- e.replayConnectionSerialized(ctx, streamRequests, responsesBySequence, checkpoints)
+			results <- e.replayConnectionSerialized(ctx, client, streamRequests, responsesBySequence, checkpoints)
 		}()
 	}
 
@@ -332,6 +444,7 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, requests 
 	close(results)
 
 	aggregated := Summary{Outcome: RunSuccess}
+	var combinedRequests []RequestResult
 	for streamResult := range results {
 		aggregated.RequestsSent += streamResult.RequestsSent
 		aggregated.ResponsesReceived += streamResult.ResponsesReceived
@@ -339,6 +452,9 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, requests 
 		aggregated.ValidationFailed += streamResult.ValidationFailed
 		aggregated.Skipped += streamResult.Skipped
 		aggregated.ConnectionsAborted += streamResult.ConnectionsAborted
+		if len(streamResult.RequestResults) > 0 {
+			combinedRequests = append(combinedRequests, streamResult.RequestResults...)
+		}
 	}
 
 	if aggregated.ConnectionsAborted > 0 {
@@ -353,6 +469,17 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, requests 
 	if aggregated.ConnectionsAborted == 0 {
 		aggregated.ConnectionsDone = 1
 	}
+	// Single connection, collect connection-level result
+	connID := ""
+	if len(requests) > 0 {
+		connID = requests[0].ConnectionID
+	}
+	connResult := ConnectionResult{ConnectionID: connID, Outcome: ConnectionCompleted, Requests: combinedRequests}
+	if aggregated.ConnectionsAborted > 0 {
+		connResult.Outcome = ConnectionAborted
+	}
+	aggregated.ConnectionResults = append(aggregated.ConnectionResults, connResult)
+	aggregated.RequestResults = combinedRequests
 	return aggregated
 }
 
@@ -534,7 +661,7 @@ func hasHeaderValue(headers map[string][]string, name string) bool {
 	return false
 }
 
-func (e *Engine) sendRequest(ctx context.Context, requestEvent model.Event) (requestExecution, error) {
+func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEvent model.Event) (requestExecution, error) {
 	maxAttempts := e.cfg.Replay.Retry.MaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 1
@@ -543,7 +670,7 @@ func (e *Engine) sendRequest(ctx context.Context, requestEvent model.Event) (req
 	var lastExec requestExecution
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		exec, err := e.executeRequest(ctx, requestEvent)
+		exec, err := e.executeRequest(ctx, client, requestEvent)
 		if err != nil {
 			lastErr = err
 			if attempt == maxAttempts || !e.shouldRetryError(err) {
@@ -571,7 +698,7 @@ func (e *Engine) sendRequest(ctx context.Context, requestEvent model.Event) (req
 	return lastExec, nil
 }
 
-func (e *Engine) executeRequest(ctx context.Context, requestEvent model.Event) (requestExecution, error) {
+func (e *Engine) executeRequest(ctx context.Context, client *http.Client, requestEvent model.Event) (requestExecution, error) {
 	requestURL, err := e.buildRequestURL(requestEvent)
 	if err != nil {
 		return requestExecution{}, err
@@ -603,12 +730,23 @@ func (e *Engine) executeRequest(ctx context.Context, requestEvent model.Event) (
 	for _, headerName := range e.cfg.Header.Drop {
 		req.Header.Del(headerName)
 	}
+
+	// Automatic Host/:authority rewrite when override_url is set.
+	if e.cfg.Target.OverrideURL != "" {
+		if override, err := url.Parse(e.cfg.Target.OverrideURL); err == nil {
+			// set request Host to override host (preserves path/query in URL)
+			req.Host = override.Host
+			// also set Host header explicitly for clarity
+			req.Header.Set("Host", override.Host)
+		}
+	}
+
 	for key, value := range e.cfg.Header.Set {
 		req.Header.Set(key, value)
 	}
 
 	start := time.Now()
-	resp, err := e.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return requestExecution{}, err
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/reqfleet/replay/internal/config"
 	"github.com/reqfleet/replay/internal/engine"
@@ -19,6 +20,9 @@ import (
 func main() {
 	configPath := flag.String("config", "", "path to config.yaml (optional)")
 	logPath := flag.String("log", "", "path to requests.log NDJSON file")
+	dryRunFlag := flag.Bool("dry-run", false, "dry run mode: do not send network requests")
+	overrideFlag := flag.String("override-url", "", "override target URL (overrides config)")
+	requireOverride := flag.Bool("require-override", false, "fail if override-url is required but missing")
 	flag.Parse()
 
 	if *logPath == "" {
@@ -29,6 +33,23 @@ func main() {
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Printf("load config: %v", err)
+		os.Exit(2)
+	}
+	// Apply environment overrides (env > YAML)
+	cfg.ApplyEnv()
+	// Apply CLI overrides with higher precedence for safety-related flags
+	if *dryRunFlag {
+		cfg.Replay.DryRun = true
+	}
+	if *overrideFlag != "" {
+		cfg.Target.OverrideURL = *overrideFlag
+	}
+	if *requireOverride {
+		cfg.Target.Require = true
+	}
+
+	if cfg.Target.Require && cfg.Target.OverrideURL == "" {
+		log.Println("target override required but missing; aborting")
 		os.Exit(2)
 	}
 	for key, value := range cfg.Env {
@@ -45,7 +66,15 @@ func main() {
 	}
 
 	registry := metrics.New()
+	// seed labels early so collectors and the server can report immediately
+	registry.SeedEngineLabels(cfg.Labels)
+	var stopMetrics func()
 	if cfg.Metrics.Enabled {
+		// start runtime collectors (threads/memory/CPU)
+		stopMetrics = registry.StartRuntimeCollection(cfg.Labels, 5*time.Second)
+		if stopMetrics != nil {
+			defer stopMetrics()
+		}
 		mux := http.NewServeMux()
 		mux.Handle(cfg.Metrics.Path, registry.Handler())
 		go func() {
