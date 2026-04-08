@@ -49,7 +49,7 @@ func New() *Registry {
 		CPU: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "shibuya",
 			Name:      "cpu_gauge",
-			Help:      "CPU used by engine",
+			Help:      "Logical CPUs available to the process (not CPU utilization)",
 		}, []string{"collection_id", "plan_id", "run_id", "engine_no", "zone"}),
 		Mem: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "shibuya",

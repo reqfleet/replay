@@ -14,6 +14,7 @@ import (
 	"github.com/reqfleet/replay/internal/config"
 	"github.com/reqfleet/replay/internal/engine"
 	"github.com/reqfleet/replay/internal/metrics"
+	"github.com/reqfleet/replay/internal/model"
 	"github.com/reqfleet/replay/internal/parser"
 )
 
@@ -59,11 +60,8 @@ func main() {
 		}
 	}
 
-	events, err := parser.ParseFile(*logPath)
-	if err != nil {
-		log.Printf("parse log file: %v", err)
-		os.Exit(2)
-	}
+	// We'll stream the parsed events into the engine to avoid building
+	// a large in-memory slice for big log files.
 
 	registry := metrics.New()
 	// seed labels early so collectors and the server can report immediately
@@ -89,9 +87,31 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	summary, err := replayEngine.Replay(ctx, events)
-	if err != nil {
-		log.Printf("replay failed: %v", err)
+	eventsCh := make(chan model.Event)
+	var summary engine.Summary
+	var replayErr error
+	done := make(chan struct{})
+	go func() {
+		summary, replayErr = replayEngine.ReplayStream(ctx, eventsCh)
+		close(done)
+	}()
+
+	if err := parser.ParseFileStream(*logPath, func(e model.Event) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case eventsCh <- e:
+			return nil
+		}
+	}); err != nil {
+		close(eventsCh)
+		log.Printf("parse log file: %v", err)
+		os.Exit(2)
+	}
+	close(eventsCh)
+	<-done
+	if replayErr != nil {
+		log.Printf("replay failed: %v", replayErr)
 		os.Exit(1)
 	}
 
@@ -111,7 +131,7 @@ func main() {
 	case engine.RunSuccess:
 		os.Exit(0)
 	case engine.RunPartialSuccess:
-		if os.Getenv("REPLAY_PARTIAL_SUCCESS_EXIT_ZERO") == "1" {
+		if cfg.Replay.PartialSuccessExitZero {
 			os.Exit(0)
 		}
 		os.Exit(1)

@@ -24,6 +24,7 @@ type ReplayConfig struct {
 	MaxActiveConnectionsPerEngine int               `yaml:"max_active_connections_per_engine"`
 	HTTP2                         HTTP2Config       `yaml:"http2"`
 	DryRun                        bool              `yaml:"dry_run"`
+	PartialSuccessExitZero        bool              `yaml:"partial_success_exit_zero"`
 	Timeout                       TimeoutConfig     `yaml:"timeout"`
 	Retry                         RetryConfig       `yaml:"retry"`
 	Validation                    ValidationConfig  `yaml:"validation"`
@@ -118,7 +119,8 @@ func Default() Config {
 				Mode:                 "serialized",
 				MaxConcurrentStreams: 16,
 			},
-			DryRun: false,
+			DryRun:                 false,
+			PartialSuccessExitZero: false,
 			Timeout: TimeoutConfig{
 				Connect:        3 * time.Second,
 				Request:        30 * time.Second,
@@ -269,5 +271,10 @@ func (c *Config) ApplyEnv() {
 	}
 	if v, ok := os.LookupEnv("REPLAY_LABEL_ZONE"); ok && v != "" {
 		c.Labels.Zone = v
+	}
+	if v, ok := os.LookupEnv("REPLAY_PARTIAL_SUCCESS_EXIT_ZERO"); ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Replay.PartialSuccessExitZero = b
+		}
 	}
 }

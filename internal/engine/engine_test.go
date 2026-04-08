@@ -18,6 +18,26 @@ import (
 	"github.com/reqfleet/replay/internal/model"
 )
 
+// runReplay streams the provided events into the engine's ReplayStream and
+// waits for completion. This replaces the previous synchronous Replay API.
+func runReplay(eng *Engine, events []model.Event) (Summary, error) {
+	ctx := context.Background()
+	ch := make(chan model.Event)
+	var summary Summary
+	var err error
+	done := make(chan struct{})
+	go func() {
+		summary, err = eng.ReplayStream(ctx, ch)
+		close(done)
+	}()
+	for _, e := range events {
+		ch <- e
+	}
+	close(ch)
+	<-done
+	return summary, err
+}
+
 func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	var attempts int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -60,7 +80,7 @@ func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
-	summary, err := eng.Replay(context.Background(), events)
+	summary, err := runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}
@@ -112,7 +132,7 @@ func TestReplayMarksValidationFailedOnStatusMismatch(t *testing.T) {
 		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
-	summary, err := eng.Replay(context.Background(), events)
+	summary, err := runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}
@@ -172,7 +192,7 @@ func TestReplayHeaderValidationIgnoresConfiguredHeaders(t *testing.T) {
 		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
-	summary, err := eng.Replay(context.Background(), events)
+	summary, err := runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}
@@ -229,7 +249,7 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
-	summary, err := eng.Replay(context.Background(), events)
+	summary, err := runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}
@@ -274,7 +294,7 @@ func TestReplaySkipsMutationWithoutIdempotencyHeader(t *testing.T) {
 		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
-	summary, err := eng.Replay(context.Background(), events)
+	summary, err := runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}
@@ -322,7 +342,7 @@ func TestReplayFailsWhenLifecycleCloseMissing(t *testing.T) {
 		},
 	}
 
-	_, err = eng.Replay(context.Background(), events)
+	_, err = runReplay(eng, events)
 	if err == nil {
 		t.Fatal("expected lifecycle validation error")
 	}
@@ -371,7 +391,7 @@ func TestReplayRespectsShardAssignment(t *testing.T) {
 	}
 
 	eng := New(cfg, metrics.New())
-	summary, err := eng.Replay(context.Background(), events)
+	summary, err := runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}
@@ -425,7 +445,7 @@ func TestReplaySkipsAlreadyCheckpointedSequence(t *testing.T) {
 		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
-	summary, err := eng.Replay(context.Background(), events)
+	summary, err := runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}
@@ -476,7 +496,7 @@ func TestReplayHTTP2SerializedMode(t *testing.T) {
 		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
-	_, err = eng.Replay(context.Background(), events)
+	_, err = runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}
@@ -522,7 +542,7 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
-	_, err = eng.Replay(context.Background(), events)
+	_, err = runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}
@@ -562,7 +582,7 @@ func TestPerConnectionSocketOwnership(t *testing.T) {
 		{Type: model.EventConnectionClose, ConnectionID: "c2"},
 	}
 
-	summary, err := eng.Replay(context.Background(), events)
+	summary, err := runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}
@@ -603,7 +623,7 @@ func TestDryRunNoNetwork(t *testing.T) {
 		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
-	summary, err := eng.Replay(context.Background(), events)
+	summary, err := runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}
@@ -647,7 +667,7 @@ func TestOverrideHostRewrite(t *testing.T) {
 		{Type: model.EventConnectionClose, ConnectionID: "c1"},
 	}
 
-	summary, err := eng.Replay(context.Background(), events)
+	summary, err := runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}

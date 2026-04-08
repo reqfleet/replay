@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -83,6 +85,8 @@ type Engine struct {
 	client  *http.Client
 }
 
+const maxBodyRead = 10 * 1024 * 1024 // 10 MiB
+
 type requestExecution struct {
 	latencyMS   float64
 	statusCode  int
@@ -108,19 +112,12 @@ func New(cfg config.Config, registry *metrics.Registry) *Engine {
 	return &Engine{cfg: cfg, metrics: registry, client: client}
 }
 
-func (e *Engine) Replay(ctx context.Context, events []model.Event) (Summary, error) {
-	groups := groupRequestEventsByConnection(events)
-	if len(groups) == 0 {
-		return Summary{Outcome: RunFailed}, fmt.Errorf("no request events found")
-	}
-	groups = e.filterGroupsByShard(groups)
-	if len(groups) == 0 {
-		return Summary{Outcome: RunSuccess}, nil
-	}
-	if err := e.validateLifecycleRequirements(groups, events); err != nil {
-		return Summary{Outcome: RunFailed}, err
-	}
-	responseExpectations := groupResponseEventsByConnectionSequence(events)
+// ReplayStream processes events from the provided channel as they arrive.
+// Connections are scheduled for replay when their corresponding
+// connection_close event is observed or when the input channel is closed.
+// This allows streaming large logs without holding all events in memory.
+func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (Summary, error) {
+	// checkpoint store
 	checkpoints, err := newCheckpointStore(e.cfg.Replay.Checkpoint.File)
 	if err != nil {
 		return Summary{Outcome: RunFailed}, err
@@ -130,7 +127,7 @@ func (e *Engine) Replay(ctx context.Context, events []model.Event) (Summary, err
 	vus := e.cfg.Replay.MaxVirtualUsersPerEngine
 	connSem := make(chan struct{}, e.cfg.Replay.MaxActiveConnectionsPerEngine)
 	jobs := make(chan replayJob)
-	results := make(chan Summary, len(groups))
+	results := make(chan Summary, 1024)
 
 	var wg sync.WaitGroup
 	for i := 0; i < vus; i++ {
@@ -151,14 +148,114 @@ func (e *Engine) Replay(ctx context.Context, events []model.Event) (Summary, err
 		}()
 	}
 
-	for connID, reqs := range groups {
-		jobs <- replayJob{requests: reqs, responsesBySequence: responseExpectations[connID]}
+	// consumer: collect per-connection buffers and schedule when ready
+	type connBuf struct {
+		requests  []model.Event
+		responses map[int]model.Event
+		hasOpen   bool
+		hasClose  bool
 	}
+
+	bufs := make(map[string]*connBuf)
+	var parseErr error
+
+	// drain events and schedule jobs when connections close
+	for ev := range events {
+		// ignore meta events
+		if ev.Type == model.EventMeta {
+			continue
+		}
+		// ensure we have a buffer for connections that carry events
+		id := ev.ConnectionID
+		if id == "" {
+			// events without connection id cannot be scheduled (ignore)
+			continue
+		}
+		b := bufs[id]
+		if b == nil {
+			b = &connBuf{responses: make(map[int]model.Event)}
+			bufs[id] = b
+		}
+
+		switch ev.Type {
+		case model.EventRequest:
+			b.requests = append(b.requests, ev)
+
+		case model.EventResponse:
+			if b.responses == nil {
+				b.responses = make(map[int]model.Event)
+			}
+			b.responses[ev.Sequence] = ev
+
+		case model.EventConnectionOpen:
+			b.hasOpen = true
+
+		case model.EventConnectionClose:
+			b.hasClose = true
+			// if there are no requests for this connection, drop buffer
+			if len(b.requests) == 0 {
+				delete(bufs, id)
+				continue
+			}
+			// lifecycle validation: require open before scheduling if configured
+			if e.cfg.Replay.Lifecycle.RequireOpen && !b.hasOpen {
+				parseErr = fmt.Errorf("connection %q missing connection_open", id)
+				break
+			}
+			// sharding: only schedule if this connection belongs to this shard
+			if !connectionBelongsToShard(id, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
+				delete(bufs, id)
+				continue
+			}
+			// sort requests by sequence
+			sort.Slice(b.requests, func(i, j int) bool { return b.requests[i].Sequence < b.requests[j].Sequence })
+			jobs <- replayJob{requests: b.requests, responsesBySequence: b.responses}
+			delete(bufs, id)
+		}
+		if parseErr != nil {
+			break
+		}
+	}
+
+	if parseErr != nil {
+		// stop scheduling more jobs
+		close(jobs)
+		// wait for workers to finish and drain results
+		go func() { wg.Wait(); close(results) }()
+		// collect any partial results (ignore aggregation semantics)
+		for range results {
+		}
+		return Summary{Outcome: RunFailed}, parseErr
+	}
+
+	// end of input: schedule any remaining connections
+	for id, b := range bufs {
+		if len(b.requests) == 0 {
+			continue
+		}
+		if e.cfg.Replay.Lifecycle.RequireClose && !b.hasClose {
+			close(jobs)
+			go func() { wg.Wait(); close(results) }()
+			for range results {
+			}
+			return Summary{Outcome: RunFailed}, fmt.Errorf("connection %q missing connection_close", id)
+		}
+		if !connectionBelongsToShard(id, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
+			continue
+		}
+		sort.Slice(b.requests, func(i, j int) bool { return b.requests[i].Sequence < b.requests[j].Sequence })
+		jobs <- replayJob{requests: b.requests, responsesBySequence: b.responses}
+	}
+
 	close(jobs)
 
-	wg.Wait()
-	close(results)
+	// close results when workers are done
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
+	// aggregate results
 	final := Summary{Outcome: RunSuccess}
 	var allRequestResults []RequestResult
 	for s := range results {
@@ -192,36 +289,6 @@ func (e *Engine) Replay(ctx context.Context, events []model.Event) (Summary, err
 type replayJob struct {
 	requests            []model.Event
 	responsesBySequence map[int]model.Event
-}
-
-func groupRequestEventsByConnection(events []model.Event) map[string][]model.Event {
-	groups := make(map[string][]model.Event)
-	for _, event := range events {
-		if event.Type != model.EventRequest {
-			continue
-		}
-		groups[event.ConnectionID] = append(groups[event.ConnectionID], event)
-	}
-	for id := range groups {
-		sort.Slice(groups[id], func(i, j int) bool {
-			return groups[id][i].Sequence < groups[id][j].Sequence
-		})
-	}
-	return groups
-}
-
-func groupResponseEventsByConnectionSequence(events []model.Event) map[string]map[int]model.Event {
-	grouped := make(map[string]map[int]model.Event)
-	for _, event := range events {
-		if event.Type != model.EventResponse {
-			continue
-		}
-		if _, ok := grouped[event.ConnectionID]; !ok {
-			grouped[event.ConnectionID] = make(map[int]model.Event)
-		}
-		grouped[event.ConnectionID][event.Sequence] = event
-	}
-	return grouped
 }
 
 func (e *Engine) replayConnectionWithCheckpoint(ctx context.Context, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
@@ -281,7 +348,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.Outcome = RunFailed
 			return result
 		}
-		if parsedTimestamp, ok := parseTimestamp(requestEvent.Timestamp); ok {
+		if parsedTimestamp, ok := model.ParseTimestamp(requestEvent.Timestamp); ok {
 			previousTimestamp = parsedTimestamp
 			previousTimestampSet = true
 		}
@@ -536,50 +603,11 @@ func connectionBelongsToShard(connectionID string, shardIndex, shardCount int) b
 	return int(hasher.Sum32()%uint32(shardCount)) == shardIndex
 }
 
-func (e *Engine) validateLifecycleRequirements(requestGroups map[string][]model.Event, events []model.Event) error {
-	lifecycles := collectLifecycleByConnection(events)
-	for connectionID := range requestGroups {
-		lifecycle := lifecycles[connectionID]
-		if e.cfg.Replay.Lifecycle.RequireOpen && !lifecycle.hasOpen {
-			return fmt.Errorf("connection %q missing connection_open event", connectionID)
-		}
-		if e.cfg.Replay.Lifecycle.RequireClose && !lifecycle.hasClose {
-			return fmt.Errorf("connection %q missing connection_close event", connectionID)
-		}
-	}
-	return nil
-}
-
-type connectionLifecycle struct {
-	hasOpen  bool
-	hasClose bool
-}
-
-func collectLifecycleByConnection(events []model.Event) map[string]connectionLifecycle {
-	byConnection := make(map[string]connectionLifecycle)
-	for _, event := range events {
-		if event.ConnectionID == "" {
-			continue
-		}
-		lifecycle := byConnection[event.ConnectionID]
-		switch event.Type {
-		case model.EventConnectionOpen:
-			lifecycle.hasOpen = true
-		case model.EventConnectionClose:
-			lifecycle.hasClose = true
-		default:
-			continue
-		}
-		byConnection[event.ConnectionID] = lifecycle
-	}
-	return byConnection
-}
-
 func (e *Engine) sleepForPacing(ctx context.Context, previous time.Time, previousSet bool, currentRaw string) error {
 	if !e.cfg.Replay.Pacing.Enabled || !previousSet {
 		return nil
 	}
-	current, ok := parseTimestamp(currentRaw)
+	current, ok := model.ParseTimestamp(currentRaw)
 	if !ok || !current.After(previous) {
 		return nil
 	}
@@ -599,19 +627,7 @@ func (e *Engine) sleepForPacing(ctx context.Context, previous time.Time, previou
 	}
 }
 
-func parseTimestamp(raw string) (time.Time, bool) {
-	if raw == "" {
-		return time.Time{}, false
-	}
-	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
-		return parsed, true
-	}
-	parsed, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return parsed, true
-}
+// timestamp parsing moved to internal/model/ for reuse across packages
 
 func (e *Engine) shouldSkipByIdempotencyPolicy(request model.Event) bool {
 	policy := e.cfg.Replay.Idempotency
@@ -621,7 +637,15 @@ func (e *Engine) shouldSkipByIdempotencyPolicy(request model.Event) bool {
 
 	method := strings.ToUpper(strings.TrimSpace(request.HTTP.Method))
 	if method == "" {
-		method = http.MethodGet
+		// If the method is not recorded, try to infer it: if the event
+		// contains a body or a Content-Type header, assume POST. Otherwise
+		// default to GET. This keeps behavior compatible with recorded
+		// traffic where body-bearing requests are typically POSTs.
+		if request.Body.Content != "" || request.Body.SizeBytes > 0 || hasHeaderValue(request.Headers, "content-type") {
+			method = http.MethodPost
+		} else {
+			method = http.MethodGet
+		}
 	}
 
 	blockedMethods := make(map[string]struct{}, len(policy.BlockMethods))
@@ -710,7 +734,7 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 		if decodeErr != nil {
 			return requestExecution{}, fmt.Errorf("decode body: %w", decodeErr)
 		}
-		bodyReader = strings.NewReader(string(decoded))
+		bodyReader = bytes.NewReader(decoded)
 	}
 
 	method := requestEvent.HTTP.Method
@@ -751,7 +775,10 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 		return requestExecution{}, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	// Limit the amount of response body read to avoid unbounded memory growth.
+	// This prevents OOMs when replaying unexpectedly large responses.
+	lr := io.LimitReader(resp.Body, maxBodyRead)
+	body, err := io.ReadAll(lr)
 	if err != nil {
 		return requestExecution{}, err
 	}
@@ -764,7 +791,7 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	}
 
 	return requestExecution{
-		latencyMS:   float64(time.Since(start).Milliseconds()),
+		latencyMS:   time.Since(start).Seconds() * 1000,
 		statusCode:  resp.StatusCode,
 		egressBytes: int64(len(body)),
 		headers:     headers,
@@ -845,7 +872,17 @@ func backoffDuration(strategy string, attempt int) time.Duration {
 	case "fixed":
 		return base
 	case "exponential":
-		d := base << (attempt - 1)
+		// Use a capped exponential backoff computed with floats to avoid
+		// undefined behavior or overflow when shifting time.Duration.
+		exp := attempt - 1
+		if exp < 0 {
+			exp = 0
+		}
+		if exp > 30 { // cap exponent to avoid absurd durations
+			exp = 30
+		}
+		backoffNano := float64(base) * math.Pow(2, float64(exp))
+		d := time.Duration(backoffNano)
 		if d > 5*time.Second {
 			return 5 * time.Second
 		}
