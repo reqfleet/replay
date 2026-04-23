@@ -117,19 +117,56 @@ func New(cfg config.Config, registry *metrics.Registry) *Engine {
 // connection_close event is observed or when the input channel is closed.
 // This allows streaming large logs without holding all events in memory.
 func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (Summary, error) {
-	// checkpoint store
 	checkpoints, err := newCheckpointStore(e.cfg.Replay.Checkpoint.File)
 	if err != nil {
 		return Summary{Outcome: RunFailed}, err
 	}
 
 	e.metrics.SeedEngineLabels(e.cfg.Labels)
-	vus := e.cfg.Replay.MaxVirtualUsersPerEngine
-	connSem := make(chan struct{}, e.cfg.Replay.MaxActiveConnectionsPerEngine)
 	jobs := make(chan replayJob)
 	results := make(chan Summary, 1024)
 
 	var wg sync.WaitGroup
+	e.startWorkers(ctx, &wg, jobs, results, checkpoints)
+
+	parseErr := e.bufferAndSchedule(events, jobs)
+	if parseErr != nil {
+		// drain remaining events to unblock producer
+		go func() {
+			for range events {
+			}
+		}()
+		// stop scheduling more jobs
+		close(jobs)
+		// wait for workers to finish and drain results
+		go func() { wg.Wait(); close(results) }()
+		for range results {
+		}
+		return Summary{Outcome: RunFailed}, parseErr
+	}
+
+	close(jobs)
+
+	// close results when workers are done
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	return e.aggregateResults(results), nil
+}
+
+type connBuf struct {
+	requests  []model.Event
+	responses map[int]model.Event
+	hasOpen   bool
+	hasClose  bool
+}
+
+func (e *Engine) startWorkers(ctx context.Context, wg *sync.WaitGroup, jobs <-chan replayJob, results chan<- Summary, checkpoints *checkpointStore) {
+	vus := e.cfg.Replay.MaxVirtualUsersPerEngine
+	connSem := make(chan struct{}, e.cfg.Replay.MaxActiveConnectionsPerEngine)
+
 	for i := 0; i < vus; i++ {
 		wg.Add(1)
 		go func() {
@@ -137,8 +174,7 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 			for job := range jobs {
 				select {
 				case <-ctx.Done():
-					results <- Summary{Outcome: RunFailed}
-					continue
+					return
 				case connSem <- struct{}{}:
 				}
 				s := e.replayConnectionWithCheckpoint(ctx, job.requests, job.responsesBySequence, checkpoints)
@@ -147,28 +183,18 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 			}
 		}()
 	}
+}
 
-	// consumer: collect per-connection buffers and schedule when ready
-	type connBuf struct {
-		requests  []model.Event
-		responses map[int]model.Event
-		hasOpen   bool
-		hasClose  bool
-	}
-
+func (e *Engine) bufferAndSchedule(events <-chan model.Event, jobs chan<- replayJob) error {
 	bufs := make(map[string]*connBuf)
 	var parseErr error
 
-	// drain events and schedule jobs when connections close
 	for ev := range events {
-		// ignore meta events
 		if ev.Type == model.EventMeta {
 			continue
 		}
-		// ensure we have a buffer for connections that carry events
 		id := ev.ConnectionID
 		if id == "" {
-			// events without connection id cannot be scheduled (ignore)
 			continue
 		}
 		b := bufs[id]
@@ -180,34 +206,27 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 		switch ev.Type {
 		case model.EventRequest:
 			b.requests = append(b.requests, ev)
-
 		case model.EventResponse:
 			if b.responses == nil {
 				b.responses = make(map[int]model.Event)
 			}
 			b.responses[ev.Sequence] = ev
-
 		case model.EventConnectionOpen:
 			b.hasOpen = true
-
 		case model.EventConnectionClose:
 			b.hasClose = true
-			// if there are no requests for this connection, drop buffer
 			if len(b.requests) == 0 {
 				delete(bufs, id)
 				continue
 			}
-			// lifecycle validation: require open before scheduling if configured
 			if e.cfg.Replay.Lifecycle.RequireOpen && !b.hasOpen {
 				parseErr = fmt.Errorf("connection %q missing connection_open", id)
 				break
 			}
-			// sharding: only schedule if this connection belongs to this shard
 			if !connectionBelongsToShard(id, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
 				delete(bufs, id)
 				continue
 			}
-			// sort requests by sequence
 			sort.Slice(b.requests, func(i, j int) bool { return b.requests[i].Sequence < b.requests[j].Sequence })
 			jobs <- replayJob{requests: b.requests, responsesBySequence: b.responses}
 			delete(bufs, id)
@@ -218,27 +237,15 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	}
 
 	if parseErr != nil {
-		// stop scheduling more jobs
-		close(jobs)
-		// wait for workers to finish and drain results
-		go func() { wg.Wait(); close(results) }()
-		// collect any partial results (ignore aggregation semantics)
-		for range results {
-		}
-		return Summary{Outcome: RunFailed}, parseErr
+		return parseErr
 	}
 
-	// end of input: schedule any remaining connections
 	for id, b := range bufs {
 		if len(b.requests) == 0 {
 			continue
 		}
 		if e.cfg.Replay.Lifecycle.RequireClose && !b.hasClose {
-			close(jobs)
-			go func() { wg.Wait(); close(results) }()
-			for range results {
-			}
-			return Summary{Outcome: RunFailed}, fmt.Errorf("connection %q missing connection_close", id)
+			return fmt.Errorf("connection %q missing connection_close", id)
 		}
 		if !connectionBelongsToShard(id, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
 			continue
@@ -247,15 +254,10 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 		jobs <- replayJob{requests: b.requests, responsesBySequence: b.responses}
 	}
 
-	close(jobs)
+	return nil
+}
 
-	// close results when workers are done
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// aggregate results
+func (e *Engine) aggregateResults(results <-chan Summary) Summary {
 	final := Summary{Outcome: RunSuccess}
 	var allRequestResults []RequestResult
 	for s := range results {
@@ -283,7 +285,7 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	if final.RequestsSent == 0 && final.Skipped == 0 {
 		final.Outcome = RunFailed
 	}
-	return final, nil
+	return final
 }
 
 type replayJob struct {

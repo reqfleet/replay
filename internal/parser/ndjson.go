@@ -123,6 +123,7 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 					return fmt.Errorf("line %d: invalid connection_close reason: %s", line, event.Reason)
 				}
 			}
+			delete(lastSeq, event.ConnectionID)
 
 		case model.EventMeta:
 			// already validated above
