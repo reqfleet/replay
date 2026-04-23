@@ -680,3 +680,112 @@ func TestOverrideHostRewrite(t *testing.T) {
 		t.Fatalf("seen host = %q, want %q", seenHost, expectedHost)
 	}
 }
+
+func TestOverrideURLPreservesQueryString(t *testing.T) {
+	var seenPath string
+	var seenRawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenRawQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.Target.OverrideURL = srv.URL
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: "c1",
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    "https",
+				Authority: "api.prod.example.com",
+				Path:      "/api/v1/login?redirect=/home",
+			},
+		},
+		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if summary.RequestsSent != 1 {
+		t.Fatalf("summary.RequestsSent = %d, want 1", summary.RequestsSent)
+	}
+	if seenPath != "/api/v1/login" {
+		t.Fatalf("seen path = %q, want %q", seenPath, "/api/v1/login")
+	}
+	if seenRawQuery != "redirect=/home" {
+		t.Fatalf("seen raw query = %q, want %q", seenRawQuery, "redirect=/home")
+	}
+}
+
+func TestReplayAbortsConnectionAfterSendError(t *testing.T) {
+	var attempts int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&attempts, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.Replay.Idempotency.Enabled = false
+	cfg.Replay.Lifecycle.RequireOpen = false
+	cfg.Replay.Lifecycle.RequireClose = false
+
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: "c1",
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    "http",
+				Authority: "127.0.0.1:1",
+				Path:      "/first",
+			},
+		},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: "c1",
+			Sequence:     2,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    "http",
+				Authority: srv.Listener.Addr().String(),
+				Path:      "/second",
+			},
+		},
+		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if summary.SendErrors != 1 {
+		t.Fatalf("summary.SendErrors = %d, want 1", summary.SendErrors)
+	}
+	if summary.ConnectionsAborted != 1 {
+		t.Fatalf("summary.ConnectionsAborted = %d, want 1", summary.ConnectionsAborted)
+	}
+	if summary.RequestsSent != 0 {
+		t.Fatalf("summary.RequestsSent = %d, want 0", summary.RequestsSent)
+	}
+	if atomic.LoadInt64(&attempts) != 0 {
+		t.Fatalf("second request attempt count = %d, want 0", attempts)
+	}
+}
