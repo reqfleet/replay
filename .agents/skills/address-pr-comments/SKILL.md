@@ -10,7 +10,7 @@ Use when: you need to fetch PR review comments for `reqfleet/replay`, triage the
 Prerequisites
 - `gh` CLI installed and authenticated (access to `reqfleet/replay`).
 - `jq` installed for JSON parsing.
-- You have a local clone of `reqfleet/replay` and a writable branch.
+- You have a local clone of `reqfleet/replay`.
 
 Quick fetch
 - Fetch the PR review JSON (returns a JSON structure containing `reviews` and `comments`):
@@ -48,11 +48,7 @@ Triage rules (suggested)
 - Discussion / clarification => `follow-up`
 
 Branch & workflow
-1. Create a working branch:
-
-```bash
-git checkout -b fix/{pr_number}/address-pr-comments
-```
+1. Stay on the current branch unless you specifically need to isolate the work elsewhere; there is no need to create a new branch just to address PR comments.
 
 2. For each comment, create a small, focused commit addressing that thread. Use conventional commit messages that reference the PR and thread when helpful, e.g.:
 
@@ -150,11 +146,11 @@ golangci-lint run ./...
 
 Committing and pushing
 - Follow your project's commit conventions. Prefer small, focused commits that reference the PR and the review thread.
-- Push and open a PR or push to the branch that the original PR can pick up:
+- If you need to share the work, push the current branch or otherwise use the repository's existing PR flow:
 
 ```bash
-git push --set-upstream origin fix/{pr_number}/address-pr-comments
-gh pr comment {pr_number} --body "Addressed review comments; pushed branch fix/{pr_number}/address-pr-comments. PTAL."
+git push
+gh pr comment {pr_number} --body "Addressed review comments. PTAL."
 ```
 
 Notes and limits
@@ -163,7 +159,7 @@ Notes and limits
 
 Questions to ask the user when invoked
 - Which PR number should I fetch and triage? (required)
-- Do you want me to create a branch and commit changes for you, or produce suggested patches for manual review?
+- Do you want me to commit changes for you, or produce suggested patches for manual review?
 
 Examples to try
 - `gh pr-review review view 123 --repo reqfleet/replay > pr_review.json` then `jq -r ...` to inspect comments.
