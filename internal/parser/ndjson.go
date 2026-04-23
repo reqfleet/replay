@@ -92,6 +92,7 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 	scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
 
 	line := 0
+	parsedEvents := 0
 	states := make(map[int]*connectionSequenceState)
 	stateForConnection := func(connectionID int) *connectionSequenceState {
 		state := states[connectionID]
@@ -109,34 +110,35 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
 			continue
 		}
+		parsedEvents++
 
-		// For the first line, validate meta and format_version
-		if line == 1 {
-			var meta map[string]interface{}
-			if err := json.Unmarshal(raw, &meta); err != nil {
-				return fmt.Errorf("line %d: invalid json: %w", line, err)
+		var rawEvent struct {
+			model.Event
+			ConnectionID *int `json:"connection_id"`
+		}
+		if err := json.Unmarshal(raw, &rawEvent); err != nil {
+			return fmt.Errorf("line %d: invalid json: %w", line, err)
+		}
+		event := rawEvent.Event
+		if rawEvent.ConnectionID != nil {
+			event.ConnectionID = *rawEvent.ConnectionID
+		}
+		hasConnectionID := rawEvent.ConnectionID != nil
+
+		// For the first parsed event, validate meta and format_version
+		if parsedEvents == 1 {
+			if event.Type != model.EventMeta {
+				return fmt.Errorf("line %d: must be meta event", line)
 			}
-			if t, ok := meta["type"].(string); !ok || t != string(model.EventMeta) {
-				return fmt.Errorf("line 1 must be meta event")
-			}
-			fv, ok := meta["format_version"].(string)
-			if !ok || fv == "" {
-				return fmt.Errorf("line 1: missing format_version")
+			fv := event.FormatVersion
+			if fv == "" {
+				return fmt.Errorf("line %d: missing format_version", line)
 			}
 			// require major version 1 for now
 			parts := strings.SplitN(fv, ".", 2)
 			if parts[0] != "1" {
-				return fmt.Errorf("unsupported format_version: %s", fv)
+				return fmt.Errorf("line %d: unsupported format_version: %s", line, fv)
 			}
-		}
-
-		var event model.Event
-		if err := json.Unmarshal(raw, &event); err != nil {
-			return fmt.Errorf("line %d: invalid json: %w", line, err)
-		}
-		var rawFields map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &rawFields); err != nil {
-			return fmt.Errorf("line %d: invalid json: %w", line, err)
 		}
 
 		// Basic timestamp validation when present
@@ -148,7 +150,7 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 
 		switch event.Type {
 		case model.EventRequest:
-			if _, ok := rawFields["connection_id"]; !ok {
+			if !hasConnectionID {
 				return fmt.Errorf("line %d: request missing connection_id", line)
 			}
 			if strings.Contains(strings.ToUpper(event.HTTP.Version), "HTTP/1.1") && event.StreamID == 0 {
@@ -170,7 +172,7 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			}
 
 		case model.EventResponse:
-			if _, ok := rawFields["connection_id"]; !ok {
+			if !hasConnectionID {
 				return fmt.Errorf("line %d: response missing connection_id", line)
 			}
 			if strings.Contains(strings.ToUpper(event.HTTP.Version), "HTTP/1.1") && event.StreamID == 0 {
@@ -183,12 +185,12 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			event.Sequence = sequence
 
 		case model.EventConnectionOpen:
-			if _, ok := rawFields["connection_id"]; !ok {
+			if !hasConnectionID {
 				return fmt.Errorf("line %d: connection_open missing connection_id", line)
 			}
 
 		case model.EventConnectionClose:
-			if _, ok := rawFields["connection_id"]; !ok {
+			if !hasConnectionID {
 				return fmt.Errorf("line %d: connection_close missing connection_id", line)
 			}
 			if event.Reason != "" {
