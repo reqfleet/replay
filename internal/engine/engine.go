@@ -765,6 +765,9 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	}
 
 	for key, values := range requestEvent.Headers {
+		if strings.HasPrefix(key, ":") {
+			continue
+		}
 		for _, value := range values {
 			req.Header.Add(key, value)
 		}
