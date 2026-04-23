@@ -121,6 +121,9 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	if err != nil {
 		return Summary{Outcome: RunFailed}, err
 	}
+	if checkpoints != nil {
+		defer checkpoints.Close()
+	}
 
 	e.metrics.SeedEngineLabels(e.cfg.Labels)
 	jobs := make(chan replayJob)
@@ -410,12 +413,18 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		if err != nil {
 			result.SendErrors++
 			result.ConnectionsAborted++
-			result.Outcome = RunPartialSuccess
+			if result.RequestsSent > 0 || result.Skipped > 0 {
+				result.Outcome = RunPartialSuccess
+			} else {
+				result.Outcome = RunFailed
+			}
 			reqRes.Outcome = RequestSendError
 			reqRes.Error = err.Error()
 			connResult.Requests = append(connResult.Requests, reqRes)
 			result.RequestResults = append(result.RequestResults, reqRes)
-			continue
+			connResult.Outcome = ConnectionAborted
+			result.ConnectionResults = append(result.ConnectionResults, connResult)
+			return result
 		}
 
 		result.RequestsSent++
@@ -645,18 +654,7 @@ func (e *Engine) shouldSkipByIdempotencyPolicy(request model.Event) bool {
 		return false
 	}
 
-	method := strings.ToUpper(strings.TrimSpace(request.HTTP.Method))
-	if method == "" {
-		// If the method is not recorded, try to infer it: if the event
-		// contains a body or a Content-Type header, assume POST. Otherwise
-		// default to GET. This keeps behavior compatible with recorded
-		// traffic where body-bearing requests are typically POSTs.
-		if request.Body.Content != "" || request.Body.SizeBytes > 0 || hasHeaderValue(request.Headers, "content-type") {
-			method = http.MethodPost
-		} else {
-			method = http.MethodGet
-		}
-	}
+	method := resolvedRequestMethod(request)
 
 	blockedMethods := make(map[string]struct{}, len(policy.BlockMethods))
 	for _, m := range policy.BlockMethods {
@@ -747,10 +745,7 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 		bodyReader = bytes.NewReader(decoded)
 	}
 
-	method := requestEvent.HTTP.Method
-	if method == "" {
-		method = http.MethodGet
-	}
+	method := resolvedRequestMethod(requestEvent)
 	req, err := http.NewRequestWithContext(ctx, method, requestURL, bodyReader)
 	if err != nil {
 		return requestExecution{}, err
@@ -960,7 +955,13 @@ func (e *Engine) buildRequestURL(event model.Event) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("parse override_url: %w", err)
 		}
-		override.Path = event.HTTP.Path
+		requestURI := event.HTTP.Path
+		parsedPath, err := url.ParseRequestURI(requestURI)
+		if err != nil {
+			return "", fmt.Errorf("parse request path: %w", err)
+		}
+		override = override.JoinPath(parsedPath.Path)
+		override.RawQuery = parsedPath.RawQuery
 		return override.String(), nil
 	}
 
@@ -975,4 +976,18 @@ func (e *Engine) buildRequestURL(event model.Event) (string, error) {
 		return "", fmt.Errorf("request path is required")
 	}
 	return fmt.Sprintf("%s://%s%s", scheme, event.HTTP.Authority, event.HTTP.Path), nil
+}
+
+func resolvedRequestMethod(request model.Event) string {
+	method := strings.ToUpper(strings.TrimSpace(request.HTTP.Method))
+	if method != "" {
+		return method
+	}
+
+	// If the method is not recorded, infer the most likely method once and
+	// reuse the same resolution for both policy checks and request execution.
+	if request.Body.Content != "" || request.Body.SizeBytes > 0 || hasHeaderValue(request.Headers, "content-type") {
+		return http.MethodPost
+	}
+	return http.MethodGet
 }
