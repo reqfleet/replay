@@ -4,7 +4,7 @@ BIN_DIR ?= bin
 PKG ?= ./...
 LOG ?= requests.log
 
-.PHONY: test build tidy run run-sample clean
+.PHONY: test build tidy run run-sample clean docker-build
 
 test:
 	$(GO) test $(PKG) -count=1
@@ -24,3 +24,6 @@ run-sample:
 
 clean:
 	rm -rf $(BIN_DIR)
+
+docker-build:
+	docker build -t $(BINARY) .
