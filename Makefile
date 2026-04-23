@@ -31,4 +31,4 @@ clean:
 
 docker-build:
 	$(MAKE) build GOOS=linux
-	docker build -t $(BINARY) .
+	docker build --build-arg BIN_DIR=$(BIN_DIR) --build-arg BINARY=$(BINARY) -t $(BINARY) .
