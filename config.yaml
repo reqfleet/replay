@@ -1,0 +1,60 @@
+replay:
+  max_virtual_users_per_engine: 20
+  max_active_connections_per_engine: 200
+  http2:
+    mode: serialized
+    max_concurrent_streams: 16
+  timeout:
+    connect: 3s
+    request: 30s
+    idle_connection: 60s
+  retry:
+    max_attempts: 2
+    backoff: exponential
+    retry_on_statuses: [429, 502, 503, 504]
+    retry_on_errors: [timeout, connection_reset, network, tls]
+  validation:
+    enabled: true
+    status: true
+    headers: false
+    body: false
+    ignore_headers: [x-request-id, date]
+  pacing:
+    enabled: false
+    max_sleep_delta: 30s
+  lifecycle:
+    require_open: true
+    require_close: true
+  idempotency:
+    enabled: true
+    block_methods: [POST, PUT, PATCH, DELETE]
+    require_header_for_allow: [idempotency-key, x-idempotency-key]
+  sharding:
+    shard_index: 0
+    shard_count: 1
+  checkpoint:
+    file: "./checkpoint.json"
+
+metrics:
+  enabled: true
+  listen_address: "0.0.0.0:9102"
+  path: "/metrics"
+
+env:
+  TARGET_ENV: "staging"
+  AUTH_MODE: "token-rewrite"
+
+labels:
+  collection_id: "demo-collection"
+  plan_id: "demo-plan"
+  run_id: "demo-run"
+  engine_no: "1"
+  zone: "local"
+
+target:
+  override_url: ""
+  require_override: false
+
+header_rewrite:
+  drop: [authorization, cookie]
+  set: {}

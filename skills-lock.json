@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "skills": {
+    "code-review": {
+      "source": "getsentry/skills",
+      "sourceType": "github",
+      "computedHash": "f0604d278cfd4eac4dac29eb297a5c6b6ebfb9f020235e8aafbe2eff0e42a147"
+    },
+    "commit": {
+      "source": "getsentry/skills",
+      "sourceType": "github",
+      "computedHash": "66a83b1cfce2013b89ad4ad5f50f4485930d192790f733bd012db108456ac4d3"
+    },
+    "create-pr": {
+      "source": "getsentry/skills",
+      "sourceType": "github",
+      "computedHash": "5c2829641c97998fa5c1223bb10910cdea0bf7471b0130831fde808a0c8c799c"
+    }
+  }
+}

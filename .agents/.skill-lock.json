@@ -1,0 +1,33 @@
+{
+  "version": 3,
+  "skills": {
+    "go-performance": {
+      "source": "cxuu/golang-skills",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/cxuu/golang-skills.git",
+      "skillPath": "skills/go-performance/SKILL.md",
+      "skillFolderHash": "df83baf1f568fab0c68dda86abcade44440f5b16",
+      "installedAt": "2026-02-27T06:00:19.936Z",
+      "updatedAt": "2026-02-27T06:00:19.936Z"
+    },
+    "go-testing": {
+      "source": "cxuu/golang-skills",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/cxuu/golang-skills.git",
+      "skillPath": "skills/go-testing/SKILL.md",
+      "skillFolderHash": "a184d538d8d55cc8559f9ffb9a0eee2acb6e2f37",
+      "installedAt": "2026-02-27T06:02:31.088Z",
+      "updatedAt": "2026-02-27T06:03:06.199Z"
+    },
+    "go-error-handling": {
+      "source": "cxuu/golang-skills",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/cxuu/golang-skills.git",
+      "skillPath": "skills/go-error-handling/SKILL.md",
+      "skillFolderHash": "9883024b4d36d1e2a0047cc9288f73b4da6de1e0",
+      "installedAt": "2026-02-27T06:03:43.619Z",
+      "updatedAt": "2026-02-27T06:03:43.619Z"
+    }
+  },
+  "dismissed": {}
+}
