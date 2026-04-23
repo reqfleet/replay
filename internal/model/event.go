@@ -17,7 +17,7 @@ type Event struct {
 	CreatedAt     string    `json:"created_at,omitempty"`
 	Node          string    `json:"node,omitempty"`
 	Cluster       string    `json:"cluster,omitempty"`
-	ConnectionID  string    `json:"connection_id,omitempty"`
+	ConnectionID  int       `json:"connection_id"`
 	StreamID      int       `json:"stream_id,omitempty"`
 	Sequence      int       `json:"sequence,omitempty"`
 	Timestamp     string    `json:"timestamp,omitempty"`

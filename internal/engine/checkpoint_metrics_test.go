@@ -31,7 +31,7 @@ func TestCheckpointWrittenOnSuccess(t *testing.T) {
 	// extract host part
 	host := u[len("http://"):]
 
-	req := model.Event{Type: model.EventRequest, ConnectionID: "ck-1", Sequence: 1, HTTP: model.HTTPRequestMeta{Scheme: "http", Authority: host, Path: "/"}}
+	req := model.Event{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Scheme: "http", Authority: host, Path: "/"}}
 
 	tmp := t.TempDir()
 	ckPath := filepath.Join(tmp, "checkpoint.json")
@@ -50,13 +50,13 @@ func TestCheckpointWrittenOnSuccess(t *testing.T) {
 		t.Fatalf("read checkpoint: %v", err)
 	}
 	var data struct {
-		Connections map[string]int `json:"connections"`
+		Connections map[int]int `json:"connections"`
 	}
 	if err := json.Unmarshal(b, &data); err != nil {
 		t.Fatalf("unmarshal checkpoint: %v", err)
 	}
-	if got := data.Connections["ck-1"]; got != 1 {
-		t.Fatalf("checkpoint for ck-1 = %v, want 1", got)
+	if got := data.Connections[1]; got != 1 {
+		t.Fatalf("checkpoint for 1 = %v, want 1", got)
 	}
 }
 
@@ -74,7 +74,7 @@ func TestCheckpointNotWrittenInDryRun(t *testing.T) {
 	u := srv.URL
 	host := u[len("http://"):]
 
-	req := model.Event{Type: model.EventRequest, ConnectionID: "ck-dry", Sequence: 1, HTTP: model.HTTPRequestMeta{Scheme: "http", Authority: host, Path: "/"}}
+	req := model.Event{Type: model.EventRequest, ConnectionID: 2, Sequence: 1, HTTP: model.HTTPRequestMeta{Scheme: "http", Authority: host, Path: "/"}}
 
 	tmp := t.TempDir()
 	ckPath := filepath.Join(tmp, "checkpoint.json")
@@ -107,7 +107,7 @@ func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
 	e := New(cfg, reg)
 
 	// no server needed because idempotency skip happens before network
-	req := model.Event{Type: model.EventRequest, ConnectionID: "ck-id", Sequence: 42, HTTP: model.HTTPRequestMeta{Scheme: "http", Authority: "example.invalid", Path: "/"}, Headers: map[string][]string{"content-type": {"text/plain"}}}
+	req := model.Event{Type: model.EventRequest, ConnectionID: 42, Sequence: 42, HTTP: model.HTTPRequestMeta{Scheme: "http", Authority: "example.invalid", Path: "/"}, Headers: map[string][]string{"content-type": {"text/plain"}}}
 
 	tmp := t.TempDir()
 	ckPath := filepath.Join(tmp, "checkpoint.json")
@@ -125,13 +125,13 @@ func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
 		t.Fatalf("read checkpoint: %v", err)
 	}
 	var data struct {
-		Connections map[string]int `json:"connections"`
+		Connections map[int]int `json:"connections"`
 	}
 	if err := json.Unmarshal(b, &data); err != nil {
 		t.Fatalf("unmarshal checkpoint: %v", err)
 	}
-	if got := data.Connections["ck-id"]; got != 42 {
-		t.Fatalf("checkpoint for ck-id = %v, want 42", got)
+	if got := data.Connections[42]; got != 42 {
+		t.Fatalf("checkpoint for 42 = %v, want 42", got)
 	}
 }
 

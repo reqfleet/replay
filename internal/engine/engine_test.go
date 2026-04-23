@@ -65,10 +65,10 @@ func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
 			Type:         model.EventRequest,
-			ConnectionID: "c1",
+			ConnectionID: 1,
 			Sequence:     1,
 			HTTP: model.HTTPRequestMeta{
 				Method:    http.MethodGet,
@@ -77,7 +77,7 @@ func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 				Path:      "/",
 			},
 		},
-		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
 	summary, err := runReplay(eng, events)
@@ -98,7 +98,6 @@ func TestReplayMarksValidationFailedOnStatusMismatch(t *testing.T) {
 		_, _ = w.Write([]byte("boom"))
 	}))
 	defer srv.Close()
-
 	target, err := url.Parse(srv.URL)
 	if err != nil {
 		t.Fatalf("url parse failed: %v", err)
@@ -111,10 +110,10 @@ func TestReplayMarksValidationFailedOnStatusMismatch(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
 			Type:         model.EventRequest,
-			ConnectionID: "c1",
+			ConnectionID: 1,
 			Sequence:     1,
 			HTTP: model.HTTPRequestMeta{
 				Method:    http.MethodGet,
@@ -125,11 +124,11 @@ func TestReplayMarksValidationFailedOnStatusMismatch(t *testing.T) {
 		},
 		{
 			Type:         model.EventResponse,
-			ConnectionID: "c1",
+			ConnectionID: 1,
 			Sequence:     1,
 			Status:       http.StatusOK,
 		},
-		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
 	summary, err := runReplay(eng, events)
@@ -167,10 +166,10 @@ func TestReplayHeaderValidationIgnoresConfiguredHeaders(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
 			Type:         model.EventRequest,
-			ConnectionID: "c1",
+			ConnectionID: 1,
 			Sequence:     1,
 			HTTP: model.HTTPRequestMeta{
 				Method:    http.MethodGet,
@@ -181,7 +180,7 @@ func TestReplayHeaderValidationIgnoresConfiguredHeaders(t *testing.T) {
 		},
 		{
 			Type:         model.EventResponse,
-			ConnectionID: "c1",
+			ConnectionID: 1,
 			Sequence:     1,
 			Status:       http.StatusOK,
 			Headers: map[string][]string{
@@ -189,7 +188,7 @@ func TestReplayHeaderValidationIgnoresConfiguredHeaders(t *testing.T) {
 				"x-request-id": {"expected-other-id"},
 			},
 		},
-		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
 	summary, err := runReplay(eng, events)
@@ -224,10 +223,10 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
 			Type:         model.EventRequest,
-			ConnectionID: "c1",
+			ConnectionID: 1,
 			Sequence:     1,
 			HTTP: model.HTTPRequestMeta{
 				Method:    http.MethodGet,
@@ -238,7 +237,7 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 		},
 		{
 			Type:         model.EventResponse,
-			ConnectionID: "c1",
+			ConnectionID: 1,
 			Sequence:     1,
 			Status:       http.StatusOK,
 			Body: model.Body{
@@ -246,7 +245,7 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 				Content:  base64.StdEncoding.EncodeToString([]byte("expected-body")),
 			},
 		},
-		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
 	summary, err := runReplay(eng, events)
@@ -279,10 +278,10 @@ func TestReplaySkipsMutationWithoutIdempotencyHeader(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
 			Type:         model.EventRequest,
-			ConnectionID: "c1",
+			ConnectionID: 1,
 			Sequence:     1,
 			HTTP: model.HTTPRequestMeta{
 				Method:    http.MethodPost,
@@ -291,7 +290,7 @@ func TestReplaySkipsMutationWithoutIdempotencyHeader(t *testing.T) {
 				Path:      "/mutate",
 			},
 		},
-		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
 	summary, err := runReplay(eng, events)
@@ -312,7 +311,7 @@ func TestReplaySkipsMutationWithoutIdempotencyHeader(t *testing.T) {
 	}
 }
 
-func TestReplayFailsWhenLifecycleCloseMissing(t *testing.T) {
+func TestReplayAllowsImplicitLifecycleCloseAtEOF(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -328,10 +327,10 @@ func TestReplayFailsWhenLifecycleCloseMissing(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
 			Type:         model.EventRequest,
-			ConnectionID: "c1",
+			ConnectionID: 1,
 			Sequence:     1,
 			HTTP: model.HTTPRequestMeta{
 				Method:    http.MethodGet,
@@ -342,9 +341,12 @@ func TestReplayFailsWhenLifecycleCloseMissing(t *testing.T) {
 		},
 	}
 
-	_, err = runReplay(eng, events)
-	if err == nil {
-		t.Fatal("expected lifecycle validation error")
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("runReplay() error = %v, want nil", err)
+	}
+	if summary.Outcome != RunSuccess {
+		t.Errorf("runReplay() outcome = %v, want %v", summary.Outcome, RunSuccess)
 	}
 }
 
@@ -366,7 +368,7 @@ func TestReplayRespectsShardAssignment(t *testing.T) {
 	cfg.Replay.Sharding.ShardCount = 2
 	cfg.Replay.Sharding.ShardIndex = 0
 
-	connections := []string{"c1", "c2", "c3", "c4"}
+	connections := []int{1, 2, 3, 4}
 	events := []model.Event{{Type: model.EventMeta}}
 	expectedSent := int64(0)
 	for i, conn := range connections {
@@ -419,7 +421,7 @@ func TestReplaySkipsAlreadyCheckpointedSequence(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	checkpointPath := filepath.Join(tmpDir, "checkpoint.json")
-	checkpointPayload := `{"version":1,"connections":{"c1":1}}`
+	checkpointPayload := `{"version":1,"connections":{"1":1}}`
 	if err := os.WriteFile(checkpointPath, []byte(checkpointPayload), 0o644); err != nil {
 		t.Fatalf("write checkpoint failed: %v", err)
 	}
@@ -430,10 +432,10 @@ func TestReplaySkipsAlreadyCheckpointedSequence(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
 			Type:         model.EventRequest,
-			ConnectionID: "c1",
+			ConnectionID: 1,
 			Sequence:     1,
 			HTTP: model.HTTPRequestMeta{
 				Method:    http.MethodGet,
@@ -442,7 +444,7 @@ func TestReplaySkipsAlreadyCheckpointedSequence(t *testing.T) {
 				Path:      "/",
 			},
 		},
-		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
 	summary, err := runReplay(eng, events)
@@ -490,10 +492,10 @@ func TestReplayHTTP2SerializedMode(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
-		{Type: model.EventRequest, ConnectionID: "c1", StreamID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"}},
-		{Type: model.EventRequest, ConnectionID: "c1", StreamID: 3, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"}},
-		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"}},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 3, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
 	_, err = runReplay(eng, events)
@@ -536,10 +538,10 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
-		{Type: model.EventRequest, ConnectionID: "c1", StreamID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"}},
-		{Type: model.EventRequest, ConnectionID: "c1", StreamID: 3, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"}},
-		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"}},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 3, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
 	_, err = runReplay(eng, events)
@@ -574,12 +576,12 @@ func TestPerConnectionSocketOwnership(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
-		{Type: model.EventRequest, ConnectionID: "c1", Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}},
-		{Type: model.EventConnectionClose, ConnectionID: "c1"},
-		{Type: model.EventConnectionOpen, ConnectionID: "c2"},
-		{Type: model.EventRequest, ConnectionID: "c2", Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}},
-		{Type: model.EventConnectionClose, ConnectionID: "c2"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+		{Type: model.EventConnectionOpen, ConnectionID: 2},
+		{Type: model.EventRequest, ConnectionID: 2, Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}},
+		{Type: model.EventConnectionClose, ConnectionID: 2},
 	}
 
 	summary, err := runReplay(eng, events)
@@ -618,9 +620,9 @@ func TestDryRunNoNetwork(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
-		{Type: model.EventRequest, ConnectionID: "c1", Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}},
-		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
 	summary, err := runReplay(eng, events)
@@ -662,9 +664,9 @@ func TestOverrideHostRewrite(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
-		{Type: model.EventRequest, ConnectionID: "c1", Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: "https", Authority: recordedAuthority, Path: "/"}, Headers: map[string][]string{"Host": {recordedAuthority}}},
-		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: "https", Authority: recordedAuthority, Path: "/"}, Headers: map[string][]string{"Host": {recordedAuthority}}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
 	summary, err := runReplay(eng, events)
@@ -699,10 +701,10 @@ func TestOverrideURLPreservesQueryString(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
 			Type:         model.EventRequest,
-			ConnectionID: "c1",
+			ConnectionID: 1,
 			Sequence:     1,
 			HTTP: model.HTTPRequestMeta{
 				Method:    http.MethodGet,
@@ -711,7 +713,7 @@ func TestOverrideURLPreservesQueryString(t *testing.T) {
 				Path:      "/api/v1/login?redirect=/home",
 			},
 		},
-		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
 	summary, err := runReplay(eng, events)
@@ -746,10 +748,10 @@ func TestReplayAbortsConnectionAfterSendError(t *testing.T) {
 	eng := New(cfg, metrics.New())
 	events := []model.Event{
 		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: "c1"},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
 			Type:         model.EventRequest,
-			ConnectionID: "c1",
+			ConnectionID: 1,
 			Sequence:     1,
 			HTTP: model.HTTPRequestMeta{
 				Method:    http.MethodGet,
@@ -760,7 +762,7 @@ func TestReplayAbortsConnectionAfterSendError(t *testing.T) {
 		},
 		{
 			Type:         model.EventRequest,
-			ConnectionID: "c1",
+			ConnectionID: 1,
 			Sequence:     2,
 			HTTP: model.HTTPRequestMeta{
 				Method:    http.MethodGet,
@@ -769,7 +771,7 @@ func TestReplayAbortsConnectionAfterSendError(t *testing.T) {
 				Path:      "/second",
 			},
 		},
-		{Type: model.EventConnectionClose, ConnectionID: "c1"},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
 	summary, err := runReplay(eng, events)
