@@ -20,13 +20,14 @@ type Config struct {
 }
 
 type ReplayConfig struct {
-	MaxVirtualUsersPerEngine      int               `yaml:"max_virtual_users_per_engine"`
-	MaxActiveConnectionsPerEngine int               `yaml:"max_active_connections_per_engine"`
-	HTTP2                         HTTP2Config       `yaml:"http2"`
-	DryRun                        bool              `yaml:"dry_run"`
-	PartialSuccessExitZero        bool              `yaml:"partial_success_exit_zero"`
-	Timeout                       TimeoutConfig     `yaml:"timeout"`
-	Retry                         RetryConfig       `yaml:"retry"`
+        MaxVirtualUsersPerEngine      int               `yaml:"max_virtual_users_per_engine"`
+        MaxActiveConnectionsPerEngine int               `yaml:"max_active_connections_per_engine"`
+        HTTP2                         HTTP2Config       `yaml:"http2"`
+        DryRun                        bool              `yaml:"dry_run"`
+        Verbose                       bool              `yaml:"verbose"`
+        PartialSuccessExitZero        bool              `yaml:"partial_success_exit_zero"`
+        Timeout                       TimeoutConfig     `yaml:"timeout"`
+        Retry                         RetryConfig       `yaml:"retry"`
 	Validation                    ValidationConfig  `yaml:"validation"`
 	Pacing                        PacingConfig      `yaml:"pacing"`
 	Lifecycle                     LifecycleConfig   `yaml:"lifecycle"`
@@ -233,9 +234,14 @@ func (c Config) Validate() error {
 // Precedence order is: defaults -> YAML -> environment -> CLI (applied by caller).
 func (c *Config) ApplyEnv() {
 	if v, ok := os.LookupEnv("REPLAY_DRY_RUN"); ok {
-		if b, err := strconv.ParseBool(v); err == nil {
-			c.Replay.DryRun = b
-		}
+	        if b, err := strconv.ParseBool(v); err == nil {
+	                c.Replay.DryRun = b
+	        }
+	}
+	if v, ok := os.LookupEnv("REPLAY_VERBOSE"); ok {
+	        if b, err := strconv.ParseBool(v); err == nil {
+	                c.Replay.Verbose = b
+	        }
 	}
 	if v, ok := os.LookupEnv("REPLAY_OVERRIDE_URL"); ok && v != "" {
 		c.Target.OverrideURL = v
