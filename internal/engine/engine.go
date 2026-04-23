@@ -129,7 +129,7 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	var wg sync.WaitGroup
 	e.startWorkers(ctx, &wg, jobs, results, checkpoints)
 
-	parseErr := e.bufferAndSchedule(events, jobs)
+	parseErr := e.bufferAndSchedule(ctx, events, jobs)
 	if parseErr != nil {
 		// drain remaining events to unblock producer
 		go func() {
@@ -185,7 +185,7 @@ func (e *Engine) startWorkers(ctx context.Context, wg *sync.WaitGroup, jobs <-ch
 	}
 }
 
-func (e *Engine) bufferAndSchedule(events <-chan model.Event, jobs chan<- replayJob) error {
+func (e *Engine) bufferAndSchedule(ctx context.Context, events <-chan model.Event, jobs chan<- replayJob) error {
 	bufs := make(map[string]*connBuf)
 	var parseErr error
 
@@ -228,7 +228,11 @@ func (e *Engine) bufferAndSchedule(events <-chan model.Event, jobs chan<- replay
 				continue
 			}
 			sort.Slice(b.requests, func(i, j int) bool { return b.requests[i].Sequence < b.requests[j].Sequence })
-			jobs <- replayJob{requests: b.requests, responsesBySequence: b.responses}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case jobs <- replayJob{requests: b.requests, responsesBySequence: b.responses}:
+			}
 			delete(bufs, id)
 		}
 		if parseErr != nil {
@@ -251,7 +255,11 @@ func (e *Engine) bufferAndSchedule(events <-chan model.Event, jobs chan<- replay
 			continue
 		}
 		sort.Slice(b.requests, func(i, j int) bool { return b.requests[i].Sequence < b.requests[j].Sequence })
-		jobs <- replayJob{requests: b.requests, responsesBySequence: b.responses}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case jobs <- replayJob{requests: b.requests, responsesBySequence: b.responses}:
+		}
 	}
 
 	return nil
