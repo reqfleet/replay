@@ -765,6 +765,9 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	}
 
 	for key, values := range requestEvent.Headers {
+		if strings.HasPrefix(key, ":") {
+			continue
+		}
 		for _, value := range values {
 			req.Header.Add(key, value)
 		}
@@ -943,6 +946,9 @@ func headersMismatch(expected map[string][]string, actual map[string][]string, i
 	}
 
 	for key, expectedValues := range expected {
+		if strings.HasPrefix(key, ":") {
+			continue
+		}
 		normalizedKey := strings.ToLower(key)
 		if _, ignored := ignoreSet[normalizedKey]; ignored {
 			continue
