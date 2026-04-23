@@ -422,8 +422,8 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			reqRes.Error = err.Error()
 			connResult.Requests = append(connResult.Requests, reqRes)
 			result.RequestResults = append(result.RequestResults, reqRes)
-			result.ConnectionResults = append(result.ConnectionResults, connResult)
 			connResult.Outcome = ConnectionAborted
+			result.ConnectionResults = append(result.ConnectionResults, connResult)
 			return result
 		}
 
@@ -960,7 +960,7 @@ func (e *Engine) buildRequestURL(event model.Event) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("parse request path: %w", err)
 		}
-		override.Path = parsedPath.Path
+		override = override.JoinPath(parsedPath.Path)
 		override.RawQuery = parsedPath.RawQuery
 		return override.String(), nil
 	}
