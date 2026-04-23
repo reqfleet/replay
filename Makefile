@@ -4,14 +4,18 @@ BIN_DIR ?= bin
 PKG ?= ./...
 LOG ?= requests.log
 
-.PHONY: test build tidy run run-sample clean
+# Target OS and architecture for build
+GOOS ?= $(shell $(GO) env GOOS)
+GOARCH ?= $(shell $(GO) env GOARCH)
+
+.PHONY: test build tidy run run-sample clean docker-build
 
 test:
 	$(GO) test $(PKG) -count=1
 
 build:
 	mkdir -p $(BIN_DIR)
-	$(GO) build -o $(BIN_DIR)/$(BINARY) ./cmd/replay
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -o $(BIN_DIR)/$(BINARY) ./cmd/replay
 
 tidy:
 	$(GO) mod tidy
@@ -24,3 +28,7 @@ run-sample:
 
 clean:
 	rm -rf $(BIN_DIR)
+
+docker-build:
+	$(MAKE) build GOOS=linux
+	docker build --build-arg BIN_DIR=$(BIN_DIR) --build-arg BINARY=$(BINARY) -t $(BINARY) .
