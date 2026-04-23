@@ -946,6 +946,9 @@ func headersMismatch(expected map[string][]string, actual map[string][]string, i
 	}
 
 	for key, expectedValues := range expected {
+		if strings.HasPrefix(key, ":") {
+			continue
+		}
 		normalizedKey := strings.ToLower(key)
 		if _, ignored := ignoreSet[normalizedKey]; ignored {
 			continue
