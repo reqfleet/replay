@@ -52,7 +52,7 @@ Each line in the NDJSON file represents one event.
 | connection_open  | Yes                    | TCP lifecycle start             |
 | request          | Yes                    | Replayable HTTP request         |
 | response         | Optional (recommended) | Validation and latency analysis |
-| connection_close | Yes                    | TCP lifecycle end               |
+| connection_close | Optional               | TCP lifecycle end               |
 
 ---
 
@@ -113,7 +113,6 @@ Emitted when a downstream TCP connection is accepted.
   "type": "request",
   "connection_id": "c42",
   "stream_id": 7,
-  "sequence": 3,
   "timestamp": "2026-02-27T03:10:22.001Z",
   "http": {
     "version": "HTTP/2",
@@ -139,8 +138,11 @@ Emitted when a downstream TCP connection is accepted.
 
 * `connection_id`: Required
 * `stream_id`: Required (HTTP/1.1 MUST use value 1)
-* `sequence`: Strictly increasing per connection
 * `timestamp`: RFC3339 format
+
+Replay derives a strictly increasing per-connection sequence internally from
+record order when the recorder does not emit one. If a recorder or converter
+does provide `sequence`, replay preserves it as long as it remains monotonic.
 
 ### Headers
 
@@ -174,7 +176,6 @@ Reasons:
   "type": "response",
   "connection_id": "c42",
   "stream_id": 7,
-  "sequence": 3,
   "timestamp": "2026-02-27T03:10:22.150Z",
   "status": 200,
   "headers": {
@@ -195,6 +196,9 @@ Benefits:
 * Enables latency replay
 * Enables mock server generation
 * Enables regression testing
+
+Like request events, response events may omit `sequence`; replay normalizes
+them using the same per-connection ordering model.
 
 ---
 
@@ -217,6 +221,9 @@ Benefits:
 * drain
 * error
 
+Native Envoy access logs do not emit a close event, so replay treats end of
+file as the implicit close point when `connection_close` is absent.
+
 ---
 
 ## 9. Replay Semantics
@@ -224,11 +231,14 @@ Benefits:
 Replay engine MUST:
 
 1. Group events by `connection_id`
-2. Sort by `sequence` within each connection
-3. Open one TCP connection per `connection_id`
-4. Replay requests in order
-5. Optionally sleep based on timestamp delta
-6. Close connection when `connection_close` event is encountered
+2. Normalize events into a per-connection monotonic `sequence` when the
+  recorder did not emit one
+3. Sort by `sequence` within each connection
+4. Open one TCP connection per `connection_id`
+5. Replay requests in order
+6. Optionally sleep based on timestamp delta
+7. Close connection when `connection_close` event is encountered, or at EOF if
+  the recorder did not emit one
 
 ### HTTP/1.1
 

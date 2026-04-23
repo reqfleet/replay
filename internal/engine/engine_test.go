@@ -311,7 +311,7 @@ func TestReplaySkipsMutationWithoutIdempotencyHeader(t *testing.T) {
 	}
 }
 
-func TestReplayFailsWhenLifecycleCloseMissing(t *testing.T) {
+func TestReplayAllowsImplicitLifecycleCloseAtEOF(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -341,9 +341,12 @@ func TestReplayFailsWhenLifecycleCloseMissing(t *testing.T) {
 		},
 	}
 
-	_, err = runReplay(eng, events)
-	if err == nil {
-		t.Fatal("expected lifecycle validation error")
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("runReplay() error = %v, want nil", err)
+	}
+	if summary.Outcome != RunSuccess {
+		t.Errorf("runReplay() outcome = %v, want %v", summary.Outcome, RunSuccess)
 	}
 }
 

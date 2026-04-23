@@ -249,9 +249,6 @@ func (e *Engine) bufferAndSchedule(ctx context.Context, events <-chan model.Even
 		if len(b.requests) == 0 {
 			continue
 		}
-		if e.cfg.Replay.Lifecycle.RequireClose && !b.hasClose {
-			return fmt.Errorf("connection %q missing connection_close", id)
-		}
 		if !connectionBelongsToShard(id, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
 			continue
 		}

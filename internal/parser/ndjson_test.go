@@ -12,7 +12,7 @@ func TestParseSuccess(t *testing.T) {
 		`"type":"meta","format_version":"1.0"` +
 		"}\n" +
 		"{" +
-		`"type":"request","connection_id":1,"sequence":1,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
+		`"type":"request","connection_id":1,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
 		"}\n")
 
 	events := make([]model.Event, 0)
@@ -24,6 +24,59 @@ func TestParseSuccess(t *testing.T) {
 	}
 	if len(events) != 2 {
 		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if got, want := events[1].Sequence, 1; got != want {
+		t.Errorf("ParseStream(request without sequence) = sequence %d, want %d", got, want)
+	}
+}
+
+func TestParseDefaultsHTTP11StreamID(t *testing.T) {
+	input := strings.NewReader("{" +
+		`"type":"meta","format_version":"1.0"` +
+		"}\n" +
+		"{" +
+		`"type":"request","connection_id":1,"http":{"version":"HTTP/1.1","method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
+		"}\n")
+
+	events := make([]model.Event, 0)
+	if err := ParseStream(input, func(e model.Event) error {
+		events = append(events, e)
+		return nil
+	}); err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if got, want := len(events), 2; got != want {
+		t.Fatalf("ParseStream() event count = %d, want %d", got, want)
+	}
+	if got, want := events[1].StreamID, 1; got != want {
+		t.Errorf("ParseStream(HTTP/1.1 stream_id) = %d, want %d", got, want)
+	}
+	if got, want := events[1].Sequence, 1; got != want {
+		t.Errorf("ParseStream(HTTP/1.1 sequence) = %d, want %d", got, want)
+	}
+}
+
+func TestParseSkipsNonJSONLines(t *testing.T) {
+	input := strings.NewReader("{" +
+		`"type":"meta","format_version":"1.0"` +
+		"}\n" +
+		"[2026-04-23 07:12:34.566][1][info][main] shutting down parent after drain\n" +
+		"{" +
+		`"type":"request","connection_id":1,"http":{"version":"HTTP/1.1","method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
+		"}\n")
+
+	events := make([]model.Event, 0)
+	if err := ParseStream(input, func(e model.Event) error {
+		events = append(events, e)
+		return nil
+	}); err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if got, want := len(events), 2; got != want {
+		t.Fatalf("ParseStream() event count = %d, want %d", got, want)
+	}
+	if got, want := events[1].Sequence, 1; got != want {
+		t.Errorf("ParseStream(request sequence) = %d, want %d", got, want)
 	}
 }
 
@@ -47,7 +100,7 @@ func TestParseRejectsUnsupportedFormatVersion(t *testing.T) {
 		`"type":"meta","format_version":"2.0"` +
 		"}\n" +
 		"{" +
-		`"type":"request","connection_id":1,"sequence":1,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
+		`"type":"request","connection_id":1,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
 		"}\n")
 
 	var events []model.Event
@@ -65,7 +118,7 @@ func TestParseRejectsHTTP11StreamIDNotOne(t *testing.T) {
 		`"type":"meta","format_version":"1.0"` +
 		"}\n" +
 		"{" +
-		`"type":"request","connection_id":1,"sequence":1,"stream_id":2,"http":{"version":"HTTP/1.1","method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
+		`"type":"request","connection_id":1,"stream_id":2,"http":{"version":"HTTP/1.1","method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
 		"}\n")
 
 	var events []model.Event
@@ -99,12 +152,41 @@ func TestParseRejectsNonMonotonicSequence(t *testing.T) {
 	}
 }
 
+func TestParseAssignsResponseSequenceFromRequest(t *testing.T) {
+	input := strings.NewReader("{" +
+		`"type":"meta","format_version":"1.0"` +
+		"}\n" +
+		"{" +
+		`"type":"request","connection_id":1,"stream_id":7,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/a"}` +
+		"}\n" +
+		"{" +
+		`"type":"response","connection_id":1,"stream_id":7,"status":200}` +
+		"\n")
+
+	events := make([]model.Event, 0)
+	if err := ParseStream(input, func(e model.Event) error {
+		events = append(events, e)
+		return nil
+	}); err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if got, want := len(events), 3; got != want {
+		t.Fatalf("ParseStream() event count = %d, want %d", got, want)
+	}
+	if got, want := events[1].Sequence, 1; got != want {
+		t.Errorf("ParseStream(request sequence) = %d, want %d", got, want)
+	}
+	if got, want := events[2].Sequence, 1; got != want {
+		t.Errorf("ParseStream(response sequence) = %d, want %d", got, want)
+	}
+}
+
 func TestParseRejectsMalformedTimestamp(t *testing.T) {
 	input := strings.NewReader("{" +
 		`"type":"meta","format_version":"1.0"` +
 		"}\n" +
 		"{" +
-		`"type":"request","connection_id":1,"sequence":1,"timestamp":"not-a-time","http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
+		`"type":"request","connection_id":1,"timestamp":"not-a-time","http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
 		"}\n")
 
 	var events []model.Event
