@@ -33,7 +33,7 @@ type Body struct {
 
 type RequestEvent struct {
 	Type         string              `json:"type"`
-	ConnectionID string              `json:"connection_id,omitempty"`
+	ConnectionID int                 `json:"connection_id"`
 	StreamID     int                 `json:"stream_id,omitempty"`
 	Sequence     int                 `json:"sequence,omitempty"`
 	Timestamp    string              `json:"timestamp,omitempty"`
@@ -99,7 +99,7 @@ func main() {
 
 	now := time.Now().UTC()
 	for ci := 1; ci <= *conns; ci++ {
-		connID := fmt.Sprintf("conn-%d", ci)
+		connID := ci
 		// connection_open
 		open := GenericEvent{
 			"type":                      "connection_open",

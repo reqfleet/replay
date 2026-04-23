@@ -10,9 +10,9 @@ import (
 )
 
 type checkpointData struct {
-	Version     int            `json:"version"`
-	UpdatedAt   string         `json:"updated_at,omitempty"`
-	Connections map[string]int `json:"connections"`
+	Version     int         `json:"version"`
+	UpdatedAt   string      `json:"updated_at,omitempty"`
+	Connections map[int]int `json:"connections"`
 }
 
 type checkpointStore struct {
@@ -36,7 +36,7 @@ func newCheckpointStore(path string) (*checkpointStore, error) {
 		path: path,
 		data: checkpointData{
 			Version:     1,
-			Connections: map[string]int{},
+			Connections: map[int]int{},
 		},
 		flushCh:       make(chan struct{}, 1),
 		closeCh:       make(chan struct{}),
@@ -65,7 +65,7 @@ func newCheckpointStore(path string) (*checkpointStore, error) {
 	// mark that we loaded an on-disk checkpoint
 	store.persistedOnce = true
 	if store.data.Connections == nil {
-		store.data.Connections = map[string]int{}
+		store.data.Connections = map[int]int{}
 	}
 	if store.data.Version == 0 {
 		store.data.Version = 1
@@ -76,8 +76,8 @@ func newCheckpointStore(path string) (*checkpointStore, error) {
 	return store, nil
 }
 
-func (c *checkpointStore) alreadyProcessed(connectionID string, sequence int) bool {
-	if c == nil || connectionID == "" || sequence <= 0 {
+func (c *checkpointStore) alreadyProcessed(connectionID int, sequence int) bool {
+	if c == nil || sequence <= 0 {
 		return false
 	}
 	c.mu.Lock()
@@ -86,8 +86,8 @@ func (c *checkpointStore) alreadyProcessed(connectionID string, sequence int) bo
 	return ok && sequence <= last
 }
 
-func (c *checkpointStore) markProcessed(connectionID string, sequence int) error {
-	if c == nil || connectionID == "" || sequence <= 0 {
+func (c *checkpointStore) markProcessed(connectionID int, sequence int) error {
+	if c == nil || sequence <= 0 {
 		return nil
 	}
 
@@ -133,7 +133,7 @@ func (c *checkpointStore) persist() error {
 	copyData := checkpointData{
 		Version:     c.data.Version,
 		UpdatedAt:   c.data.UpdatedAt,
-		Connections: make(map[string]int, len(c.data.Connections)),
+		Connections: make(map[int]int, len(c.data.Connections)),
 	}
 	for k, v := range c.data.Connections {
 		copyData.Connections[k] = v

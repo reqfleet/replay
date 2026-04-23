@@ -12,7 +12,7 @@ func TestParseSuccess(t *testing.T) {
 		`"type":"meta","format_version":"1.0"` +
 		"}\n" +
 		"{" +
-		`"type":"request","connection_id":"c1","sequence":1,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
+		`"type":"request","connection_id":1,"sequence":1,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
 		"}\n")
 
 	events := make([]model.Event, 0)
@@ -29,7 +29,7 @@ func TestParseSuccess(t *testing.T) {
 
 func TestParseRejectsNoMetaFirst(t *testing.T) {
 	input := strings.NewReader("{" +
-		`"type":"request","connection_id":"c1"` +
+		`"type":"request"` +
 		"}\n")
 
 	var events []model.Event
@@ -47,7 +47,7 @@ func TestParseRejectsUnsupportedFormatVersion(t *testing.T) {
 		`"type":"meta","format_version":"2.0"` +
 		"}\n" +
 		"{" +
-		`"type":"request","connection_id":"c1","sequence":1,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
+		`"type":"request","connection_id":1,"sequence":1,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
 		"}\n")
 
 	var events []model.Event
@@ -65,7 +65,7 @@ func TestParseRejectsHTTP11StreamIDNotOne(t *testing.T) {
 		`"type":"meta","format_version":"1.0"` +
 		"}\n" +
 		"{" +
-		`"type":"request","connection_id":"c1","sequence":1,"stream_id":2,"http":{"version":"HTTP/1.1","method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
+		`"type":"request","connection_id":1,"sequence":1,"stream_id":2,"http":{"version":"HTTP/1.1","method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
 		"}\n")
 
 	var events []model.Event
@@ -83,10 +83,10 @@ func TestParseRejectsNonMonotonicSequence(t *testing.T) {
 		`"type":"meta","format_version":"1.0"` +
 		"}\n" +
 		"{" +
-		`"type":"request","connection_id":"c1","sequence":2,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/a"}` +
+		`"type":"request","connection_id":1,"sequence":2,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/a"}` +
 		"}\n" +
 		"{" +
-		`"type":"request","connection_id":"c1","sequence":1,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/b"}` +
+		`"type":"request","connection_id":1,"sequence":1,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/b"}` +
 		"}\n")
 
 	var events []model.Event
@@ -104,7 +104,7 @@ func TestParseRejectsMalformedTimestamp(t *testing.T) {
 		`"type":"meta","format_version":"1.0"` +
 		"}\n" +
 		"{" +
-		`"type":"request","connection_id":"c1","sequence":1,"timestamp":"not-a-time","http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
+		`"type":"request","connection_id":1,"sequence":1,"timestamp":"not-a-time","http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
 		"}\n")
 
 	var events []model.Event

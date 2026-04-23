@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -50,7 +51,7 @@ const (
 )
 
 type RequestResult struct {
-	ConnectionID     string         `json:"connection_id"`
+	ConnectionID     int            `json:"connection_id"`
 	Sequence         int            `json:"sequence"`
 	Outcome          RequestOutcome `json:"outcome"`
 	StatusCode       int            `json:"status_code,omitempty"`
@@ -61,7 +62,7 @@ type RequestResult struct {
 }
 
 type ConnectionResult struct {
-	ConnectionID string            `json:"connection_id"`
+	ConnectionID int               `json:"connection_id"`
 	Outcome      ConnectionOutcome `json:"outcome"`
 	Requests     []RequestResult   `json:"requests"`
 }
@@ -189,7 +190,7 @@ func (e *Engine) startWorkers(ctx context.Context, wg *sync.WaitGroup, jobs <-ch
 }
 
 func (e *Engine) bufferAndSchedule(ctx context.Context, events <-chan model.Event, jobs chan<- replayJob) error {
-	bufs := make(map[string]*connBuf)
+	bufs := make(map[int]*connBuf)
 	var parseErr error
 
 	for ev := range events {
@@ -197,9 +198,6 @@ func (e *Engine) bufferAndSchedule(ctx context.Context, events <-chan model.Even
 			continue
 		}
 		id := ev.ConnectionID
-		if id == "" {
-			continue
-		}
 		b := bufs[id]
 		if b == nil {
 			b = &connBuf{responses: make(map[int]model.Event)}
@@ -556,7 +554,7 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 		aggregated.ConnectionsDone = 1
 	}
 	// Single connection, collect connection-level result
-	connID := ""
+	connID := 0
 	if len(requests) > 0 {
 		connID = requests[0].ConnectionID
 	}
@@ -598,12 +596,12 @@ func (e *Engine) shouldUseHTTP2MultiplexedMode(requests []model.Event) bool {
 	return false
 }
 
-func (e *Engine) filterGroupsByShard(groups map[string][]model.Event) map[string][]model.Event {
+func (e *Engine) filterGroupsByShard(groups map[int][]model.Event) map[int][]model.Event {
 	sharding := e.cfg.Replay.Sharding
 	if sharding.ShardCount <= 1 {
 		return groups
 	}
-	filtered := make(map[string][]model.Event)
+	filtered := make(map[int][]model.Event)
 	for connectionID, requests := range groups {
 		if !connectionBelongsToShard(connectionID, sharding.ShardIndex, sharding.ShardCount) {
 			continue
@@ -613,12 +611,14 @@ func (e *Engine) filterGroupsByShard(groups map[string][]model.Event) map[string
 	return filtered
 }
 
-func connectionBelongsToShard(connectionID string, shardIndex, shardCount int) bool {
+func connectionBelongsToShard(connectionID int, shardIndex, shardCount int) bool {
 	if shardCount <= 1 {
 		return true
 	}
 	hasher := fnv.New32a()
-	_, _ = hasher.Write([]byte(connectionID))
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], uint64(connectionID))
+	_, _ = hasher.Write(buf[:])
 	return int(hasher.Sum32()%uint32(shardCount)) == shardIndex
 }
 

@@ -24,13 +24,13 @@ func TestOutcomeAggregation_DryRunSerialized(t *testing.T) {
 	requests := []model.Event{
 		{
 			Type:         model.EventRequest,
-			ConnectionID: "conn-1",
+			ConnectionID: 1,
 			Sequence:     1,
 			HTTP:         model.HTTPRequestMeta{Path: "/"},
 		},
 		{
 			Type:         model.EventRequest,
-			ConnectionID: "conn-1",
+			ConnectionID: 1,
 			Sequence:     2,
 			HTTP:         model.HTTPRequestMeta{Path: "/ok"},
 		},
@@ -54,16 +54,16 @@ func TestOutcomeAggregation_DryRunSerialized(t *testing.T) {
 		if !r.Skipped {
 			t.Errorf("RequestResults[%d].Skipped = false, want true", i)
 		}
-		if r.ConnectionID != "conn-1" {
-			t.Errorf("RequestResults[%d].ConnectionID = %v, want %v", i, r.ConnectionID, "conn-1")
+		if r.ConnectionID != 1 {
+			t.Errorf("RequestResults[%d].ConnectionID = %v, want %v", i, r.ConnectionID, 1)
 		}
 	}
 	if got, want := len(summary.ConnectionResults), 1; got != want {
 		t.Fatalf("len(summary.ConnectionResults) = %v, want %v", got, want)
 	}
 	conn := summary.ConnectionResults[0]
-	if conn.ConnectionID != "conn-1" {
-		t.Errorf("ConnectionResults[0].ConnectionID = %v, want %v", conn.ConnectionID, "conn-1")
+	if conn.ConnectionID != 1 {
+		t.Errorf("ConnectionResults[0].ConnectionID = %v, want %v", conn.ConnectionID, 1)
 	}
 	if got, want := len(conn.Requests), 2; got != want {
 		t.Errorf("conn.Requests len = %v, want %v", got, want)
@@ -94,13 +94,13 @@ func TestOutcomeAggregation_ValidationFailure(t *testing.T) {
 	requests := []model.Event{
 		{
 			Type:         model.EventRequest,
-			ConnectionID: "conn-1",
+			ConnectionID: 1,
 			Sequence:     1,
 			HTTP:         model.HTTPRequestMeta{Scheme: "http", Authority: authority, Path: "/"},
 		},
 	}
 	expected := map[int]model.Event{
-		1: {Type: model.EventResponse, ConnectionID: "conn-1", Sequence: 1, Status: 200},
+		1: {Type: model.EventResponse, ConnectionID: 1, Sequence: 1, Status: 200},
 	}
 
 	summary := e.replayConnectionSerialized(context.Background(), e.client, requests, expected, nil)
@@ -131,7 +131,7 @@ func TestOutcomeAggregation_SendError(t *testing.T) {
 	// Missing path will cause buildRequestURL to error and be treated as send error
 	bad := model.Event{
 		Type:         model.EventRequest,
-		ConnectionID: "conn-err",
+		ConnectionID: 2,
 		Sequence:     1,
 		HTTP:         model.HTTPRequestMeta{Scheme: "http", Authority: "example.invalid", Path: ""},
 	}
@@ -174,8 +174,8 @@ func TestOutcomeAggregation_HTTP2Multiplexed(t *testing.T) {
 	authority := u.Host
 
 	requests := []model.Event{
-		{Type: model.EventRequest, ConnectionID: "mux-1", StreamID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Scheme: "http", Authority: authority, Path: "/s1"}},
-		{Type: model.EventRequest, ConnectionID: "mux-1", StreamID: 2, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Scheme: "http", Authority: authority, Path: "/s2"}},
+		{Type: model.EventRequest, ConnectionID: 3, StreamID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Scheme: "http", Authority: authority, Path: "/s1"}},
+		{Type: model.EventRequest, ConnectionID: 3, StreamID: 2, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Scheme: "http", Authority: authority, Path: "/s2"}},
 	}
 
 	summary := e.replayConnectionWithCheckpoint(context.Background(), requests, nil, nil)

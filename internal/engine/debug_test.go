@@ -15,7 +15,7 @@ func TestDebugIdempotencyMethod(t *testing.T) {
 	cfg.Replay.Idempotency.BlockMethods = []string{"POST"}
 	cfg.Replay.Idempotency.RequireHeaderForAllow = []string{"x-idempotency-key"}
 
-	req := model.Event{Type: model.EventRequest, ConnectionID: "ck-id", Sequence: 42, HTTP: model.HTTPRequestMeta{Scheme: "http", Authority: "example.invalid", Path: "/"}, Headers: map[string][]string{"content-type": {"text/plain"}}}
+	req := model.Event{Type: model.EventRequest, ConnectionID: 42, Sequence: 42, HTTP: model.HTTPRequestMeta{Scheme: "http", Authority: "example.invalid", Path: "/"}, Headers: map[string][]string{"content-type": {"text/plain"}}}
 
 	method := strings.ToUpper(strings.TrimSpace(req.HTTP.Method))
 	if method == "" {
@@ -37,7 +37,7 @@ func TestDebugIdempotencyMethod(t *testing.T) {
 		allow := false
 		for _, headerName := range policy.RequireHeaderForAllow {
 			for h := range req.Headers {
-				if strings.ToLower(h) == strings.ToLower(headerName) {
+				if strings.EqualFold(h, headerName) {
 					allow = true
 				}
 			}

@@ -39,7 +39,7 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 
 	line := 0
 	// track last seen sequence per connection for monotonicity
-	lastSeq := make(map[string]int)
+	lastSeq := make(map[int]int)
 
 	for scanner.Scan() {
 		line++
@@ -69,6 +69,10 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		if err := json.Unmarshal(raw, &event); err != nil {
 			return fmt.Errorf("line %d: invalid json: %w", line, err)
 		}
+		var rawFields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &rawFields); err != nil {
+			return fmt.Errorf("line %d: invalid json: %w", line, err)
+		}
 
 		// Basic timestamp validation when present
 		if event.Timestamp != "" {
@@ -79,7 +83,7 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 
 		switch event.Type {
 		case model.EventRequest:
-			if event.ConnectionID == "" {
+			if _, ok := rawFields["connection_id"]; !ok {
 				return fmt.Errorf("line %d: request missing connection_id", line)
 			}
 			if event.Sequence <= 0 {
@@ -96,13 +100,13 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			}
 			if last, ok := lastSeq[event.ConnectionID]; ok {
 				if event.Sequence <= last {
-					return fmt.Errorf("line %d: non-monotonic sequence for connection %s", line, event.ConnectionID)
+					return fmt.Errorf("line %d: non-monotonic sequence for connection %d", line, event.ConnectionID)
 				}
 			}
 			lastSeq[event.ConnectionID] = event.Sequence
 
 		case model.EventResponse:
-			if event.ConnectionID == "" {
+			if _, ok := rawFields["connection_id"]; !ok {
 				return fmt.Errorf("line %d: response missing connection_id", line)
 			}
 			if event.Sequence <= 0 {
@@ -110,12 +114,12 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			}
 
 		case model.EventConnectionOpen:
-			if event.ConnectionID == "" {
+			if _, ok := rawFields["connection_id"]; !ok {
 				return fmt.Errorf("line %d: connection_open missing connection_id", line)
 			}
 
 		case model.EventConnectionClose:
-			if event.ConnectionID == "" {
+			if _, ok := rawFields["connection_id"]; !ok {
 				return fmt.Errorf("line %d: connection_close missing connection_id", line)
 			}
 			if event.Reason != "" {
