@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"log"
 	"math"
 	"net"
 	"net/http"
@@ -438,6 +439,12 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		}
 		if expected, ok := responsesBySequence[requestEvent.Sequence]; ok {
 			if e.responseValidationFailed(expected, exec) {
+				if e.cfg.Replay.Verbose {
+					log.Printf("[VERBOSE] Validation failed: conn=%d seq=%d status=%d expected_status=%d", requestEvent.ConnectionID, requestEvent.Sequence, exec.statusCode, expected.Status)
+					if len(exec.body) > 0 {
+						log.Printf("[VERBOSE] Validation failed body: %s", string(exec.body))
+					}
+				}
 				result.ValidationFailed++
 				reqRes.Outcome = RequestValidationFailed
 				reqRes.ValidationFailed = true
@@ -702,6 +709,9 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 		exec, err := e.executeRequest(ctx, client, requestEvent)
 		if err != nil {
 			lastErr = err
+			if e.cfg.Replay.Verbose {
+				log.Printf("[VERBOSE] Request failed: conn=%d seq=%d path=%s err=%v", requestEvent.ConnectionID, requestEvent.Sequence, requestEvent.HTTP.Path, err)
+			}
 			if attempt == maxAttempts || !e.shouldRetryError(err) {
 				return requestExecution{}, err
 			}
@@ -713,10 +723,16 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 
 		lastExec = exec
 		if attempt < maxAttempts && e.shouldRetryStatus(exec.statusCode) {
+			if e.cfg.Replay.Verbose {
+				log.Printf("[VERBOSE] Request retryable status: conn=%d seq=%d path=%s status=%d", requestEvent.ConnectionID, requestEvent.Sequence, requestEvent.HTTP.Path, exec.statusCode)
+			}
 			if sleepErr := e.sleepBackoff(ctx, attempt); sleepErr != nil {
 				return requestExecution{}, sleepErr
 			}
 			continue
+		}
+		if e.cfg.Replay.Verbose {
+			log.Printf("[VERBOSE] Request success: conn=%d seq=%d path=%s status=%d", requestEvent.ConnectionID, requestEvent.Sequence, requestEvent.HTTP.Path, exec.statusCode)
 		}
 		return exec, nil
 	}

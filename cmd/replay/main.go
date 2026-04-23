@@ -19,13 +19,13 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "", "path to config.yaml (optional)")
-	logPath := flag.String("log", "", "path to requests.log NDJSON file")
-	dryRunFlag := flag.Bool("dry-run", false, "dry run mode: do not send network requests")
-	overrideFlag := flag.String("override-url", "", "override target URL (overrides config)")
-	requireOverride := flag.Bool("require-override", false, "fail if override-url is required but missing")
-	flag.Parse()
-
+        configPath := flag.String("config", "", "path to config.yaml (optional)")
+        logPath := flag.String("log", "", "path to requests.log NDJSON file")
+        dryRunFlag := flag.Bool("dry-run", false, "dry run mode: do not send network requests")
+        overrideFlag := flag.String("override-url", "", "override target URL (overrides config)")
+        requireOverride := flag.Bool("require-override", false, "fail if override-url is required but missing")
+        verboseFlag := flag.Bool("verbose", false, "enable verbose output (e.g. log response errors)")
+        flag.Parse()
 	if *logPath == "" {
 		log.Println("-log is required")
 		os.Exit(2)
@@ -47,6 +47,9 @@ func main() {
 	}
 	if *requireOverride {
 		cfg.Target.Require = true
+	}
+	if *verboseFlag {
+		cfg.Replay.Verbose = true
 	}
 
 	if cfg.Target.Require && cfg.Target.OverrideURL == "" {
