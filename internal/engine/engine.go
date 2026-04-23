@@ -442,7 +442,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 				if e.cfg.Replay.Verbose {
 					log.Printf("[VERBOSE] Validation failed: conn=%d seq=%d status=%d expected_status=%d", requestEvent.ConnectionID, requestEvent.Sequence, exec.statusCode, expected.Status)
 					if len(exec.body) > 0 {
-						log.Printf("[VERBOSE] Validation failed body: %s", string(exec.body))
+						log.Printf("[VERBOSE] Validation failed body: %s", exec.body)
 					}
 				}
 				result.ValidationFailed++
