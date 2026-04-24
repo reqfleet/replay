@@ -107,7 +107,7 @@ func main() {
 			ts := connStart.Add(time.Duration(r) * 100 * time.Millisecond)
 
 			req := model.Event{
-				Type:         "request",
+				Type:         model.EventRequest,
 				Status:       *status,
 				ConnectionID: connID,
 				Headers: map[string][]string{
