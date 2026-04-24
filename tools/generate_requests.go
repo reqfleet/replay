@@ -12,15 +12,6 @@ import (
 	"github.com/reqfleet/replay/internal/model"
 )
 
-type MetaEvent struct {
-	Type          string `json:"type"`
-	FormatVersion string `json:"format_version,omitempty"`
-	Generator     string `json:"generator,omitempty"`
-	CreatedAt     string `json:"created_at,omitempty"`
-}
-
-type GenericEvent map[string]interface{}
-
 func writeJSONLine(f *os.File, v interface{}) error {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -88,11 +79,11 @@ func main() {
 		connID := c
 		connStart := now.Add(time.Duration(c-1) * 50 * time.Millisecond)
 
-		openEvt := GenericEvent{
-			"type":                      "connection_open",
-			"connection_id":             connID,
-			"timestamp":                 connStart.Format(time.RFC3339Nano),
-			"downstream_remote_address": "172.18.0.1:45398",
+		openEvt := model.Event{
+			Type:                    model.EventConnectionOpen,
+			ConnectionID:            connID,
+			Timestamp:               connStart.Format(time.RFC3339Nano),
+			DownstreamRemoteAddress: "172.18.0.1:45398",
 		}
 		if err := writeJSONLine(f, openEvt); err != nil {
 			fmt.Fprintf(os.Stderr, "write open: %v\n", err)
@@ -133,11 +124,11 @@ func main() {
 			}
 		}
 
-		closeEvt := GenericEvent{
-			"type":          "connection_close",
-			"connection_id": connID,
-			"timestamp":     connStart.Add(time.Duration(*reqs+1) * time.Second).Format(time.RFC3339Nano),
-			"reason":        "remote_close",
+		closeEvt := model.Event{
+			Type:         model.EventConnectionClose,
+			ConnectionID: connID,
+			Timestamp:    connStart.Add(time.Duration(*reqs+1) * time.Second).Format(time.RFC3339Nano),
+			Reason:       "remote_close",
 		}
 		if err := writeJSONLine(f, closeEvt); err != nil {
 			fmt.Fprintf(os.Stderr, "write close: %v\n", err)
