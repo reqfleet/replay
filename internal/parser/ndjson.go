@@ -125,11 +125,8 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		}
 		hasConnectionID := rawEvent.ConnectionID != nil
 
-		// For the first parsed event, validate meta and format_version
-		if parsedEvents == 1 {
-			if event.Type != model.EventMeta {
-				return fmt.Errorf("line %d: must be meta event", line)
-			}
+		// Optional meta event validation
+		if event.Type == model.EventMeta {
 			fv := event.FormatVersion
 			if fv == "" {
 				return fmt.Errorf("line %d: missing format_version", line)

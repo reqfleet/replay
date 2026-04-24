@@ -80,9 +80,9 @@ func TestParseSkipsNonJSONLines(t *testing.T) {
 	}
 }
 
-func TestParseRejectsNoMetaFirst(t *testing.T) {
+func TestParseAcceptsNoMetaFirst(t *testing.T) {
 	input := strings.NewReader("{" +
-		`"type":"request"` +
+		`"type":"request","connection_id":1,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
 		"}\n")
 
 	var events []model.Event
@@ -90,8 +90,11 @@ func TestParseRejectsNoMetaFirst(t *testing.T) {
 		events = append(events, e)
 		return nil
 	})
-	if err == nil {
-		t.Fatal("expected error when first line is not meta")
+	if err != nil {
+		t.Fatalf("expected success when first line is not meta, got error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
 	}
 }
 
