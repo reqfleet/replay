@@ -130,7 +130,16 @@ func main() {
 					Authority: authority,
 					Path:      p,
 				},
-				Headers: map[string][]string{"User-Agent": {"replay-gen"}, "Accept": {"*/*"}},
+				Headers: map[string][]string{
+					":authority":    {authority},
+					":method":       {"GET"},
+					":path":         {p},
+					":scheme":       {scheme},
+					"User-Agent":    {"replay-gen"},
+					"Accept":        {"*/*"},
+					"Authorization": {"Bearer dummy-auth-token-12345"},
+					"X-Api-Key":     {"dummy-api-key-67890"},
+				},
 				Body:    Body{Encoding: "base64", Content: "", SizeBytes: 0},
 			}
 			if err := writeJSONLine(f, req); err != nil {
