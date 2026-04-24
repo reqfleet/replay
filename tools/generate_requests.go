@@ -30,7 +30,7 @@ type RequestEvent struct {
 	ConnectionID int                 `json:"connection_id"`
 	Headers      map[string][]string `json:"headers"`
 	HTTP         HTTPRequestMeta     `json:"http"`
-	DurationMs   int                 `json:"duration_ms"`
+	DurationMS   float64             `json:"duration_ms"`
 	Timestamp    string              `json:"timestamp"`
 }
 
@@ -139,7 +139,7 @@ func main() {
 					Method:    "GET",
 					Path:      p,
 				},
-				DurationMs: 16,
+				DurationMS: 16,
 				Timestamp:  ts.Format(time.RFC3339Nano),
 			}
 			if err := writeJSONLine(f, req); err != nil {

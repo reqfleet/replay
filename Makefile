@@ -8,22 +8,24 @@ LOG ?= requests.log
 GOOS ?= $(shell $(GO) env GOOS)
 GOARCH ?= $(shell $(GO) env GOARCH)
 
-.PHONY: test build tidy run run-sample clean docker-build e2e
+.PHONY: test build tidy run run-sample clean docker-build e2e e2e-server-start e2e-server-stop alltests
 
 test:
 	$(GO) test $(PKG) -count=1
 
 e2e-server-start:
 	@echo "Starting test server on localhost:6000..."
-	@$(GO) run ./e2e/test_server.go > /dev/null 2>&1 & echo $$! > e2e_server.pid
+	@mkdir -p $(BIN_DIR)
+	@$(GO) build -o $(BIN_DIR)/e2e_test_server ./e2e/test_server.go
+	@$(BIN_DIR)/e2e_test_server > /dev/null 2>&1 & echo $$! > e2e_server.pid
 	@sleep 2
 	@echo "Test server started."
 
 e2e-server-stop:
 	@if [ -f e2e_server.pid ]; then \
 		echo "Stopping test server..."; \
-		kill -9 `cat e2e_server.pid` || true; \
-		rm -f e2e_server.pid; \
+		kill $$(cat e2e_server.pid) || true; \
+		rm -f e2e_server.pid $(BIN_DIR)/e2e_test_server; \
 	else \
 		echo "No test server running."; \
 	fi
