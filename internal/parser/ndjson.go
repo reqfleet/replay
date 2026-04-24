@@ -92,7 +92,6 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 	scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
 
 	line := 0
-	parsedEvents := 0
 	states := make(map[int]*connectionSequenceState)
 	stateForConnection := func(connectionID int) *connectionSequenceState {
 		state := states[connectionID]
@@ -110,7 +109,6 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
 			continue
 		}
-		parsedEvents++
 
 		var rawEvent struct {
 			model.Event
@@ -125,11 +123,8 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		}
 		hasConnectionID := rawEvent.ConnectionID != nil
 
-		// For the first parsed event, validate meta and format_version
-		if parsedEvents == 1 {
-			if event.Type != model.EventMeta {
-				return fmt.Errorf("line %d: must be meta event", line)
-			}
+		// Optional meta event validation
+		if event.Type == model.EventMeta {
 			fv := event.FormatVersion
 			if fv == "" {
 				return fmt.Errorf("line %d: missing format_version", line)
