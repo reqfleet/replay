@@ -92,7 +92,6 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 	scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
 
 	line := 0
-	parsedEvents := 0
 	states := make(map[int]*connectionSequenceState)
 	stateForConnection := func(connectionID int) *connectionSequenceState {
 		state := states[connectionID]
@@ -110,7 +109,6 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
 			continue
 		}
-		parsedEvents++
 
 		var rawEvent struct {
 			model.Event
