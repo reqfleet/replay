@@ -19,27 +19,19 @@ type MetaEvent struct {
 
 type HTTPRequestMeta struct {
 	Version   string `json:"version,omitempty"`
-	Method    string `json:"method,omitempty"`
-	Scheme    string `json:"scheme,omitempty"`
 	Authority string `json:"authority,omitempty"`
+	Method    string `json:"method,omitempty"`
 	Path      string `json:"path,omitempty"`
-}
-
-type Body struct {
-	Encoding  string `json:"encoding,omitempty"`
-	Content   string `json:"content,omitempty"`
-	SizeBytes int64  `json:"size_bytes,omitempty"`
 }
 
 type RequestEvent struct {
 	Type         string              `json:"type"`
+	Status       int                 `json:"status"`
 	ConnectionID int                 `json:"connection_id"`
-	StreamID     int                 `json:"stream_id,omitempty"`
-	Sequence     int                 `json:"sequence,omitempty"`
-	Timestamp    string              `json:"timestamp,omitempty"`
-	HTTP         HTTPRequestMeta     `json:"http,omitempty"`
-	Headers      map[string][]string `json:"headers,omitempty"`
-	Body         Body                `json:"body,omitempty"`
+	Headers      map[string][]string `json:"headers"`
+	HTTP         HTTPRequestMeta     `json:"http"`
+	DurationMs   int                 `json:"duration_ms"`
+	Timestamp    string              `json:"timestamp"`
 }
 
 type GenericEvent map[string]interface{}
@@ -78,6 +70,14 @@ func main() {
 		scheme = "http"
 	}
 	authority := u.Host
+	port := u.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
 	basePath := u.Path
 	if basePath == "" {
 		basePath = "/"
@@ -119,45 +119,31 @@ func main() {
 			p := path.Join(basePath, *subPath)
 			req := RequestEvent{
 				Type:         "request",
+				Status:       200,
 				ConnectionID: connID,
-				StreamID:     1,
-				Sequence:     r,
-				Timestamp:    ts.Format(time.RFC3339Nano),
+				Headers: map[string][]string{
+					"user-agent":         {"Go-http-client/1.1"},
+					"x-forwarded-for":    {"172.18.0.1"},
+					"x-scheme":           {scheme},
+					"accept-encoding":    {"gzip"},
+					"x-api-key":          {"rqt_api_dummy-apikey-local"},
+					"x-forwarded-proto":  {scheme},
+					"x-forwarded-scheme": {scheme},
+					"x-real-ip":          {"172.18.0.1"},
+					"x-forwarded-host":   {authority},
+					"x-forwarded-port":   {port},
+				},
 				HTTP: HTTPRequestMeta{
 					Version:   "HTTP/1.1",
-					Method:    "GET",
-					Scheme:    scheme,
 					Authority: authority,
+					Method:    "GET",
 					Path:      p,
 				},
-				Headers: map[string][]string{
-					":authority":    {authority},
-					":method":       {"GET"},
-					":path":         {p},
-					":scheme":       {scheme},
-					"User-Agent":    {"replay-gen"},
-					"Accept":        {"*/*"},
-					"Authorization": {"Bearer dummy-auth-token-12345"},
-					"X-Api-Key":     {"dummy-api-key-67890"},
-				},
-				Body:    Body{Encoding: "base64", Content: "", SizeBytes: 0},
+				DurationMs: 16,
+				Timestamp:  ts.Format(time.RFC3339Nano),
 			}
 			if err := writeJSONLine(f, req); err != nil {
 				fmt.Fprintf(os.Stderr, "write req: %v\n", err)
-				os.Exit(2)
-			}
-
-			// optional response event to match expected responses
-			resp := GenericEvent{
-				"type":          "response",
-				"connection_id": connID,
-				"sequence":      r,
-				"timestamp":     ts.Add(10 * time.Millisecond).Format(time.RFC3339Nano),
-				"status":        200,
-				"duration_ms":   10.0,
-			}
-			if err := writeJSONLine(f, resp); err != nil {
-				fmt.Fprintf(os.Stderr, "write resp: %v\n", err)
 				os.Exit(2)
 			}
 		}
