@@ -28,15 +28,17 @@ func writeJSONLine(f *os.File, v interface{}) error {
 
 func main() {
 	var (
-		baseURL = flag.String("base", "http://localhost:8080", "Base URL to generate requests for")
-		reqs    = flag.Int("reqs", 5, "Number of requests per connection")
-		conns   = flag.Int("conns", 1, "Number of simulated connections")
-		out     = flag.String("out", "requests.ndjson", "Output file path")
-		status  = flag.Int("status", 200, "HTTP response status code to simulate")
-		dur     = flag.Float64("duration", 16.0, "Request duration in milliseconds")
-		apiKey  = flag.String("apikey", "rqt_api_dummy-apikey-local", "API key header value")
-		subPath = flag.String("subpath", "api/v1/resource", "Subpath for generated requests")
+		baseURL     = flag.String("base", "http://localhost:8080", "Base URL to generate requests for")
+		requestPath = flag.String("subpath", "api/v1/resource", "Subpath for generated requests")
+		reqs        = flag.Int("reqs", 5, "Number of requests per connection")
+		conns       = flag.Int("conns", 1, "Number of simulated connections")
+		out         = flag.String("out", "requests.ndjson", "Output file path")
+		status      = flag.Int("status", 200, "HTTP response status code to simulate")
+		dur         = flag.Float64("duration", 16.0, "Request duration in milliseconds")
+		apiKey      = flag.String("apikey", "rqt_api_dummy-apikey-local", "API key header value")
 	)
+	flag.StringVar(baseURL, "url", *baseURL, "Alias for -base")
+	flag.StringVar(requestPath, "path", *requestPath, "Alias for -subpath")
 	flag.Parse()
 
 	u, err := url.Parse(*baseURL)
@@ -91,7 +93,7 @@ func main() {
 		}
 
 		for r := 1; r <= *reqs; r++ {
-			p := path.Join("/", *subPath)
+			p := path.Join("/", *requestPath)
 			if r > 1 {
 				p = path.Join(p, fmt.Sprintf("%d", r))
 			}
