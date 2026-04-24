@@ -18,8 +18,7 @@ e2e-server-start:
 	@mkdir -p $(BIN_DIR)
 	@$(GO) build -o $(BIN_DIR)/e2e_test_server ./e2e/test_server.go
 	@$(BIN_DIR)/e2e_test_server > /dev/null 2>&1 & echo $$! > e2e_server.pid
-	@sleep 2
-	@echo "Test server started."
+	@for i in $$(seq 1 30); do nc -z localhost 6000 && echo "Test server started." && break || sleep 0.1; done
 
 e2e-server-stop:
 	@if [ -f e2e_server.pid ]; then \

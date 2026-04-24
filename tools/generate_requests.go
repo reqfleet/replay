@@ -8,6 +8,8 @@ import (
 	"os"
 	"path"
 	"time"
+
+	"github.com/reqfleet/replay/internal/model"
 )
 
 type MetaEvent struct {
@@ -15,23 +17,6 @@ type MetaEvent struct {
 	FormatVersion string `json:"format_version,omitempty"`
 	Generator     string `json:"generator,omitempty"`
 	CreatedAt     string `json:"created_at,omitempty"`
-}
-
-type HTTPRequestMeta struct {
-	Version   string `json:"version,omitempty"`
-	Authority string `json:"authority,omitempty"`
-	Method    string `json:"method,omitempty"`
-	Path      string `json:"path,omitempty"`
-}
-
-type RequestEvent struct {
-	Type         string              `json:"type"`
-	Status       int                 `json:"status"`
-	ConnectionID int                 `json:"connection_id"`
-	Headers      map[string][]string `json:"headers"`
-	HTTP         HTTPRequestMeta     `json:"http"`
-	DurationMS   float64             `json:"duration_ms"`
-	Timestamp    string              `json:"timestamp"`
 }
 
 type GenericEvent map[string]interface{}
@@ -51,25 +36,24 @@ func writeJSONLine(f *os.File, v interface{}) error {
 }
 
 func main() {
-	outPath := flag.String("out", "requests.log", "output NDJSON file")
-	urlStr := flag.String("url", "http://localhost:8080", "base URL to use in generated logs (scheme+authority) e.g. http://localhost:8080/basepath")
-	subPath := flag.String("path", "", "subpath to use in generated request paths, e.g. /api")
-	conns := flag.Int("conns", 1, "number of distinct connection_ids to emit")
-	reqs := flag.Int("reqs", 5, "number of requests per connection")
-	format := flag.String("format", "1.0", "format_version to write in meta header")
-	generator := flag.String("generator", "replay-loggen", "meta.generator field")
+	var (
+		baseURL = flag.String("base", "http://localhost:8080", "Base URL to generate requests for")
+		reqs    = flag.Int("reqs", 5, "Number of requests per connection")
+		conns   = flag.Int("conns", 1, "Number of simulated connections")
+		out     = flag.String("out", "requests.ndjson", "Output file path")
+		status  = flag.Int("status", 200, "HTTP response status code to simulate")
+		dur     = flag.Float64("duration", 16.0, "Request duration in milliseconds")
+		apiKey  = flag.String("apikey", "rqt_api_dummy-apikey-local", "API key header value")
+	)
 	flag.Parse()
 
-	u, err := url.Parse(*urlStr)
+	u, err := url.Parse(*baseURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "invalid url: %v\n", err)
-		os.Exit(2)
-	}
-	scheme := u.Scheme
-	if scheme == "" {
-		scheme = "http"
+		fmt.Fprintf(os.Stderr, "invalid base URL: %v\n", err)
+		os.Exit(1)
 	}
 	authority := u.Host
+	scheme := u.Scheme
 	port := u.Port()
 	if port == "" {
 		if scheme == "https" {
@@ -78,68 +62,67 @@ func main() {
 			port = "80"
 		}
 	}
-	basePath := u.Path
-	if basePath == "" {
-		basePath = "/"
-	}
 
-	f, err := os.Create(*outPath)
+	f, err := os.Create(*out)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "create out: %v\n", err)
-		os.Exit(2)
+		fmt.Fprintf(os.Stderr, "failed to create output file: %v\n", err)
+		os.Exit(1)
 	}
 	defer f.Close()
 
-	// write meta
-	meta := MetaEvent{Type: "meta", FormatVersion: *format, Generator: *generator, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	now := time.Now().UTC()
+
+	meta := MetaEvent{
+		Type:          "metadata",
+		FormatVersion: "1.0",
+		Generator:     "generate_requests tool",
+		CreatedAt:     now.Format(time.RFC3339Nano),
+	}
 	if err := writeJSONLine(f, meta); err != nil {
 		fmt.Fprintf(os.Stderr, "write meta: %v\n", err)
 		os.Exit(2)
 	}
 
-	now := time.Now().UTC()
-	for ci := 1; ci <= *conns; ci++ {
-		connID := ci
-		// connection_open
-		open := GenericEvent{
-			"type":                      "connection_open",
-			"connection_id":             connID,
-			"timestamp":                 now.Format(time.RFC3339Nano),
-			"downstream_remote_address": "127.0.0.1:0",
-			"downstream_local_address":  "127.0.0.1:0",
-			"protocol":                  "HTTP/1.1",
+	for c := 1; c <= *conns; c++ {
+		connID := c
+
+		openEvt := GenericEvent{
+			"type":          "connection_open",
+			"connection_id": connID,
+			"timestamp":     now.Format(time.RFC3339Nano),
+			"remote_addr":   "172.18.0.1:45398",
 		}
-		if err := writeJSONLine(f, open); err != nil {
+		if err := writeJSONLine(f, openEvt); err != nil {
 			fmt.Fprintf(os.Stderr, "write open: %v\n", err)
 			os.Exit(2)
 		}
 
 		for r := 1; r <= *reqs; r++ {
-			ts := now.Add(time.Duration((ci-1)**reqs+r) * time.Second)
-			p := path.Join(basePath, *subPath)
-			req := RequestEvent{
+			p := "/"
+			if r > 1 {
+				p = path.Join("/", fmt.Sprintf("api/v1/resource/%d", r))
+			}
+			ts := now.Add(time.Duration(r) * 100 * time.Millisecond)
+
+			req := model.Event{
 				Type:         "request",
-				Status:       200,
+				Status:       *status,
 				ConnectionID: connID,
 				Headers: map[string][]string{
-					"user-agent":         {"Go-http-client/1.1"},
-					"x-forwarded-for":    {"172.18.0.1"},
-					"x-scheme":           {scheme},
-					"accept-encoding":    {"gzip"},
-					"x-api-key":          {"rqt_api_dummy-apikey-local"},
+					"x-api-key":          {*apiKey},
 					"x-forwarded-proto":  {scheme},
 					"x-forwarded-scheme": {scheme},
 					"x-real-ip":          {"172.18.0.1"},
 					"x-forwarded-host":   {authority},
 					"x-forwarded-port":   {port},
 				},
-				HTTP: HTTPRequestMeta{
+				HTTP: model.HTTPRequestMeta{
 					Version:   "HTTP/1.1",
 					Authority: authority,
 					Method:    "GET",
 					Path:      p,
 				},
-				DurationMS: 16,
+				DurationMS: *dur,
 				Timestamp:  ts.Format(time.RFC3339Nano),
 			}
 			if err := writeJSONLine(f, req); err != nil {
@@ -148,7 +131,6 @@ func main() {
 			}
 		}
 
-		// connection_close
 		closeEvt := GenericEvent{
 			"type":          "connection_close",
 			"connection_id": connID,
@@ -161,5 +143,5 @@ func main() {
 		}
 	}
 
-	fmt.Fprintf(os.Stdout, "wrote %s\n", *outPath)
+	fmt.Printf("Generated %d connections with %d requests each to %s\n", *conns, *reqs, *out)
 }
