@@ -73,7 +73,7 @@ func main() {
 	now := time.Now().UTC()
 
 	meta := MetaEvent{
-		Type:          "metadata",
+		Type:          "meta",
 		FormatVersion: "1.0",
 		Generator:     "generate_requests tool",
 		CreatedAt:     now.Format(time.RFC3339Nano),
