@@ -100,9 +100,9 @@ func main() {
 		}
 
 		for r := 1; r <= *reqs; r++ {
-			p := "/"
+			p := path.Join("/", *subPath)
 			if r > 1 {
-				p = path.Join("/", fmt.Sprintf("%s/%d", *subPath, r))
+				p = path.Join(p, fmt.Sprintf("%d", r))
 			}
 			ts := connStart.Add(time.Duration(r) * 100 * time.Millisecond)
 
