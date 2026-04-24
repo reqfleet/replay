@@ -44,6 +44,7 @@ func main() {
 		status  = flag.Int("status", 200, "HTTP response status code to simulate")
 		dur     = flag.Float64("duration", 16.0, "Request duration in milliseconds")
 		apiKey  = flag.String("apikey", "rqt_api_dummy-apikey-local", "API key header value")
+		subPath = flag.String("subpath", "api/v1/resource", "Subpath for generated requests")
 	)
 	flag.Parse()
 
@@ -85,11 +86,12 @@ func main() {
 
 	for c := 1; c <= *conns; c++ {
 		connID := c
+		connStart := now.Add(time.Duration(c-1) * 50 * time.Millisecond)
 
 		openEvt := GenericEvent{
-			"type":          "connection_open",
-			"connection_id": connID,
-			"timestamp":     now.Format(time.RFC3339Nano),
+			"type":                      "connection_open",
+			"connection_id":             connID,
+			"timestamp":                 connStart.Format(time.RFC3339Nano),
 			"downstream_remote_address": "172.18.0.1:45398",
 		}
 		if err := writeJSONLine(f, openEvt); err != nil {
@@ -100,9 +102,9 @@ func main() {
 		for r := 1; r <= *reqs; r++ {
 			p := "/"
 			if r > 1 {
-				p = path.Join("/", fmt.Sprintf("api/v1/resource/%d", r))
+				p = path.Join("/", fmt.Sprintf("%s/%d", *subPath, r))
 			}
-			ts := now.Add(time.Duration(r) * 100 * time.Millisecond)
+			ts := connStart.Add(time.Duration(r) * 100 * time.Millisecond)
 
 			req := model.Event{
 				Type:         "request",
@@ -134,7 +136,7 @@ func main() {
 		closeEvt := GenericEvent{
 			"type":          "connection_close",
 			"connection_id": connID,
-			"timestamp":     now.Add(time.Duration(*reqs+1) * time.Second).Format(time.RFC3339Nano),
+			"timestamp":     connStart.Add(time.Duration(*reqs+1) * time.Second).Format(time.RFC3339Nano),
 			"reason":        "remote_close",
 		}
 		if err := writeJSONLine(f, closeEvt); err != nil {
