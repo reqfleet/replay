@@ -90,7 +90,7 @@ func main() {
 			"type":          "connection_open",
 			"connection_id": connID,
 			"timestamp":     now.Format(time.RFC3339Nano),
-			"remote_addr":   "172.18.0.1:45398",
+			"downstream_remote_address": "172.18.0.1:45398",
 		}
 		if err := writeJSONLine(f, openEvt); err != nil {
 			fmt.Fprintf(os.Stderr, "write open: %v\n", err)
