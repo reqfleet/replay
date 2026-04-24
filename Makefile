@@ -8,10 +8,33 @@ LOG ?= requests.log
 GOOS ?= $(shell $(GO) env GOOS)
 GOARCH ?= $(shell $(GO) env GOARCH)
 
-.PHONY: test build tidy run run-sample clean docker-build
+.PHONY: test build tidy run run-sample clean docker-build e2e
 
 test:
 	$(GO) test $(PKG) -count=1
+
+e2e-server-start:
+	@echo "Starting test server on localhost:6000..."
+	@$(GO) run ./e2e/test_server.go > /dev/null 2>&1 & echo $$! > e2e_server.pid
+	@sleep 2
+	@echo "Test server started."
+
+e2e-server-stop:
+	@if [ -f e2e_server.pid ]; then \
+		echo "Stopping test server..."; \
+		kill -9 `cat e2e_server.pid` || true; \
+		rm -f e2e_server.pid; \
+	else \
+		echo "No test server running."; \
+	fi
+
+e2e: e2e-server-start
+	@echo "Running e2e tests..."
+	@$(GO) run ./cmd/replay -log e2e/requests-ndjson.log -verbose || ($(MAKE) e2e-server-stop; exit 1)
+	@$(MAKE) e2e-server-stop
+	@echo "e2e tests passed."
+
+alltests: test e2e
 
 build:
 	mkdir -p $(BIN_DIR)
