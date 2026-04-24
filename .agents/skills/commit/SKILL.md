@@ -19,10 +19,10 @@ git branch --show-current
 
 ```bash
 # Create and switch to a new branch
-git checkout -b <type>/<short-description>
+git checkout -b <type>-<short-description>
 ```
 
-Branch naming should follow the pattern: `<type>/<short-description>` where type matches the commit type (e.g., `feat/add-user-auth`, `fix/null-pointer-error`, `ref/extract-validation`).
+Branch naming should follow the pattern: `<type>-<short-description>` where type matches the commit type (e.g., `feat-add-user-auth`, `fix-null-pointer-error`, `ref-extract-validation`).
 
 ## Format
 
