@@ -10,7 +10,6 @@ Use when: you need to fetch PR review comments for `reqfleet/replay`, triage the
 Prerequisites
 - `gh` CLI installed and authenticated (access to `reqfleet/replay`).
 - `jq` installed for JSON parsing.
-- You have a local clone of `reqfleet/replay`.
 
 Quick fetch
 - Fetch the PR review JSON (returns a JSON structure containing `reviews` and `comments`):
@@ -50,7 +49,9 @@ Triage rules (suggested)
 Branch & workflow
 1. Stay on the current branch unless you specifically need to isolate the work elsewhere; there is no need to create a new branch just to address PR comments.
 
-2. For each comment, create a small, focused commit addressing that thread. Use conventional commit messages that reference the PR and thread when helpful, e.g.:
+2. Skip comments that are already resolved; focus only on unresolved feedback that still needs action.
+
+3. For each remaining comment, create a small, focused commit addressing that thread. Use conventional commit messages that reference the PR and thread when helpful, e.g.:
 
 ```bash
 git add path/to/file.go
@@ -73,75 +74,12 @@ if err != nil {
 // consider logging/trimming if body truncated
 ```
 
-- Centralize environment/config handling (`REPLAY_PARTIAL_SUCCESS_EXIT_ZERO`):
-
-Add the flag to the `Config` struct and parse it in `ApplyEnv` so all env overrides follow the same flow (example file: `cmd/replay/main.go` + `internal/config`):
-
-```go
-type Config struct {
-    // ... existing fields
-    PartialSuccessExitZero bool `env:"REPLAY_PARTIAL_SUCCESS_EXIT_ZERO"`
-}
-
-func (c *Config) ApplyEnv() error {
-    // parse and validate env overrides in one place
-}
-```
-
-- Avoid creating a new `http.Transport` per connection:
-
-Consider reusing transports (a single shared transport or a `sync.Pool` of transports) to reduce goroutine and memory overhead. If per-connection isolation is required, document the trade-off and measure.
-
-- Deduplicate `parseTimestamp`:
-
-Move `parseTimestamp` into a shared package (e.g., `internal/model` or `internal/util/time.go`) and use it across `internal/parser/ndjson.go` and `internal/engine/engine.go`.
-
-- Preserve latency precision:
-
-Use a `float64` value in milliseconds (or seconds) to avoid integer truncation:
-
-```go
-latencyMS := time.Since(start).Seconds() * 1000 // float64
-```
-
-- Avoid overflow in exponential backoff shifting:
-
-Cap the shift or use `math.Pow` to compute backoff safely:
-
-```go
-exp := attempt - 1
-if exp > 30 { exp = 30 }
-backoff := base << uint(exp)
-```
-
-or
-
-```go
-backoff := time.Duration(float64(base) * math.Pow(2, float64(attempt-1)))
-```
-
-- CPU metric accuracy:
-
-`runtime.NumCPU()` reports logical CPUs, not runtime usage. Either remove the metric, rename it to `logical_cpus_available`, or replace with real process CPU usage via a process metrics library (e.g., `gopsutil` or `go:runtime/metrics`).
-
-Automation helpers (script skeleton)
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-PR=$1
-gh pr-review review view "$PR" --repo reqfleet/replay > pr_review.json
-jq -r '.reviews[].comments[] | "\(.path):\(.line) \(.author_login): \(.body)"' pr_review.json
-# Manually inspect each thread, implement fixes, run tests, commit, push.
-```
-
 Testing & verification
 - Run tests and linters before committing:
 
 ```bash
 go test ./...
 gofmt -w .
-golangci-lint run ./...
 ```
 
 Committing and pushing
