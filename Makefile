@@ -1,6 +1,7 @@
 GO ?= go
 BINARY ?= replay
 BIN_DIR ?= bin
+IMG ?= $(BINARY)
 PKG ?= ./...
 LOG ?= requests.log
 
@@ -55,4 +56,4 @@ clean:
 
 docker-build:
 	$(MAKE) build GOOS=linux
-	docker build --build-arg BIN_DIR=$(BIN_DIR) --build-arg BINARY=$(BINARY) -t $(BINARY) .
+	docker build --build-arg BIN_DIR=$(BIN_DIR) --build-arg BINARY=$(BINARY) -t $(IMG) .
