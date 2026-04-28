@@ -92,6 +92,7 @@ type MetricsConfig struct {
 	ListenAddress string   `yaml:"listen_address"`
 	Path          string   `yaml:"path"`
 	PathTemplates []string `yaml:"path_templates"`
+	MaxLabels     int      `yaml:"max_labels"`
 }
 
 type CommonMetricLabelSet struct {
@@ -160,6 +161,7 @@ func Default() Config {
 			ListenAddress: "0.0.0.0:9102",
 			Path:          "/metrics",
 			PathTemplates: []string{},
+			MaxLabels:     20,
 		},
 		Env: map[string]string{},
 		Labels: CommonMetricLabelSet{

@@ -465,31 +465,35 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		}
 		connResult.Requests = append(connResult.Requests, reqRes)
 		result.RequestResults = append(result.RequestResults, reqRes)
-		e.metrics.LabelLatencyHistogram.WithLabelValues(
-			e.cfg.Labels.CollectionID,
-			label,
-			e.cfg.Labels.RunID,
-			e.cfg.Labels.EngineNo,
-			e.cfg.Labels.PlanID,
-			e.cfg.Labels.Zone,
-		).Observe(exec.latencyMS)
-		e.metrics.StatusCounter.WithLabelValues(
-			e.cfg.Labels.CollectionID,
-			e.cfg.Labels.PlanID,
-			e.cfg.Labels.RunID,
-			e.cfg.Labels.EngineNo,
-			label,
-			e.cfg.Labels.Zone,
-			fmt.Sprintf("%d", exec.statusCode),
-		).Inc()
-		e.metrics.EgressCounter.WithLabelValues(
-			e.cfg.Labels.CollectionID,
-			e.cfg.Labels.PlanID,
-			e.cfg.Labels.RunID,
-			e.cfg.Labels.EngineNo,
-			label,
-			e.cfg.Labels.Zone,
-		).Add(float64(exec.egressBytes))
+
+		if e.cfg.Metrics.Enabled && e.metrics != nil {
+			safeLabel := e.metrics.GetSafeLabel(label, e.cfg.Metrics.MaxLabels)
+			e.metrics.LabelLatencyHistogram.WithLabelValues(
+				e.cfg.Labels.CollectionID,
+				safeLabel,
+				e.cfg.Labels.RunID,
+				e.cfg.Labels.EngineNo,
+				e.cfg.Labels.PlanID,
+				e.cfg.Labels.Zone,
+			).Observe(exec.latencyMS)
+			e.metrics.StatusCounter.WithLabelValues(
+				e.cfg.Labels.CollectionID,
+				e.cfg.Labels.PlanID,
+				e.cfg.Labels.RunID,
+				e.cfg.Labels.EngineNo,
+				safeLabel,
+				e.cfg.Labels.Zone,
+				fmt.Sprintf("%d", exec.statusCode),
+			).Inc()
+			e.metrics.EgressCounter.WithLabelValues(
+				e.cfg.Labels.CollectionID,
+				e.cfg.Labels.PlanID,
+				e.cfg.Labels.RunID,
+				e.cfg.Labels.EngineNo,
+				safeLabel,
+				e.cfg.Labels.Zone,
+			).Add(float64(exec.egressBytes))
+		}
 	}
 
 	if result.ConnectionsAborted == 0 {

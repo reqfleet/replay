@@ -39,6 +39,7 @@ metrics:
   enabled: true
   listen_address: "0.0.0.0:9102"
   path: "/metrics"
+  max_labels: 20
 
 env:
   TARGET_ENV: "staging"
