@@ -225,11 +225,17 @@ func (c Config) Validate() error {
 	if c.Replay.Sharding.ShardIndex < 0 || c.Replay.Sharding.ShardIndex >= c.Replay.Sharding.ShardCount {
 		return errors.New("replay.sharding.shard_index must be within [0, shard_count)")
 	}
-	if c.Metrics.Path == "" {
-		return errors.New("metrics.path is required")
-	}
-	if c.Metrics.ListenAddress == "" {
-		return errors.New("metrics.listen_address is required")
+
+	if c.Metrics.Enabled {
+		if c.Metrics.Path == "" {
+			return errors.New("metrics.path is required")
+		}
+		if c.Metrics.ListenAddress == "" {
+			return errors.New("metrics.listen_address is required")
+		}
+		if c.Metrics.MaxLabels < 0 {
+			return errors.New("metrics.max_labels must be >= 0")
+		}
 	}
 	return nil
 }
@@ -265,6 +271,11 @@ func (c *Config) ApplyEnv() {
 	}
 	if v, ok := os.LookupEnv("METRICS_PATH"); ok && v != "" {
 		c.Metrics.Path = v
+	}
+	if v, ok := os.LookupEnv("METRICS_MAX_LABELS"); ok {
+		if i, err := strconv.Atoi(v); err == nil {
+			c.Metrics.MaxLabels = i
+		}
 	}
 
 	if v, ok := os.LookupEnv("REPLAY_LABEL_COLLECTION_ID"); ok && v != "" {
