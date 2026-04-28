@@ -401,7 +401,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		}
 
 		exec, err := e.sendRequest(ctx, client, requestEvent)
-		label := requestEvent.HTTP.Path
+		label, _, _ := strings.Cut(requestEvent.HTTP.Path, "?")
 		if label == "" {
 			label = "unknown"
 		}
