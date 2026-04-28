@@ -2,12 +2,14 @@ package parser
 
 import (
 	"bufio"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/reqfleet/replay/internal/model"
 )
 
@@ -73,16 +75,44 @@ func (s *connectionSequenceState) recordResponse(streamID, provided int) (int, e
 	return 0, fmt.Errorf("response missing sequence")
 }
 
+var readers = map[string]func(io.Reader) (io.ReadCloser, error){
+	"gzip": func(r io.Reader) (io.ReadCloser, error) {
+		return gzip.NewReader(r)
+	},
+	"zstd": func(r io.Reader) (io.ReadCloser, error) {
+		zr, err := zstd.NewReader(r)
+		if err != nil {
+			return nil, err
+		}
+		return zr.IOReadCloser(), nil
+	},
+	"": func(r io.Reader) (io.ReadCloser, error) {
+		return io.NopCloser(r), nil
+	},
+}
+
 // ParseFileStream opens the given path and streams parsed events to handler.
 // The handler is invoked for each parsed event and may return an error to
 // stop processing early.
-func ParseFileStream(path string, handler func(model.Event) error) error {
+func ParseFileStream(path string, format string, handler func(model.Event) error) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open log file: %w", err)
 	}
 	defer f.Close()
-	return ParseStream(f, handler)
+
+	newReader, ok := readers[format]
+	if !ok {
+		return fmt.Errorf("unsupported format: %s", format)
+	}
+
+	rc, err := newReader(f)
+	if err != nil {
+		return fmt.Errorf("%s reader: %w", format, err)
+	}
+	defer rc.Close()
+
+	return ParseStream(rc, handler)
 }
 
 // ParseStream reads NDJSON events from r and invokes handler for each parsed event.
