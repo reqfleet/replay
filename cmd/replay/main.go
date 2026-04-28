@@ -19,18 +19,23 @@ import (
 )
 
 func main() {
-        configPath := flag.String("config", "", "path to config.yaml (optional)")
-        logPath := flag.String("log", "", "path to requests.log NDJSON file")
-        dryRunFlag := flag.Bool("dry-run", false, "dry run mode: do not send network requests")
-        overrideFlag := flag.String("override-url", "", "override target URL (overrides config)")
-        requireOverride := flag.Bool("require-override", false, "fail if override-url is required but missing")
-        verboseFlag := flag.Bool("verbose", false, "enable verbose output (e.g. log response errors)")
-        flag.Parse()
+	configPath := flag.String("config", "", "path to config.yaml (optional)")
+	logPath := flag.String("log", "", "path to requests.log NDJSON file")
+	zstdFlag := flag.Bool("zstd", false, "read log file compressed with zstd")
+	gzipFlag := flag.Bool("gzip", false, "read log file compressed with gzip")
+	dryRunFlag := flag.Bool("dry-run", false, "dry run mode: do not send network requests")
+	overrideFlag := flag.String("override-url", "", "override target URL (overrides config)")
+	requireOverride := flag.Bool("require-override", false, "fail if override-url is required but missing")
+	verboseFlag := flag.Bool("verbose", false, "enable verbose output (e.g. log response errors)")
+	flag.Parse()
 	if *logPath == "" {
 		log.Println("-log is required")
 		os.Exit(2)
 	}
-
+	if *zstdFlag && *gzipFlag {
+		log.Println("cannot specify both -zstd and -gzip")
+		os.Exit(2)
+	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Printf("load config: %v", err)
@@ -99,7 +104,14 @@ func main() {
 		close(done)
 	}()
 
-	if err := parser.ParseFileStream(*logPath, func(e model.Event) error {
+	var format string
+	if *gzipFlag {
+		format = "gzip"
+	} else if *zstdFlag {
+		format = "zstd"
+	}
+
+	if err := parser.ParseFileStream(*logPath, format, func(e model.Event) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

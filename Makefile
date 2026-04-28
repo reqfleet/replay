@@ -33,9 +33,12 @@ e2e-server-stop:
 e2e: e2e-server-start
 	@echo "Running e2e tests..."
 	@$(GO) run ./cmd/replay -log e2e/requests-ndjson.log -verbose || ($(MAKE) e2e-server-stop; exit 1)
+	@echo "Running e2e tests with gzip..."
+	@$(GO) run ./cmd/replay -log e2e/requests-ndjson.log.gz -gzip -verbose || ($(MAKE) e2e-server-stop; exit 1)
+	@echo "Running e2e tests with zstd..."
+	@$(GO) run ./cmd/replay -log e2e/requests-ndjson.log.zst -zstd -verbose || ($(MAKE) e2e-server-stop; exit 1)
 	@$(MAKE) e2e-server-stop
 	@echo "e2e tests passed."
-
 alltests: test e2e
 
 build:
