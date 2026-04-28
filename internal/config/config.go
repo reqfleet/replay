@@ -88,9 +88,10 @@ type CheckpointConfig struct {
 }
 
 type MetricsConfig struct {
-	Enabled       bool   `yaml:"enabled"`
-	ListenAddress string `yaml:"listen_address"`
-	Path          string `yaml:"path"`
+	Enabled       bool     `yaml:"enabled"`
+	ListenAddress string   `yaml:"listen_address"`
+	Path          string   `yaml:"path"`
+	PathTemplates []string `yaml:"path_templates"`
 }
 
 type CommonMetricLabelSet struct {
@@ -158,6 +159,7 @@ func Default() Config {
 			Enabled:       true,
 			ListenAddress: "0.0.0.0:9102",
 			Path:          "/metrics",
+			PathTemplates: []string{},
 		},
 		Env: map[string]string{},
 		Labels: CommonMetricLabelSet{
