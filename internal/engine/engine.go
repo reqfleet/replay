@@ -82,9 +82,10 @@ type Summary struct {
 }
 
 type Engine struct {
-	cfg     config.Config
-	metrics *metrics.Registry
-	client  *http.Client
+	cfg                 config.Config
+	metrics             *metrics.Registry
+	client              *http.Client
+	parsedPathTemplates map[int][]PathTemplate
 }
 
 const maxBodyRead = 10 * 1024 * 1024 // 10 MiB
@@ -111,7 +112,12 @@ func New(cfg config.Config, registry *metrics.Registry) *Engine {
 		Transport: transport,
 	}
 
-	return &Engine{cfg: cfg, metrics: registry, client: client}
+	return &Engine{
+		cfg:                 cfg,
+		metrics:             registry,
+		client:              client,
+		parsedPathTemplates: ParsePathTemplates(cfg.Metrics.PathTemplates),
+	}
 }
 
 // ReplayStream processes events from the provided channel as they arrive.
@@ -401,10 +407,6 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		}
 
 		exec, err := e.sendRequest(ctx, client, requestEvent)
-		label, _, _ := strings.Cut(requestEvent.HTTP.Path, "?")
-		if label == "" {
-			label = "unknown"
-		}
 
 		if err != nil {
 			result.SendErrors++
@@ -421,6 +423,14 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			connResult.Outcome = ConnectionAborted
 			result.ConnectionResults = append(result.ConnectionResults, connResult)
 			return result
+		}
+
+		label, _, _ := strings.Cut(requestEvent.HTTP.Path, "?")
+		if len(e.parsedPathTemplates) > 0 {
+			label = MatchPathTemplate(label, e.parsedPathTemplates)
+		}
+		if label == "" {
+			label = "unknown"
 		}
 
 		result.RequestsSent++
