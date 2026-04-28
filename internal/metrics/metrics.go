@@ -85,9 +85,14 @@ func (r *Registry) GetSafeLabel(label string, max int) string {
 
 	r.labelsMu.RLock()
 	_, exists := r.seenLabels[label]
+	full := len(r.seenLabels) >= max
 	r.labelsMu.RUnlock()
+
 	if exists {
 		return label
+	}
+	if full {
+		return "_other_"
 	}
 
 	r.labelsMu.Lock()
