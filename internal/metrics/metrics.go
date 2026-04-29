@@ -3,6 +3,7 @@ package metrics
 import (
 	"net/http"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -19,6 +20,9 @@ type Registry struct {
 	Mem                   *prometheus.GaugeVec
 
 	r *prometheus.Registry
+
+	seenLabels map[string]struct{}
+	labelsMu   sync.RWMutex
 }
 
 func New() *Registry {
@@ -56,7 +60,8 @@ func New() *Registry {
 			Name:      "mem_gauge",
 			Help:      "Memory used by engine",
 		}, []string{"collection_id", "plan_id", "run_id", "engine_no", "zone"}),
-		r: r,
+		r:          r,
+		seenLabels: make(map[string]struct{}),
 	}
 
 	r.MustRegister(
@@ -68,6 +73,39 @@ func New() *Registry {
 		out.Mem,
 	)
 	return out
+}
+
+// GetSafeLabel returns the label if it can be tracked based on the configured MaxLabels limit.
+// If the limit is reached and it's a new label, it returns a fallback label ("_other_") to ensure aggregate metrics remain accurate.
+// If max <= 0, no limit is enforced.
+func (r *Registry) GetSafeLabel(label string, max int) string {
+	if max <= 0 {
+		return label
+	}
+
+	r.labelsMu.RLock()
+	_, exists := r.seenLabels[label]
+	full := len(r.seenLabels) >= max
+	r.labelsMu.RUnlock()
+
+	if exists {
+		return label
+	}
+	if full {
+		return "_other_"
+	}
+
+	r.labelsMu.Lock()
+	defer r.labelsMu.Unlock()
+	// Check again in case another goroutine inserted it
+	if _, exists := r.seenLabels[label]; exists {
+		return label
+	}
+	if len(r.seenLabels) >= max {
+		return "_other_"
+	}
+	r.seenLabels[label] = struct{}{}
+	return label
 }
 
 func (r *Registry) Handler() http.Handler {
