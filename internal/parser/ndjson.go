@@ -116,6 +116,11 @@ func ParseFileStream(path string, format string, handler func(model.Event) error
 	return ParseStream(rc, handler)
 }
 
+type rawEvent struct {
+	model.Event
+	ConnectionID *int `json:"connection_id"`
+}
+
 // ParseStream reads NDJSON events from r and invokes handler for each parsed event.
 // The handler may return an error to stop processing early.
 func ParseStream(r io.Reader, handler func(model.Event) error) error {
@@ -141,18 +146,15 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			continue
 		}
 
-		var rawEvent struct {
-			model.Event
-			ConnectionID *int `json:"connection_id"`
-		}
-		if err := json.Unmarshal(raw, &rawEvent); err != nil {
+		var ev rawEvent
+		if err := json.Unmarshal(raw, &ev); err != nil {
 			return fmt.Errorf("line %d: invalid json: %w", line, err)
 		}
-		event := rawEvent.Event
-		if rawEvent.ConnectionID != nil {
-			event.ConnectionID = *rawEvent.ConnectionID
+		event := ev.Event
+		if ev.ConnectionID != nil {
+			event.ConnectionID = *ev.ConnectionID
 		}
-		hasConnectionID := rawEvent.ConnectionID != nil
+		hasConnectionID := ev.ConnectionID != nil
 
 		// Optional meta event validation
 		if event.Type == model.EventMeta {
