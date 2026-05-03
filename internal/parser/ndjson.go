@@ -28,11 +28,6 @@ type connectionSequenceState struct {
 	requestSequenceByStream map[int]int
 }
 
-type rawEvent struct {
-	model.Event
-	ConnectionID *int `json:"connection_id"`
-}
-
 func (s *connectionSequenceState) recordRequest(streamID, provided int) (int, error) {
 	if provided > 0 {
 		if s.nextRequestSequence > 0 && provided < s.nextRequestSequence {
@@ -121,6 +116,11 @@ func ParseFileStream(path string, format string, handler func(model.Event) error
 	return ParseStream(rc, handler)
 }
 
+type rawEvent struct {
+	model.Event
+	ConnectionID *int `json:"connection_id"`
+}
+
 // ParseStream reads NDJSON events from r and invokes handler for each parsed event.
 // The handler may return an error to stop processing early.
 func ParseStream(r io.Reader, handler func(model.Event) error) error {
@@ -146,15 +146,15 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			continue
 		}
 
-		var r rawEvent
-		if err := json.Unmarshal(raw, &r); err != nil {
+		var ev rawEvent
+		if err := json.Unmarshal(raw, &ev); err != nil {
 			return fmt.Errorf("line %d: invalid json: %w", line, err)
 		}
-		event := r.Event
-		if r.ConnectionID != nil {
-			event.ConnectionID = *r.ConnectionID
+		event := ev.Event
+		if ev.ConnectionID != nil {
+			event.ConnectionID = *ev.ConnectionID
 		}
-		hasConnectionID := r.ConnectionID != nil
+		hasConnectionID := ev.ConnectionID != nil
 
 		// Optional meta event validation
 		if event.Type == model.EventMeta {
