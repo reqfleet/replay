@@ -28,6 +28,11 @@ type connectionSequenceState struct {
 	requestSequenceByStream map[int]int
 }
 
+type rawEvent struct {
+	model.Event
+	ConnectionID *int `json:"connection_id"`
+}
+
 func (s *connectionSequenceState) recordRequest(streamID, provided int) (int, error) {
 	if provided > 0 {
 		if s.nextRequestSequence > 0 && provided < s.nextRequestSequence {
@@ -141,18 +146,15 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			continue
 		}
 
-		var rawEvent struct {
-			model.Event
-			ConnectionID *int `json:"connection_id"`
-		}
-		if err := json.Unmarshal(raw, &rawEvent); err != nil {
+		var r rawEvent
+		if err := json.Unmarshal(raw, &r); err != nil {
 			return fmt.Errorf("line %d: invalid json: %w", line, err)
 		}
-		event := rawEvent.Event
-		if rawEvent.ConnectionID != nil {
-			event.ConnectionID = *rawEvent.ConnectionID
+		event := r.Event
+		if r.ConnectionID != nil {
+			event.ConnectionID = *r.ConnectionID
 		}
-		hasConnectionID := rawEvent.ConnectionID != nil
+		hasConnectionID := r.ConnectionID != nil
 
 		// Optional meta event validation
 		if event.Type == model.EventMeta {
