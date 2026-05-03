@@ -2,6 +2,7 @@ package parser
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -135,8 +136,8 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 	for scanner.Scan() {
 		line++
 		raw := scanner.Bytes()
-		trimmed := strings.TrimSpace(string(raw))
-		if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] != '{' {
 			continue
 		}
 
@@ -173,13 +174,18 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			}
 		}
 
+		var isHTTP11 bool
+		if event.Type == model.EventRequest || event.Type == model.EventResponse {
+			isHTTP11 = len(event.HTTP.Version) >= 8 && strings.EqualFold(event.HTTP.Version[:8], "HTTP/1.1")
+			if isHTTP11 && event.StreamID == 0 {
+				event.StreamID = 1
+			}
+		}
+
 		switch event.Type {
 		case model.EventRequest:
 			if !hasConnectionID {
 				return fmt.Errorf("line %d: request missing connection_id", line)
-			}
-			if strings.Contains(strings.ToUpper(event.HTTP.Version), "HTTP/1.1") && event.StreamID == 0 {
-				event.StreamID = 1
 			}
 			sequence, err := stateForConnection(event.ConnectionID).recordRequest(event.StreamID, event.Sequence)
 			if err != nil {
@@ -192,16 +198,13 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			if event.HTTP.Path == "" {
 				return fmt.Errorf("line %d: request missing http.path", line)
 			}
-			if strings.Contains(strings.ToUpper(event.HTTP.Version), "HTTP/1.1") && event.StreamID != 1 {
+			if isHTTP11 && event.StreamID != 1 {
 				return fmt.Errorf("line %d: HTTP/1.1 requests must use stream_id=1", line)
 			}
 
 		case model.EventResponse:
 			if !hasConnectionID {
 				return fmt.Errorf("line %d: response missing connection_id", line)
-			}
-			if strings.Contains(strings.ToUpper(event.HTTP.Version), "HTTP/1.1") && event.StreamID == 0 {
-				event.StreamID = 1
 			}
 			sequence, err := stateForConnection(event.ConnectionID).recordResponse(event.StreamID, event.Sequence)
 			if err != nil {
