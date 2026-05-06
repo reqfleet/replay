@@ -13,7 +13,6 @@ const (
 type Event struct {
 	Type          EventType `json:"type"`
 	FormatVersion string    `json:"format_version,omitempty"`
-	Generator     string    `json:"generator,omitempty"`
 	CreatedAt     string    `json:"created_at,omitempty"`
 	Node          string    `json:"node,omitempty"`
 	Cluster       string    `json:"cluster,omitempty"`
