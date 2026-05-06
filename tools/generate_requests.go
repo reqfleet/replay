@@ -69,7 +69,6 @@ func main() {
 	meta := model.Event{
 		Type:          model.EventMeta,
 		FormatVersion: "1.0",
-		Generator:     "generate_requests tool",
 		CreatedAt:     now.Format(time.RFC3339Nano),
 	}
 	if err := writeJSONLine(f, meta); err != nil {
