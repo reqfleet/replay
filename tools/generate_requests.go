@@ -69,7 +69,6 @@ func main() {
 	meta := model.Event{
 		Type:          model.EventMeta,
 		FormatVersion: "1.0",
-		CreatedAt:     now.Format(time.RFC3339Nano),
 	}
 	if err := writeJSONLine(f, meta); err != nil {
 		fmt.Fprintf(os.Stderr, "write meta: %v\n", err)
