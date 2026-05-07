@@ -63,14 +63,14 @@ CLI flags are applied last and take highest precedence for safety-related settin
 - Always run with `--dry-run` first to confirm traffic parsing and pacing without emitting network requests.
 - When replaying against non-production targets, use `--override-url` to direct traffic and consider setting `--require-override` in operators' configs to avoid accidental live traffic.
 - Verify the metrics endpoint (default `http://0.0.0.0:9102/metrics`) is reachable before and during runs.
-- If you need resumable runs, set `checkpoint.file` in the YAML to persist completed sequences.
+- If you need resumable runs, set `checkpoint.file` in the YAML to persist completed sequences per `node` + `connection_id`.
 
 ## Programmatic outcome details
 
 In addition to the summary printed to stdout, the engine maintains structured outcome types (used by SDKs and future outputs):
 
-- `RequestResult` — fields: `connection_id`, `sequence`, `outcome` (`sent`, `send_error`, `response_received`, `validation_failed`, `skipped`), `status_code`, `latency_ms`, `error`, `validation_failed`, `skipped`.
-- `ConnectionResult` — fields: `connection_id`, `outcome` (`completed`/`aborted`), `requests` (array of `RequestResult`).
+- `RequestResult` — fields: `node`, `connection_id`, `sequence`, `outcome` (`sent`, `send_error`, `response_received`, `validation_failed`, `skipped`), `status_code`, `latency_ms`, `error`, `validation_failed`, `skipped`.
+- `ConnectionResult` — fields: `node`, `connection_id`, `outcome` (`completed`/`aborted`), `requests` (array of `RequestResult`).
 
 These are aggregated into the engine `Summary` for programmatic consumption or future JSON output.
 
@@ -124,7 +124,7 @@ When a recorded response exists for a request (`connection_id` + `sequence`), mi
 When idempotency safeguards are enabled, mutation methods are skipped unless one of the allow headers is present.
 Lifecycle checks require both `connection_open` and `connection_close` events per replayed connection.
 
-Sharding routes connections by `connection_id` hash (`shard_index` / `shard_count`) and only replays the local shard.
-If `checkpoint.file` is set, completed sequences are persisted and skipped on the next run.
+Sharding routes connections by `node` + `connection_id` hash (`shard_index` / `shard_count`) and only replays the local shard.
+If `checkpoint.file` is set, completed sequences are persisted and skipped on the next run using the same `node` + `connection_id` identity.
 For HTTP/2 traffic, `serialized` replays requests sequentially, while `multiplexed`
 replays by stream with bounded stream concurrency.

@@ -231,6 +231,41 @@ func TestParseConnectionCloseCleansUpState(t *testing.T) {
 	}
 }
 
+func TestParseIsolatesStateByNode(t *testing.T) {
+	input := strings.NewReader("{" +
+		`"type":"meta","format_version":"1.0"` +
+		"}\n" +
+		"{" +
+		`"type":"request","node":"envoy-a","connection_id":1,"http":{"authority":"example.com","path":"/a"}` +
+		"}\n" +
+		"{" +
+		`"type":"request","node":"envoy-b","connection_id":1,"http":{"authority":"example.com","path":"/b"}` +
+		"}\n" +
+		"{" +
+		`"type":"connection_close","node":"envoy-a","connection_id":1,"reason":"remote_close"` +
+		"}\n" +
+		"{" +
+		`"type":"connection_close","node":"envoy-b","connection_id":1,"reason":"remote_close"` +
+		"}\n")
+
+	events := make([]model.Event, 0)
+	if err := ParseStream(input, func(e model.Event) error {
+		events = append(events, e)
+		return nil
+	}); err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if len(events) != 5 {
+		t.Fatalf("expected 5 events, got %d", len(events))
+	}
+	if got, want := events[1].Sequence, 1; got != want {
+		t.Errorf("envoy-a sequence = %d, want %d", got, want)
+	}
+	if got, want := events[2].Sequence, 1; got != want {
+		t.Errorf("envoy-b sequence = %d, want %d", got, want)
+	}
+}
+
 func TestParseConnectionCloseInvalidReason(t *testing.T) {
 	input := strings.NewReader("{" +
 		`"type":"connection_close","connection_id":1,"reason":"invalid_reason"` +
