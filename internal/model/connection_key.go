@@ -11,6 +11,13 @@ type ConnectionKey struct {
 	ConnectionID int
 }
 
+func (k ConnectionKey) String() string {
+	if k.Node == "" {
+		return strconv.Itoa(k.ConnectionID)
+	}
+	return k.Node + "/" + strconv.Itoa(k.ConnectionID)
+}
+
 func (k ConnectionKey) MarshalText() ([]byte, error) {
 	if k.Node == "" {
 		return []byte(strconv.Itoa(k.ConnectionID)), nil
