@@ -52,6 +52,7 @@ const (
 )
 
 type RequestResult struct {
+	Node             string         `json:"node,omitempty"`
 	ConnectionID     int            `json:"connection_id"`
 	Sequence         int            `json:"sequence"`
 	Outcome          RequestOutcome `json:"outcome"`
@@ -63,6 +64,7 @@ type RequestResult struct {
 }
 
 type ConnectionResult struct {
+	Node         string            `json:"node,omitempty"`
 	ConnectionID int               `json:"connection_id"`
 	Outcome      ConnectionOutcome `json:"outcome"`
 	Requests     []RequestResult   `json:"requests"`
@@ -197,14 +199,14 @@ func (e *Engine) startWorkers(ctx context.Context, wg *sync.WaitGroup, jobs <-ch
 }
 
 func (e *Engine) bufferAndSchedule(ctx context.Context, events <-chan model.Event, jobs chan<- replayJob) error {
-	bufs := make(map[int]*connBuf)
+	bufs := make(map[model.ConnectionKey]*connBuf)
 	var parseErr error
 
 	for ev := range events {
 		if ev.Type == model.EventMeta {
 			continue
 		}
-		id := ev.ConnectionID
+		id := model.ConnectionKey{Node: ev.Node, ConnectionID: ev.ConnectionID}
 		b := bufs[id]
 		if b == nil {
 			b = &connBuf{responses: make(map[int]model.Event)}
@@ -228,7 +230,7 @@ func (e *Engine) bufferAndSchedule(ctx context.Context, events <-chan model.Even
 				continue
 			}
 			if e.cfg.Replay.Lifecycle.RequireOpen && !b.hasOpen {
-				parseErr = fmt.Errorf("connection %q missing connection_open", id)
+				parseErr = fmt.Errorf("connection %v missing connection_open", id)
 				break
 			}
 			if !connectionBelongsToShard(id, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
@@ -344,7 +346,8 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 	}
 
 	connID := requests[0].ConnectionID
-	connResult := ConnectionResult{ConnectionID: connID, Outcome: ConnectionCompleted, Requests: []RequestResult{}}
+	connKey := model.ConnectionKey{Node: requests[0].Node, ConnectionID: connID}
+	connResult := ConnectionResult{Node: connKey.Node, ConnectionID: connKey.ConnectionID, Outcome: ConnectionCompleted, Requests: []RequestResult{}}
 
 	var previousTimestamp time.Time
 	previousTimestampSet := false
@@ -368,9 +371,10 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			previousTimestampSet = true
 		}
 
-		reqRes := RequestResult{ConnectionID: requestEvent.ConnectionID, Sequence: requestEvent.Sequence}
+		requestKey := model.ConnectionKey{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID}
+		reqRes := RequestResult{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID, Sequence: requestEvent.Sequence}
 
-		if checkpoints.alreadyProcessed(requestEvent.ConnectionID, requestEvent.Sequence) {
+		if checkpoints.alreadyProcessed(requestKey, requestEvent.Sequence) {
 			result.Skipped++
 			reqRes.Outcome = RequestSkipped
 			reqRes.Skipped = true
@@ -383,7 +387,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.Skipped++
 			reqRes.Outcome = RequestSkipped
 			reqRes.Skipped = true
-			if err := checkpoints.markProcessed(requestEvent.ConnectionID, requestEvent.Sequence); err != nil {
+			if err := checkpoints.markProcessed(requestKey, requestEvent.Sequence); err != nil {
 				result.ConnectionsAborted++
 				result.Outcome = RunFailed
 				reqRes.Error = err.Error()
@@ -439,7 +443,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		reqRes.StatusCode = exec.statusCode
 		reqRes.LatencyMS = exec.latencyMS
 
-		if err := checkpoints.markProcessed(requestEvent.ConnectionID, requestEvent.Sequence); err != nil {
+		if err := checkpoints.markProcessed(requestKey, requestEvent.Sequence); err != nil {
 			result.ConnectionsAborted++
 			result.Outcome = RunFailed
 			reqRes.Error = err.Error()
@@ -450,7 +454,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		if expected, ok := responsesBySequence[requestEvent.Sequence]; ok {
 			if e.responseValidationFailed(expected, exec) {
 				if e.cfg.Replay.Verbose {
-					log.Printf("[VERBOSE] Validation failed: conn=%d seq=%d status=%d expected_status=%d", requestEvent.ConnectionID, requestEvent.Sequence, exec.statusCode, expected.Status)
+					log.Printf("[VERBOSE] Validation failed: node=%s conn=%d seq=%d status=%d expected_status=%d", requestEvent.Node, requestEvent.ConnectionID, requestEvent.Sequence, exec.statusCode, expected.Status)
 					if len(exec.body) > 0 {
 						log.Printf("[VERBOSE] Validation failed body: %s", exec.body)
 					}
@@ -572,11 +576,11 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 		aggregated.ConnectionsDone = 1
 	}
 	// Single connection, collect connection-level result
-	connID := 0
+	connKey := model.ConnectionKey{}
 	if len(requests) > 0 {
-		connID = requests[0].ConnectionID
+		connKey = model.ConnectionKey{Node: requests[0].Node, ConnectionID: requests[0].ConnectionID}
 	}
-	connResult := ConnectionResult{ConnectionID: connID, Outcome: ConnectionCompleted, Requests: combinedRequests}
+	connResult := ConnectionResult{Node: connKey.Node, ConnectionID: connKey.ConnectionID, Outcome: ConnectionCompleted, Requests: combinedRequests}
 	if aggregated.ConnectionsAborted > 0 {
 		connResult.Outcome = ConnectionAborted
 	}
@@ -614,28 +618,30 @@ func (e *Engine) shouldUseHTTP2MultiplexedMode(requests []model.Event) bool {
 	return false
 }
 
-func (e *Engine) filterGroupsByShard(groups map[int][]model.Event) map[int][]model.Event {
+func (e *Engine) filterGroupsByShard(groups map[model.ConnectionKey][]model.Event) map[model.ConnectionKey][]model.Event {
 	sharding := e.cfg.Replay.Sharding
 	if sharding.ShardCount <= 1 {
 		return groups
 	}
-	filtered := make(map[int][]model.Event)
-	for connectionID, requests := range groups {
-		if !connectionBelongsToShard(connectionID, sharding.ShardIndex, sharding.ShardCount) {
+	filtered := make(map[model.ConnectionKey][]model.Event)
+	for connectionKey, requests := range groups {
+		if !connectionBelongsToShard(connectionKey, sharding.ShardIndex, sharding.ShardCount) {
 			continue
 		}
-		filtered[connectionID] = requests
+		filtered[connectionKey] = requests
 	}
 	return filtered
 }
 
-func connectionBelongsToShard(connectionID int, shardIndex, shardCount int) bool {
+func connectionBelongsToShard(connectionKey model.ConnectionKey, shardIndex, shardCount int) bool {
 	if shardCount <= 1 {
 		return true
 	}
 	hasher := fnv.New32a()
 	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], uint64(connectionID))
+	_, _ = hasher.Write([]byte(connectionKey.Node))
+	_, _ = hasher.Write([]byte{0})
+	binary.LittleEndian.PutUint64(buf[:], uint64(connectionKey.ConnectionID))
 	_, _ = hasher.Write(buf[:])
 	return int(hasher.Sum32()%uint32(shardCount)) == shardIndex
 }

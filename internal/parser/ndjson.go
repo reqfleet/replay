@@ -128,12 +128,12 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 	scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
 
 	line := 0
-	states := make(map[int]*connectionSequenceState)
-	stateForConnection := func(connectionID int) *connectionSequenceState {
-		state := states[connectionID]
+	states := make(map[model.ConnectionKey]*connectionSequenceState)
+	stateForConnection := func(connectionKey model.ConnectionKey) *connectionSequenceState {
+		state := states[connectionKey]
 		if state == nil {
 			state = &connectionSequenceState{}
-			states[connectionID] = state
+			states[connectionKey] = state
 		}
 		return state
 	}
@@ -189,7 +189,8 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			if !hasConnectionID {
 				return fmt.Errorf("line %d: request missing connection_id", line)
 			}
-			sequence, err := stateForConnection(event.ConnectionID).recordRequest(event.StreamID, event.Sequence)
+			connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
+			sequence, err := stateForConnection(connectionKey).recordRequest(event.StreamID, event.Sequence)
 			if err != nil {
 				return fmt.Errorf("line %d: %w", line, err)
 			}
@@ -208,7 +209,8 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			if !hasConnectionID {
 				return fmt.Errorf("line %d: response missing connection_id", line)
 			}
-			sequence, err := stateForConnection(event.ConnectionID).recordResponse(event.StreamID, event.Sequence)
+			connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
+			sequence, err := stateForConnection(connectionKey).recordResponse(event.StreamID, event.Sequence)
 			if err != nil {
 				return fmt.Errorf("line %d: %w", line, err)
 			}
@@ -218,6 +220,8 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			if !hasConnectionID {
 				return fmt.Errorf("line %d: connection_open missing connection_id", line)
 			}
+			connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
+			stateForConnection(connectionKey)
 
 		case model.EventConnectionClose:
 			if !hasConnectionID {
@@ -228,7 +232,8 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 					return fmt.Errorf("line %d: invalid connection_close reason: %s", line, event.Reason)
 				}
 			}
-			delete(states, event.ConnectionID)
+			connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
+			delete(states, connectionKey)
 
 		case model.EventMeta:
 			// already validated above

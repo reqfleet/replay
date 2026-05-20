@@ -230,11 +230,11 @@ file as the implicit close point when `connection_close` is absent.
 
 Replay engine MUST:
 
-1. Group events by `connection_id`
+1. Group events by `node` + `connection_id`
 2. Normalize events into a per-connection monotonic `sequence` when the
   recorder did not emit one
 3. Sort by `sequence` within each connection
-4. Open one TCP connection per `connection_id`
+4. Open one TCP connection per `node` + `connection_id`
 5. Replay requests in order
 6. Optionally sleep based on timestamp delta
 7. Close connection when `connection_close` event is encountered, or at EOF if
@@ -260,8 +260,8 @@ When capture logs are too large for a single replay process, replay MAY be distr
 
 Requirements:
 
-1. Shard assignment MUST be derived from `connection_id` (for example, hash-based partitioning).
-2. All events for a single `connection_id` MUST be handled by exactly one replay engine.
+1. Shard assignment MUST be derived from `node` + `connection_id` (for example, hash-based partitioning).
+2. All events for a single `node` + `connection_id` MUST be handled by exactly one replay engine.
 3. Per-connection ordering rules in Section 9 MUST still hold within each shard.
 4. Sharding by byte offsets or naive timestamp windows MUST NOT split a single connection across shards.
 5. Each shard MAY be replayed independently, but deterministic behavior is defined primarily per connection, not as a single global wall-clock schedule.

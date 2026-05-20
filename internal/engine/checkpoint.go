@@ -7,12 +7,14 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/reqfleet/replay/internal/model"
 )
 
 type checkpointData struct {
-	Version     int         `json:"version"`
-	UpdatedAt   string      `json:"updated_at,omitempty"`
-	Connections map[int]int `json:"connections"`
+	Version     int                         `json:"version"`
+	UpdatedAt   string                      `json:"updated_at,omitempty"`
+	Connections map[model.ConnectionKey]int `json:"connections"`
 }
 
 type checkpointStore struct {
@@ -36,7 +38,7 @@ func newCheckpointStore(path string) (*checkpointStore, error) {
 		path: path,
 		data: checkpointData{
 			Version:     1,
-			Connections: map[int]int{},
+			Connections: map[model.ConnectionKey]int{},
 		},
 		flushCh:       make(chan struct{}, 1),
 		closeCh:       make(chan struct{}),
@@ -65,7 +67,7 @@ func newCheckpointStore(path string) (*checkpointStore, error) {
 	// mark that we loaded an on-disk checkpoint
 	store.persistedOnce = true
 	if store.data.Connections == nil {
-		store.data.Connections = map[int]int{}
+		store.data.Connections = map[model.ConnectionKey]int{}
 	}
 	if store.data.Version == 0 {
 		store.data.Version = 1
@@ -76,28 +78,28 @@ func newCheckpointStore(path string) (*checkpointStore, error) {
 	return store, nil
 }
 
-func (c *checkpointStore) alreadyProcessed(connectionID int, sequence int) bool {
+func (c *checkpointStore) alreadyProcessed(connectionKey model.ConnectionKey, sequence int) bool {
 	if c == nil || sequence <= 0 {
 		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	last, ok := c.data.Connections[connectionID]
+	last, ok := c.data.Connections[connectionKey]
 	return ok && sequence <= last
 }
 
-func (c *checkpointStore) markProcessed(connectionID int, sequence int) error {
+func (c *checkpointStore) markProcessed(connectionKey model.ConnectionKey, sequence int) error {
 	if c == nil || sequence <= 0 {
 		return nil
 	}
 
 	c.mu.Lock()
-	last := c.data.Connections[connectionID]
+	last := c.data.Connections[connectionKey]
 	if sequence <= last {
 		c.mu.Unlock()
 		return nil
 	}
-	c.data.Connections[connectionID] = sequence
+	c.data.Connections[connectionKey] = sequence
 	c.data.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	c.mu.Unlock()
 
@@ -133,7 +135,7 @@ func (c *checkpointStore) persist() error {
 	copyData := checkpointData{
 		Version:     c.data.Version,
 		UpdatedAt:   c.data.UpdatedAt,
-		Connections: make(map[int]int, len(c.data.Connections)),
+		Connections: make(map[model.ConnectionKey]int, len(c.data.Connections)),
 	}
 	for k, v := range c.data.Connections {
 		copyData.Connections[k] = v

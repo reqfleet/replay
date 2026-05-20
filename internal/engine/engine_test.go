@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -387,7 +388,7 @@ func TestReplayRespectsShardAssignment(t *testing.T) {
 			},
 			model.Event{Type: model.EventConnectionClose, ConnectionID: conn},
 		)
-		if connectionBelongsToShard(conn, cfg.Replay.Sharding.ShardIndex, cfg.Replay.Sharding.ShardCount) {
+		if connectionBelongsToShard(model.ConnectionKey{ConnectionID: conn}, cfg.Replay.Sharding.ShardIndex, cfg.Replay.Sharding.ShardCount) {
 			expectedSent++
 		}
 	}
@@ -402,6 +403,63 @@ func TestReplayRespectsShardAssignment(t *testing.T) {
 	}
 	if atomic.LoadInt64(&attempts) != expectedSent {
 		t.Fatalf("attempt count = %d, want %d", attempts, expectedSent)
+	}
+}
+
+func TestConnectionBelongsToShardUsesNode(t *testing.T) {
+	baseKey := model.ConnectionKey{ConnectionID: 1}
+	baseShard := connectionBelongsToShard(baseKey, 0, 2)
+	for i := 0; i < 256; i++ {
+		candidate := model.ConnectionKey{Node: fmt.Sprintf("envoy-%d", i), ConnectionID: 1}
+		if connectionBelongsToShard(candidate, 0, 2) != baseShard {
+			return
+		}
+	}
+	t.Fatal("expected node to affect shard assignment")
+}
+
+func TestReplayGroupsSameConnectionIDByNode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, Node: "envoy-a", ConnectionID: 1},
+		{Type: model.EventConnectionOpen, Node: "envoy-b", ConnectionID: 1},
+		{Type: model.EventRequest, Node: "envoy-a", ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"}},
+		{Type: model.EventRequest, Node: "envoy-b", ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"}},
+		{Type: model.EventConnectionClose, Node: "envoy-a", ConnectionID: 1},
+		{Type: model.EventConnectionClose, Node: "envoy-b", ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if summary.RequestsSent != 2 {
+		t.Fatalf("summary.RequestsSent = %d, want 2", summary.RequestsSent)
+	}
+	if len(summary.ConnectionResults) != 2 {
+		t.Fatalf("len(summary.ConnectionResults) = %d, want 2", len(summary.ConnectionResults))
+	}
+	nodes := make(map[string]struct{}, len(summary.ConnectionResults))
+	for _, connectionResult := range summary.ConnectionResults {
+		nodes[connectionResult.Node] = struct{}{}
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("expected distinct nodes in connection results, got %v", nodes)
 	}
 }
 
