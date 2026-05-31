@@ -39,8 +39,10 @@ Metric names:
 - Exit code:
   - `0` for `success`
   - `1` for `failed`
-  - `1` for `partial_success` by default
-  - set `REPLAY_PARTIAL_SUCCESS_EXIT_ZERO=1` to return `0` on `partial_success`
+  - `0` for `partial_success` by default
+  - set `REPLAY_PARTIAL_SUCCESS_EXIT_ZERO=false` to force `1` on `partial_success`
+
+`shibuya_status_counter` includes both numeric HTTP response codes and synthetic transport statuses such as `timeout`, `connection_refused`, `connection_reset`, `tls`, `network`, and `send_error` when a request fails before any response is received.
 
 ## CLI & environment precedence
 
@@ -120,6 +122,8 @@ replay:
 ```
 
 When a recorded response exists for a request (`connection_id` + `sequence`), mismatches increment `validation_failed` and produce `partial_success`.
+
+When the target is unreachable or times out, the request is recorded as `send_error`, the run remains `partial_success`, and `shibuya_status_counter` is incremented with a synthetic transport status.
 
 When idempotency safeguards are enabled, mutation methods are skipped unless one of the allow headers is present.
 Lifecycle checks require both `connection_open` and `connection_close` events per replayed connection.

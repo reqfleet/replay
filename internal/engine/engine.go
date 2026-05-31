@@ -297,7 +297,7 @@ func (e *Engine) aggregateResults(results <-chan Summary) Summary {
 	if final.ValidationFailed > 0 && final.Outcome == RunSuccess {
 		final.Outcome = RunPartialSuccess
 	}
-	if final.RequestsSent == 0 && final.Skipped == 0 {
+	if final.RequestsSent == 0 && final.Skipped == 0 && final.SendErrors == 0 {
 		final.Outcome = RunFailed
 	}
 	return final
@@ -422,19 +422,12 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			}
 			reqRes.Outcome = RequestSendError
 			reqRes.Error = err.Error()
+			e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
 			connResult.Requests = append(connResult.Requests, reqRes)
 			result.RequestResults = append(result.RequestResults, reqRes)
 			connResult.Outcome = ConnectionAborted
 			result.ConnectionResults = append(result.ConnectionResults, connResult)
 			return result
-		}
-
-		label, _, _ := strings.Cut(requestEvent.HTTP.Path, "?")
-		if len(e.parsedPathTemplates) > 0 {
-			label = MatchPathTemplate(label, e.parsedPathTemplates)
-		}
-		if label == "" {
-			label = "unknown"
 		}
 
 		result.RequestsSent++
@@ -471,7 +464,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		result.RequestResults = append(result.RequestResults, reqRes)
 
 		if e.cfg.Metrics.Enabled && e.metrics != nil {
-			safeLabel := e.metrics.GetSafeLabel(label, e.cfg.Metrics.MaxLabels)
+			safeLabel := e.metricLabelForRequest(requestEvent)
 			e.metrics.LabelLatencyHistogram.WithLabelValues(
 				e.cfg.Labels.CollectionID,
 				safeLabel,
@@ -887,6 +880,62 @@ func retryErrorCategory(err error) string {
 	default:
 		return ""
 	}
+}
+
+func metricStatusForSendError(err error) string {
+	if err == nil {
+		return "send_error"
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "timeout"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	lower := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(lower, "connection refused"):
+		return "connection_refused"
+	case strings.Contains(lower, "connection reset"):
+		return "connection_reset"
+	case strings.Contains(lower, "tls"):
+		return "tls"
+	case strings.Contains(lower, "dial tcp"), strings.Contains(lower, "no such host"):
+		return "network"
+	default:
+		return "send_error"
+	}
+}
+
+func (e *Engine) metricLabelForRequest(requestEvent model.Event) string {
+	label, _, _ := strings.Cut(requestEvent.HTTP.Path, "?")
+	if len(e.parsedPathTemplates) > 0 {
+		label = MatchPathTemplate(label, e.parsedPathTemplates)
+	}
+	if label == "" {
+		label = "unknown"
+	}
+	if e.metrics != nil {
+		return e.metrics.GetSafeLabel(label, e.cfg.Metrics.MaxLabels)
+	}
+	return label
+}
+
+func (e *Engine) recordStatusMetric(requestEvent model.Event, status string) {
+	if !e.cfg.Metrics.Enabled || e.metrics == nil || status == "" {
+		return
+	}
+	safeLabel := e.metricLabelForRequest(requestEvent)
+	e.metrics.StatusCounter.WithLabelValues(
+		e.cfg.Labels.CollectionID,
+		e.cfg.Labels.PlanID,
+		e.cfg.Labels.RunID,
+		e.cfg.Labels.EngineNo,
+		safeLabel,
+		e.cfg.Labels.Zone,
+		status,
+	).Inc()
 }
 
 func (e *Engine) sleepBackoff(ctx context.Context, attempt int) error {

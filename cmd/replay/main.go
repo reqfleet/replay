@@ -18,6 +18,51 @@ import (
 	"github.com/reqfleet/replay/internal/parser"
 )
 
+func exitCodeForSummary(summary engine.Summary, cfg config.Config) int {
+	switch summary.Outcome {
+	case engine.RunSuccess:
+		return 0
+	case engine.RunPartialSuccess:
+		if cfg.Replay.PartialSuccessExitZero {
+			return 0
+		}
+		return 1
+	default:
+		return 1
+	}
+}
+
+func runReplayFromFile(ctx context.Context, cfg config.Config, registry *metrics.Registry, logPath, format string) (engine.Summary, error) {
+	replayEngine := engine.New(cfg, registry)
+	eventsCh := make(chan model.Event)
+	var summary engine.Summary
+	var replayErr error
+	done := make(chan struct{})
+	go func() {
+		summary, replayErr = replayEngine.ReplayStream(ctx, eventsCh)
+		close(done)
+	}()
+
+	if err := parser.ParseFileStream(logPath, format, func(e model.Event) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case eventsCh <- e:
+			return nil
+		}
+	}); err != nil {
+		close(eventsCh)
+		<-done
+		return engine.Summary{}, err
+	}
+	close(eventsCh)
+	<-done
+	if replayErr != nil {
+		return engine.Summary{}, replayErr
+	}
+	return summary, nil
+}
+
 func main() {
 	configPath := flag.String("config", "", "path to config.yaml (optional)")
 	logPath := flag.String("log", "", "path to requests.log NDJSON file")
@@ -90,19 +135,8 @@ func main() {
 		}()
 		log.Printf("metrics endpoint ready at http://%s%s", cfg.Metrics.ListenAddress, cfg.Metrics.Path)
 	}
-
-	replayEngine := engine.New(cfg, registry)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-
-	eventsCh := make(chan model.Event)
-	var summary engine.Summary
-	var replayErr error
-	done := make(chan struct{})
-	go func() {
-		summary, replayErr = replayEngine.ReplayStream(ctx, eventsCh)
-		close(done)
-	}()
 
 	var format string
 	if *gzipFlag {
@@ -111,23 +145,10 @@ func main() {
 		format = "zstd"
 	}
 
-	if err := parser.ParseFileStream(*logPath, format, func(e model.Event) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case eventsCh <- e:
-			return nil
-		}
-	}); err != nil {
-		close(eventsCh)
+	summary, err := runReplayFromFile(ctx, cfg, registry, *logPath, format)
+	if err != nil {
 		log.Printf("parse log file: %v", err)
 		os.Exit(2)
-	}
-	close(eventsCh)
-	<-done
-	if replayErr != nil {
-		log.Printf("replay failed: %v", replayErr)
-		os.Exit(1)
 	}
 
 	log.Printf(
@@ -142,16 +163,9 @@ func main() {
 		summary.ConnectionsAborted,
 	)
 
-	switch summary.Outcome {
-	case engine.RunSuccess:
-		os.Exit(0)
-	case engine.RunPartialSuccess:
-		if cfg.Replay.PartialSuccessExitZero {
-			os.Exit(0)
-		}
-		os.Exit(1)
-	default:
+	exitCode := exitCodeForSummary(summary, cfg)
+	if exitCode != 0 && summary.Outcome == engine.RunFailed {
 		fmt.Fprintln(os.Stderr, "replay failed")
-		os.Exit(1)
 	}
+	os.Exit(exitCode)
 }

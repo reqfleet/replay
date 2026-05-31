@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/reqfleet/replay/internal/config"
 	"github.com/reqfleet/replay/internal/metrics"
 	"github.com/reqfleet/replay/internal/model"
@@ -144,6 +146,125 @@ func TestReplayMarksValidationFailedOnStatusMismatch(t *testing.T) {
 	}
 }
 
+func TestReplayTreatsConnectionRefusedAsPartialSuccess(t *testing.T) {
+	addr := closedLocalAddress(t)
+
+	cfg := config.Default()
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: 1,
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    "http",
+				Authority: addr,
+				Path:      "/transport",
+			},
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("runReplay(eng, events) error: %v", err)
+	}
+	if got, want := summary.Outcome, RunPartialSuccess; got != want {
+		t.Fatalf("summary.Outcome = %s, want %s", got, want)
+	}
+	if got, want := summary.SendErrors, int64(1); got != want {
+		t.Fatalf("summary.SendErrors = %d, want %d", got, want)
+	}
+	if got, want := summary.ConnectionsAborted, int64(1); got != want {
+		t.Fatalf("summary.ConnectionsAborted = %d, want %d", got, want)
+	}
+}
+
+func TestReplayEmitsSyntheticStatusForTransportSendErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		configure  func(*testing.T, *config.Config) (authority string, cleanup func())
+		wantStatus string
+	}{
+		{
+			name: "connection_refused",
+			configure: func(t *testing.T, cfg *config.Config) (string, func()) {
+				t.Helper()
+				cfg.Replay.Timeout.Connect = 100 * time.Millisecond
+				return closedLocalAddress(t), func() {}
+			},
+			wantStatus: "connection_refused",
+		},
+		{
+			name: "timeout",
+			configure: func(t *testing.T, cfg *config.Config) (string, func()) {
+				t.Helper()
+				cfg.Replay.Timeout.Request = 20 * time.Millisecond
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					time.Sleep(100 * time.Millisecond)
+					w.WriteHeader(http.StatusOK)
+				}))
+				target, err := url.Parse(srv.URL)
+				if err != nil {
+					t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+				}
+				return target.Host, srv.Close
+			},
+			wantStatus: "timeout",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			reg := metrics.New()
+			authority, cleanup := tt.configure(t, &cfg)
+			defer cleanup()
+
+			eng := New(cfg, reg)
+			events := []model.Event{
+				{Type: model.EventMeta},
+				{Type: model.EventConnectionOpen, ConnectionID: 1},
+				{
+					Type:         model.EventRequest,
+					ConnectionID: 1,
+					Sequence:     1,
+					HTTP: model.HTTPRequestMeta{
+						Method:    http.MethodGet,
+						Scheme:    "http",
+						Authority: authority,
+						Path:      "/transport",
+					},
+				},
+				{Type: model.EventConnectionClose, ConnectionID: 1},
+			}
+
+			summary, err := runReplay(eng, events)
+			if err != nil {
+				t.Fatalf("runReplay(eng, events) error: %v", err)
+			}
+			if got, want := summary.Outcome, RunPartialSuccess; got != want {
+				t.Fatalf("summary.Outcome = %s, want %s", got, want)
+			}
+			counter := reg.StatusCounter.WithLabelValues(
+				cfg.Labels.CollectionID,
+				cfg.Labels.PlanID,
+				cfg.Labels.RunID,
+				cfg.Labels.EngineNo,
+				"/transport",
+				cfg.Labels.Zone,
+				tt.wantStatus,
+			)
+			if got, want := testutil.ToFloat64(counter), float64(1); got != want {
+				t.Fatalf("status counter for %s = %v, want %v", tt.wantStatus, got, want)
+			}
+		})
+	}
+}
+
 func TestReplayHeaderValidationIgnoresConfiguredHeaders(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("x-request-id", "actual-req-id")
@@ -202,6 +323,19 @@ func TestReplayHeaderValidationIgnoresConfiguredHeaders(t *testing.T) {
 	if summary.Outcome != RunSuccess {
 		t.Fatalf("summary.Outcome = %s, want %s", summary.Outcome, RunSuccess)
 	}
+}
+
+func closedLocalAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen(127.0.0.1:0) error: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("listener.Close() error: %v", err)
+	}
+	return addr
 }
 
 func TestReplayBodyValidationMismatch(t *testing.T) {

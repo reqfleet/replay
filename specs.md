@@ -367,7 +367,8 @@ Exit status guidance:
 
 * Engine SHOULD return exit code `0` for `success`.
 * Engine SHOULD return non-zero exit code for `failed`.
-* Engine MAY make `partial_success` exit behavior configurable, defaulting to non-zero in CI-style contexts.
+* Engine SHOULD return exit code `0` for `partial_success` by default.
+* Engine MAY make `partial_success` exit behavior configurable when operators need non-zero behavior in CI-style contexts.
 
 ### 11.4 Metrics Emission and Scrape Endpoint
 
@@ -393,6 +394,8 @@ Metric catalog:
 * `shibuya_mem_gauge`
 
 Label conventions SHOULD follow engine metric definitions, including dimensions such as `collection_id`, `plan_id`, `run_id`, `engine_no`, `label`, `zone`, and metric-specific labels like `status` and `le`.
+
+For `shibuya_status_counter`, the `status` label MAY contain either a numeric HTTP status code or a synthetic transport status such as `timeout`, `connection_refused`, `connection_reset`, `tls`, `network`, or `send_error` when no HTTP response was received.
 
 ### 11.5 Runtime Configuration (YAML)
 

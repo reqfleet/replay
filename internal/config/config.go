@@ -123,7 +123,7 @@ func Default() Config {
 				MaxConcurrentStreams: 16,
 			},
 			DryRun:                 false,
-			PartialSuccessExitZero: false,
+			PartialSuccessExitZero: true,
 			Timeout: TimeoutConfig{
 				Connect:        3 * time.Second,
 				Request:        30 * time.Second,

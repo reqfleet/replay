@@ -73,3 +73,19 @@ labels:
 		t.Fatalf("cli override not applied: %v", cfg.Target.OverrideURL)
 	}
 }
+
+func TestDefaultPartialSuccessExitZero(t *testing.T) {
+	cfg := Default()
+	if got, want := cfg.Replay.PartialSuccessExitZero, true; got != want {
+		t.Fatalf("Default().Replay.PartialSuccessExitZero = %v, want %v", got, want)
+	}
+}
+
+func TestApplyEnvPartialSuccessExitZero(t *testing.T) {
+	t.Setenv("REPLAY_PARTIAL_SUCCESS_EXIT_ZERO", "false")
+	cfg := Default()
+	cfg.ApplyEnv()
+	if got, want := cfg.Replay.PartialSuccessExitZero, false; got != want {
+		t.Fatalf("cfg.Replay.PartialSuccessExitZero = %v, want %v", got, want)
+	}
+}
