@@ -96,11 +96,21 @@ type MetricsConfig struct {
 }
 
 type CommonMetricLabelSet struct {
-	CollectionID string `yaml:"collection_id"`
-	PlanID       string `yaml:"plan_id"`
-	RunID        string `yaml:"run_id"`
-	EngineNo     string `yaml:"engine_no"`
-	Zone         string `yaml:"zone"`
+	CollectionID    string `yaml:"collection_id"`
+	CollectionIDEnv string `yaml:"collection_id_env"`
+	PlanID          string `yaml:"plan_id"`
+	PlanIDEnv       string `yaml:"plan_id_env"`
+	RunID           string `yaml:"run_id"`
+	RunIDEnv        string `yaml:"run_id_env"`
+	EngineNo        string `yaml:"engine_no"`
+	EngineNoEnv     string `yaml:"engine_no_env"`
+	Zone            string `yaml:"zone"`
+	ZoneEnv         string `yaml:"zone_env"`
+}
+
+type labelEnvSpec struct {
+	value     *string
+	configEnv *string
 }
 
 type TargetOverrideConfig struct {
@@ -243,6 +253,8 @@ func (c Config) Validate() error {
 // ApplyEnv applies well-known environment variable overrides to the config.
 // Precedence order is: defaults -> YAML -> environment -> CLI (applied by caller).
 func (c *Config) ApplyEnv() {
+	c.applyLabelOverrides()
+
 	if v, ok := os.LookupEnv("REPLAY_DRY_RUN"); ok {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Replay.DryRun = b
@@ -278,24 +290,45 @@ func (c *Config) ApplyEnv() {
 		}
 	}
 
-	if v, ok := os.LookupEnv("REPLAY_LABEL_COLLECTION_ID"); ok && v != "" {
-		c.Labels.CollectionID = v
-	}
-	if v, ok := os.LookupEnv("REPLAY_LABEL_PLAN_ID"); ok && v != "" {
-		c.Labels.PlanID = v
-	}
-	if v, ok := os.LookupEnv("REPLAY_LABEL_RUN_ID"); ok && v != "" {
-		c.Labels.RunID = v
-	}
-	if v, ok := os.LookupEnv("REPLAY_LABEL_ENGINE_NO"); ok && v != "" {
-		c.Labels.EngineNo = v
-	}
-	if v, ok := os.LookupEnv("REPLAY_LABEL_ZONE"); ok && v != "" {
-		c.Labels.Zone = v
-	}
 	if v, ok := os.LookupEnv("REPLAY_PARTIAL_SUCCESS_EXIT_ZERO"); ok {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Replay.PartialSuccessExitZero = b
 		}
 	}
+}
+
+func (c *Config) applyLabelOverrides() {
+	for _, spec := range c.labelEnvSpecs() {
+		*spec.value = c.resolveLabelValue(*spec.value, *spec.configEnv)
+	}
+}
+
+func (c *Config) labelEnvSpecs() []labelEnvSpec {
+	return []labelEnvSpec{
+		{value: &c.Labels.CollectionID, configEnv: &c.Labels.CollectionIDEnv},
+		{value: &c.Labels.PlanID, configEnv: &c.Labels.PlanIDEnv},
+		{value: &c.Labels.RunID, configEnv: &c.Labels.RunIDEnv},
+		{value: &c.Labels.EngineNo, configEnv: &c.Labels.EngineNoEnv},
+		{value: &c.Labels.Zone, configEnv: &c.Labels.ZoneEnv},
+	}
+}
+
+func (c Config) resolveLabelValue(currentValue, envKey string) string {
+	if envKey == "" {
+		return currentValue
+	}
+	if value, ok := lookupEnvValue(envKey, c.Env); ok {
+		return value
+	}
+	return currentValue
+}
+
+func lookupEnvValue(key string, fallbacks map[string]string) (string, bool) {
+	if value, ok := os.LookupEnv(key); ok && value != "" {
+		return value, true
+	}
+	if value, ok := fallbacks[key]; ok && value != "" {
+		return value, true
+	}
+	return "", false
 }

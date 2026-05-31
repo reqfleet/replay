@@ -88,6 +88,7 @@ func main() {
 	}
 	// Apply environment overrides (env > YAML)
 	cfg.ApplyEnv()
+	log.Printf("resolved labels: collection_id=%q plan_id=%q", cfg.Labels.CollectionID, cfg.Labels.PlanID)
 	// Apply CLI overrides with higher precedence for safety-related flags
 	if *dryRunFlag {
 		cfg.Replay.DryRun = true

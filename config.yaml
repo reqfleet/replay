@@ -46,11 +46,11 @@ env:
   AUTH_MODE: "token-rewrite"
 
 labels:
-  collection_id: "demo-collection"
-  plan_id: "demo-plan"
-  run_id: "demo-run"
-  engine_no: "1"
-  zone: "local"
+  collection_id_env: "collection_id"
+  plan_id_env: "plan_id"
+  run_id_env: "run_id"
+  engine_no_env: "engine_no"
+  zone_env: "zone"
 
 target:
   override_url: ""
