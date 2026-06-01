@@ -433,7 +433,7 @@ replay:
     retry_on_errors: [timeout, connection_reset]
 metrics:
   enabled: true
-  listen_address: "0.0.0.0:9102"
+  listen_address: "127.0.0.1:9102"
   path: "/metrics"
 env:
   TARGET_ENV: "staging"

@@ -37,7 +37,7 @@ replay:
 
 metrics:
   enabled: true
-  listen_address: "0.0.0.0:9102"
+  listen_address: "127.0.0.1:9102"
   path: "/metrics"
   max_labels: 20
 

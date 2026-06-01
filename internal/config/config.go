@@ -169,7 +169,7 @@ func Default() Config {
 		},
 		Metrics: MetricsConfig{
 			Enabled:                   true,
-			ListenAddress:             "0.0.0.0:9102",
+			ListenAddress:             "127.0.0.1:9102",
 			Path:                      "/metrics",
 			PathTemplates:             []string{},
 			MaxLabels:                 20,
