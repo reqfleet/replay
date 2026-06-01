@@ -231,10 +231,10 @@ func TestApplyEnvMetricsGracefulTerminationPeriod(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsNonPositiveMetricsGracefulTerminationPeriod(t *testing.T) {
+func TestValidateRejectsNegativeMetricsGracefulTerminationPeriod(t *testing.T) {
 	cfg := Default()
-	cfg.Metrics.GracefulTerminationPeriod = 0
+	cfg.Metrics.GracefulTerminationPeriod = -1 * time.Second
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected validation error for non-positive metrics graceful termination period")
+		t.Fatal("expected validation error for negative metrics graceful termination period")
 	}
 }
