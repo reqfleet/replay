@@ -171,7 +171,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	if cfg.Metrics.Enabled {
+	if cfg.Metrics.Enabled && cfg.Metrics.GracefulTerminationPeriod > 0 {
 		log.Printf("metrics graceful termination period: %s", cfg.Metrics.GracefulTerminationPeriod)
 		waitForMetricsGracePeriod(ctx, cfg.Metrics.GracefulTerminationPeriod)
 	}
