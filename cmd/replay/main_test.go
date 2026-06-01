@@ -136,6 +136,27 @@ func TestRunReplayFromFile_TransportFailures(t *testing.T) {
 	}
 }
 
+func TestWaitForMetricsGracePeriod(t *testing.T) {
+	t.Run("waits for configured period", func(t *testing.T) {
+		ctx := context.Background()
+		start := time.Now()
+		waitForMetricsGracePeriod(ctx, 40*time.Millisecond)
+		if elapsed := time.Since(start); elapsed < 35*time.Millisecond {
+			t.Fatalf("waitForMetricsGracePeriod returned too early: %v", elapsed)
+		}
+	})
+
+	t.Run("returns on context cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		start := time.Now()
+		waitForMetricsGracePeriod(ctx, time.Second)
+		if elapsed := time.Since(start); elapsed > 20*time.Millisecond {
+			t.Fatalf("waitForMetricsGracePeriod ignored cancellation: %v", elapsed)
+		}
+	})
+}
+
 func writeReplayLog(t *testing.T, authority string) string {
 	t.Helper()
 	content := strings.Join([]string{

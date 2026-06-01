@@ -3,12 +3,20 @@ package config
 import (
 	"os"
 	"testing"
+	"time"
 )
 
 func TestDefaultValidate(t *testing.T) {
 	cfg := Default()
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("default config invalid: %v", err)
+	}
+}
+
+func TestDefaultMetricsGracefulTerminationPeriod(t *testing.T) {
+	cfg := Default()
+	if got, want := cfg.Metrics.GracefulTerminationPeriod, 5*time.Second; got != want {
+		t.Fatalf("Default().Metrics.GracefulTerminationPeriod = %v, want %v", got, want)
 	}
 }
 
@@ -59,6 +67,7 @@ func TestConfigPrecedence(t *testing.T) {
 	t.Setenv("RUN_ID_FROM_ENV", "run-from-config-env")
 	t.Setenv("ENGINE_NO_FROM_ENV", "17")
 	t.Setenv("ZONE_FROM_ENV", "zone-from-config-env")
+	t.Setenv("METRICS_GRACEFUL_TERMINATION_PERIOD", "2s")
 
 	cfg.ApplyEnv()
 
@@ -70,6 +79,9 @@ func TestConfigPrecedence(t *testing.T) {
 	}
 	if cfg.Metrics.Enabled != true {
 		t.Fatalf("metrics enabled not taken from env: %v", cfg.Metrics.Enabled)
+	}
+	if got, want := cfg.Metrics.GracefulTerminationPeriod, 2*time.Second; got != want {
+		t.Fatalf("cfg.Metrics.GracefulTerminationPeriod = %v, want %v", got, want)
 	}
 	if cfg.Labels.CollectionID != "col-from-config-env" {
 		t.Fatalf("cfg.Labels.CollectionID = %q, want %q", cfg.Labels.CollectionID, "col-from-config-env")
@@ -207,5 +219,22 @@ func TestApplyEnvPartialSuccessExitZero(t *testing.T) {
 	cfg.ApplyEnv()
 	if got, want := cfg.Replay.PartialSuccessExitZero, false; got != want {
 		t.Fatalf("cfg.Replay.PartialSuccessExitZero = %v, want %v", got, want)
+	}
+}
+
+func TestApplyEnvMetricsGracefulTerminationPeriod(t *testing.T) {
+	t.Setenv("METRICS_GRACEFUL_TERMINATION_PERIOD", "750ms")
+	cfg := Default()
+	cfg.ApplyEnv()
+	if got, want := cfg.Metrics.GracefulTerminationPeriod, 750*time.Millisecond; got != want {
+		t.Fatalf("cfg.Metrics.GracefulTerminationPeriod = %v, want %v", got, want)
+	}
+}
+
+func TestValidateRejectsNonPositiveMetricsGracefulTerminationPeriod(t *testing.T) {
+	cfg := Default()
+	cfg.Metrics.GracefulTerminationPeriod = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for non-positive metrics graceful termination period")
 	}
 }

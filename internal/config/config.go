@@ -88,11 +88,12 @@ type CheckpointConfig struct {
 }
 
 type MetricsConfig struct {
-	Enabled       bool     `yaml:"enabled"`
-	ListenAddress string   `yaml:"listen_address"`
-	Path          string   `yaml:"path"`
-	PathTemplates []string `yaml:"path_templates"`
-	MaxLabels     int      `yaml:"max_labels"`
+	Enabled                   bool          `yaml:"enabled"`
+	ListenAddress             string        `yaml:"listen_address"`
+	Path                      string        `yaml:"path"`
+	PathTemplates             []string      `yaml:"path_templates"`
+	MaxLabels                 int           `yaml:"max_labels"`
+	GracefulTerminationPeriod time.Duration `yaml:"graceful_termination_period"`
 }
 
 type CommonMetricLabelSet struct {
@@ -167,11 +168,12 @@ func Default() Config {
 			Checkpoint: CheckpointConfig{},
 		},
 		Metrics: MetricsConfig{
-			Enabled:       true,
-			ListenAddress: "0.0.0.0:9102",
-			Path:          "/metrics",
-			PathTemplates: []string{},
-			MaxLabels:     20,
+			Enabled:                   true,
+			ListenAddress:             "0.0.0.0:9102",
+			Path:                      "/metrics",
+			PathTemplates:             []string{},
+			MaxLabels:                 20,
+			GracefulTerminationPeriod: 5 * time.Second,
 		},
 		Env: map[string]string{},
 		Labels: CommonMetricLabelSet{
@@ -235,6 +237,9 @@ func (c Config) Validate() error {
 	if c.Replay.Sharding.ShardIndex < 0 || c.Replay.Sharding.ShardIndex >= c.Replay.Sharding.ShardCount {
 		return errors.New("replay.sharding.shard_index must be within [0, shard_count)")
 	}
+	if c.Metrics.GracefulTerminationPeriod <= 0 {
+		return errors.New("metrics.graceful_termination_period must be > 0")
+	}
 
 	if c.Metrics.Enabled {
 		if c.Metrics.Path == "" {
@@ -287,6 +292,11 @@ func (c *Config) ApplyEnv() {
 	if v, ok := os.LookupEnv("METRICS_MAX_LABELS"); ok {
 		if i, err := strconv.Atoi(v); err == nil {
 			c.Metrics.MaxLabels = i
+		}
+	}
+	if v, ok := os.LookupEnv("METRICS_GRACEFUL_TERMINATION_PERIOD"); ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.Metrics.GracefulTerminationPeriod = d
 		}
 	}
 
