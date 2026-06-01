@@ -56,7 +56,11 @@ Notable CLI flags (also available via env):
 
 Environment variables for metrics and labels:
 - `METRICS_ENABLED`, `METRICS_LISTEN_ADDRESS`, `METRICS_PATH`
-- `REPLAY_LABEL_COLLECTION_ID`, `REPLAY_LABEL_PLAN_ID`, `REPLAY_LABEL_RUN_ID`, `REPLAY_LABEL_ENGINE_NO`, `REPLAY_LABEL_ZONE`
+
+All metric labels can also point at env vars directly from YAML:
+- `labels.collection_id_env`, `labels.plan_id_env`, `labels.run_id_env`, `labels.engine_no_env`, `labels.zone_env`
+- if the configured env var is unset or empty, replay falls back to the corresponding literal `labels.*` value
+- replay resolves these env-ref keys from the process environment first and from the YAML `env:` map second
 
 CLI flags are applied last and take highest precedence for safety-related settings.
 
