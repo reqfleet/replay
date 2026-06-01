@@ -55,7 +55,9 @@ Notable CLI flags (also available via env):
 - `--config` path: YAML config file (loaded before env and CLI overrides).
 
 Environment variables for metrics and labels:
-- `METRICS_ENABLED`, `METRICS_LISTEN_ADDRESS`, `METRICS_PATH`
+- `METRICS_ENABLED`, `METRICS_LISTEN_ADDRESS`, `METRICS_PATH`, `METRICS_GRACEFUL_TERMINATION_PERIOD`
+
+`metrics.graceful_termination_period` keeps the process alive after replay completes so the metrics endpoint remains scrapeable for a short window before exit. The default is `5s`.
 
 All metric labels can also point at env vars directly from YAML:
 - `labels.collection_id_env`, `labels.plan_id_env`, `labels.run_id_env`, `labels.engine_no_env`, `labels.zone_env`

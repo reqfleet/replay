@@ -63,6 +63,18 @@ func runReplayFromFile(ctx context.Context, cfg config.Config, registry *metrics
 	return summary, nil
 }
 
+func waitForMetricsGracePeriod(ctx context.Context, period time.Duration) {
+	if period <= 0 {
+		return
+	}
+	timer := time.NewTimer(period)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
+
 func main() {
 	configPath := flag.String("config", "", "path to config.yaml (optional)")
 	logPath := flag.String("log", "", "path to requests.log NDJSON file")
@@ -157,6 +169,11 @@ func main() {
 	if err != nil {
 		log.Printf("parse log file: %v", err)
 		os.Exit(2)
+	}
+
+	if cfg.Metrics.Enabled && cfg.Metrics.GracefulTerminationPeriod > 0 {
+		log.Printf("metrics graceful termination period: %s", cfg.Metrics.GracefulTerminationPeriod)
+		waitForMetricsGracePeriod(ctx, cfg.Metrics.GracefulTerminationPeriod)
 	}
 
 	log.Printf(
