@@ -110,7 +110,7 @@ type CommonMetricLabelSet struct {
 
 type labelEnvSpec struct {
 	value     *string
-	configEnv *string
+	configEnv string
 }
 
 type TargetOverrideConfig struct {
@@ -299,21 +299,21 @@ func (c *Config) ApplyEnv() {
 
 func (c *Config) applyLabelOverrides() {
 	for _, spec := range c.labelEnvSpecs() {
-		*spec.value = c.resolveLabelValue(*spec.value, *spec.configEnv)
+		*spec.value = c.resolveLabelValue(*spec.value, spec.configEnv)
 	}
 }
 
 func (c *Config) labelEnvSpecs() []labelEnvSpec {
 	return []labelEnvSpec{
-		{value: &c.Labels.CollectionID, configEnv: &c.Labels.CollectionIDEnv},
-		{value: &c.Labels.PlanID, configEnv: &c.Labels.PlanIDEnv},
-		{value: &c.Labels.RunID, configEnv: &c.Labels.RunIDEnv},
-		{value: &c.Labels.EngineNo, configEnv: &c.Labels.EngineNoEnv},
-		{value: &c.Labels.Zone, configEnv: &c.Labels.ZoneEnv},
+		{value: &c.Labels.CollectionID, configEnv: c.Labels.CollectionIDEnv},
+		{value: &c.Labels.PlanID, configEnv: c.Labels.PlanIDEnv},
+		{value: &c.Labels.RunID, configEnv: c.Labels.RunIDEnv},
+		{value: &c.Labels.EngineNo, configEnv: c.Labels.EngineNoEnv},
+		{value: &c.Labels.Zone, configEnv: c.Labels.ZoneEnv},
 	}
 }
 
-func (c Config) resolveLabelValue(currentValue, envKey string) string {
+func (c *Config) resolveLabelValue(currentValue, envKey string) string {
 	if envKey == "" {
 		return currentValue
 	}
