@@ -182,6 +182,9 @@ func (e *Engine) startWorkers(ctx context.Context, wg *sync.WaitGroup, jobs <-ch
 
 	for range vus {
 		wg.Go(func() {
+			if e.metrics != nil {
+				e.metrics.RecordClientCreated(e.cfg.Labels)
+			}
 			for job := range jobs {
 				select {
 				case <-ctx.Done():
@@ -939,10 +942,9 @@ func backoffDuration(strategy string, attempt int) time.Duration {
 	case "exponential":
 		// Use a capped exponential backoff computed with floats to avoid
 		// undefined behavior or overflow when shifting time.Duration.
-		exp := max(attempt-1, 0)
-		if exp > 30 { // cap exponent to avoid absurd durations
-			exp = 30
-		}
+		exp := min(max(attempt-1, 0),
+			// cap exponent to avoid absurd durations
+			30)
 		backoffNano := float64(base) * math.Pow(2, float64(exp))
 		d := time.Duration(backoffNano)
 		if d > 5*time.Second {

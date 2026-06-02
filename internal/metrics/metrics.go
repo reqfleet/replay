@@ -48,7 +48,7 @@ func New() *Registry {
 		ThreadsGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "shibuya",
 			Name:      "threads_gauge",
-			Help:      "Current number of threads running",
+			Help:      "Number of replay clients created for the engine",
 		}, []string{"collection_id", "plan_id", "run_id", "engine_no", "zone"}),
 		CPU: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "shibuya",
@@ -118,9 +118,13 @@ func (r *Registry) SeedEngineLabels(labels config.CommonMetricLabelSet) {
 	r.Mem.WithLabelValues(labels.CollectionID, labels.PlanID, labels.RunID, labels.EngineNo, labels.Zone).Set(0)
 }
 
+func (r *Registry) RecordClientCreated(labels config.CommonMetricLabelSet) {
+	r.ThreadsGauge.WithLabelValues(labels.CollectionID, labels.PlanID, labels.RunID, labels.EngineNo, labels.Zone).Inc()
+}
+
 // StartRuntimeCollection starts a background goroutine that updates runtime
-// metrics (goroutines, memory, and a CPU proxy) for the provided labels at the
-// given interval. It returns a stop function that cancels the collector.
+// metrics (memory and a CPU proxy) for the provided labels at the given
+// interval. It returns a stop function that cancels the collector.
 func (r *Registry) StartRuntimeCollection(labels config.CommonMetricLabelSet, interval time.Duration) func() {
 	if interval <= 0 {
 		interval = time.Second * 5
@@ -132,7 +136,6 @@ func (r *Registry) StartRuntimeCollection(labels config.CommonMetricLabelSet, in
 		for {
 			select {
 			case <-ticker.C:
-				r.ThreadsGauge.WithLabelValues(labels.CollectionID, labels.PlanID, labels.RunID, labels.EngineNo, labels.Zone).Set(float64(runtime.NumGoroutine()))
 				runtime.ReadMemStats(&m)
 				r.Mem.WithLabelValues(labels.CollectionID, labels.PlanID, labels.RunID, labels.EngineNo, labels.Zone).Set(float64(m.Alloc))
 				// CPU: report number of CPUs as a proxy to avoid OS-specific code.

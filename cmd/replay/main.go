@@ -141,7 +141,7 @@ func main() {
 	registry.SeedEngineLabels(cfg.Labels)
 	var stopMetrics func()
 	if cfg.Metrics.Enabled {
-		// start runtime collectors (threads/memory/CPU)
+		// start runtime collectors (memory/CPU)
 		stopMetrics = registry.StartRuntimeCollection(cfg.Labels, 5*time.Second)
 		if stopMetrics != nil {
 			defer stopMetrics()
