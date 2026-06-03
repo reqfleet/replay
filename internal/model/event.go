@@ -26,9 +26,9 @@ type Event struct {
 	DownstreamLocalAddress  string              `json:"downstream_local_address,omitempty"`
 	Protocol                string              `json:"protocol,omitempty"`
 	TLS                     *TLSInfo            `json:"tls,omitempty"`
-	HTTP                    HTTPRequestMeta     `json:"http,omitempty"`
+	HTTP                    HTTPRequestMeta     `json:"http"`
 	Headers                 map[string][]string `json:"headers,omitempty"`
-	Body                    Body                `json:"body,omitempty"`
+	Body                    Body                `json:"body"`
 }
 
 type HTTPRequestMeta struct {

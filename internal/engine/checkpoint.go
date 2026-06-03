@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -137,9 +138,7 @@ func (c *checkpointStore) persist() error {
 		UpdatedAt:   c.data.UpdatedAt,
 		Connections: make(map[model.ConnectionKey]int, len(c.data.Connections)),
 	}
-	for k, v := range c.data.Connections {
-		copyData.Connections[k] = v
-	}
+	maps.Copy(copyData.Connections, c.data.Connections)
 	c.mu.Unlock()
 
 	payload, err := json.MarshalIndent(copyData, "", "  ")
