@@ -62,6 +62,14 @@ Environment variables for metrics and labels:
 
 `metrics.graceful_termination_period` keeps the process alive after replay completes so the metrics endpoint remains scrapeable for a short window before exit. The default is `5s`.
 
+## Ramp-up
+
+`replay.rampup_duration` linearly stages virtual user activation over wall-clock time.
+
+- `0s` disables ramp-up and preserves the current immediate startup behavior.
+- `100` target VUs with `100s` ramp-up reaches the full `100` VUs by `100s`.
+- Ramp-up only affects when VUs begin consuming replay jobs. `max_active_connections_per_engine`, HTTP/2 stream limits, and per-request pacing continue to behave independently.
+
 All metric labels can also point at env vars directly from YAML:
 - `labels.collection_id_env`, `labels.plan_id_env`, `labels.run_id_env`, `labels.engine_no_env`, `labels.zone_env`
 - if the configured env var is unset or empty, replay falls back to the corresponding literal `labels.*` value
@@ -99,6 +107,7 @@ Use `config.yaml` to control retry, response validation, pacing, lifecycle, and 
 
 ```yaml
 replay:
+  rampup_duration: 0s  # 0s disables ramp-up; 30s stages VUs over 30 seconds
   http2:
     mode: serialized  # serialized|multiplexed
     max_concurrent_streams: 16

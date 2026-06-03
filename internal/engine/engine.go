@@ -180,22 +180,56 @@ func (e *Engine) startWorkers(ctx context.Context, wg *sync.WaitGroup, jobs <-ch
 	vus := e.cfg.Replay.MaxVirtualUsersPerEngine
 	connSem := make(chan struct{}, e.cfg.Replay.MaxActiveConnectionsPerEngine)
 
-	for range vus {
+	for vu := range vus {
+		activationDelay := workerActivationDelay(vu, vus, e.cfg.Replay.RampupDuration)
 		wg.Go(func() {
-			if e.metrics != nil {
-				e.metrics.RecordClientCreated(e.cfg.Labels)
-			}
-			for job := range jobs {
-				select {
-				case <-ctx.Done():
-					return
-				case connSem <- struct{}{}:
-				}
-				s := e.replayConnectionWithCheckpoint(ctx, job.requests, job.responsesBySequence, checkpoints)
-				<-connSem
-				results <- s
-			}
+			e.runWorker(ctx, activationDelay, jobs, results, checkpoints, connSem)
 		})
+	}
+}
+
+func (e *Engine) runWorker(ctx context.Context, activationDelay time.Duration, jobs <-chan replayJob, results chan<- Summary, checkpoints *checkpointStore, connSem chan struct{}) {
+	if err := waitForWorkerActivation(ctx, activationDelay); err != nil {
+		return
+	}
+	if e.metrics != nil {
+		e.metrics.RecordClientCreated(e.cfg.Labels)
+	}
+	for job := range jobs {
+		select {
+		case <-ctx.Done():
+			return
+		case connSem <- struct{}{}:
+		}
+		s := e.replayConnectionWithCheckpoint(ctx, job.requests, job.responsesBySequence, checkpoints)
+		<-connSem
+		results <- s
+	}
+}
+
+func workerActivationDelay(workerIndex, totalWorkers int, rampup time.Duration) time.Duration {
+	if workerIndex <= 0 || totalWorkers <= 1 || rampup <= 0 {
+		return 0
+	}
+
+	return time.Duration(float64(rampup) * float64(workerIndex) / float64(totalWorkers-1))
+}
+
+func waitForWorkerActivation(ctx context.Context, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 

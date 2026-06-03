@@ -22,6 +22,7 @@ type Config struct {
 type ReplayConfig struct {
 	MaxVirtualUsersPerEngine      int               `yaml:"max_virtual_users_per_engine"`
 	MaxActiveConnectionsPerEngine int               `yaml:"max_active_connections_per_engine"`
+	RampupDuration                time.Duration     `yaml:"rampup_duration"`
 	HTTP2                         HTTP2Config       `yaml:"http2"`
 	DryRun                        bool              `yaml:"dry_run"`
 	Verbose                       bool              `yaml:"verbose"`
@@ -129,6 +130,7 @@ func Default() Config {
 		Replay: ReplayConfig{
 			MaxVirtualUsersPerEngine:      20,
 			MaxActiveConnectionsPerEngine: 200,
+			RampupDuration:                0,
 			HTTP2: HTTP2Config{
 				Mode:                 "serialized",
 				MaxConcurrentStreams: 16,
@@ -213,6 +215,9 @@ func (c Config) Validate() error {
 	}
 	if c.Replay.MaxActiveConnectionsPerEngine <= 0 {
 		return errors.New("replay.max_active_connections_per_engine must be > 0")
+	}
+	if c.Replay.RampupDuration < 0 {
+		return errors.New("replay.rampup_duration must be >= 0")
 	}
 	if c.Replay.Timeout.Connect <= 0 || c.Replay.Timeout.Request <= 0 || c.Replay.Timeout.IdleConnection <= 0 {
 		return errors.New("replay.timeout values must be > 0")
