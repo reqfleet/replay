@@ -1,6 +1,6 @@
 module github.com/reqfleet/replay
 
-go 1.25
+go 1.25.0
 
 require (
 	github.com/klauspost/compress v1.18.5
@@ -9,6 +9,7 @@ require (
 )
 
 require (
+	github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/kr/text v0.2.0 // indirect
@@ -17,6 +18,13 @@ require (
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/exp/typeparams v0.0.0-20231108232855-2478ac86f678 // indirect
+	golang.org/x/mod v0.31.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
+	golang.org/x/sys v0.39.0 // indirect
+	golang.org/x/tools v0.40.1-0.20260108161641-ca281cf95054 // indirect
 	google.golang.org/protobuf v1.36.5 // indirect
+	honnef.co/go/tools v0.7.0 // indirect
 )
+
+tool honnef.co/go/tools/cmd/staticcheck
