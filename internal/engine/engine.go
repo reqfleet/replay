@@ -606,21 +606,6 @@ func (e *Engine) shouldUseHTTP2MultiplexedMode(requests []model.Event) bool {
 	return false
 }
 
-func (e *Engine) filterGroupsByShard(groups map[model.ConnectionKey][]model.Event) map[model.ConnectionKey][]model.Event {
-	sharding := e.cfg.Replay.Sharding
-	if sharding.ShardCount <= 1 {
-		return groups
-	}
-	filtered := make(map[model.ConnectionKey][]model.Event)
-	for connectionKey, requests := range groups {
-		if !connectionBelongsToShard(connectionKey, sharding.ShardIndex, sharding.ShardCount) {
-			continue
-		}
-		filtered[connectionKey] = requests
-	}
-	return filtered
-}
-
 func connectionBelongsToShard(connectionKey model.ConnectionKey, shardIndex, shardCount int) bool {
 	if shardCount <= 1 {
 		return true
