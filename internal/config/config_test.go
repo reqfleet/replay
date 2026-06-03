@@ -20,6 +20,13 @@ func TestDefaultMetricsGracefulTerminationPeriod(t *testing.T) {
 	}
 }
 
+func TestDefaultRampupDuration(t *testing.T) {
+	cfg := Default()
+	if got, want := cfg.Replay.RampupDuration, time.Duration(0); got != want {
+		t.Fatalf("Default().Replay.RampupDuration = %v, want %v", got, want)
+	}
+}
+
 func TestValidateRejectsZeroLimits(t *testing.T) {
 	cfg := Default()
 	cfg.Replay.MaxVirtualUsersPerEngine = 0
@@ -228,6 +235,32 @@ func TestApplyEnvMetricsGracefulTerminationPeriod(t *testing.T) {
 	cfg.ApplyEnv()
 	if got, want := cfg.Metrics.GracefulTerminationPeriod, 750*time.Millisecond; got != want {
 		t.Fatalf("cfg.Metrics.GracefulTerminationPeriod = %v, want %v", got, want)
+	}
+}
+
+func TestLoadParsesRampupDuration(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/cfg.yaml"
+	content := "replay:\n" +
+		"  rampup_duration: 3s\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%q) error: %v", path, err)
+	}
+	if got, want := cfg.Replay.RampupDuration, 3*time.Second; got != want {
+		t.Fatalf("cfg.Replay.RampupDuration = %v, want %v", got, want)
+	}
+}
+
+func TestValidateRejectsNegativeRampupDuration(t *testing.T) {
+	cfg := Default()
+	cfg.Replay.RampupDuration = -1 * time.Second
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for negative rampup duration")
 	}
 }
 

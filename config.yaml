@@ -1,5 +1,6 @@
 replay:
   max_virtual_users_per_engine: 20
+  rampup_duration: 0s # 0s disables ramp-up; set e.g. 30s to stage VUs linearly over 30 seconds
   max_active_connections_per_engine: 200
   http2:
     mode: serialized

@@ -41,6 +41,56 @@ func runReplay(eng *Engine, events []model.Event) (Summary, error) {
 	return summary, err
 }
 
+type replayResult struct {
+	summary Summary
+	err     error
+}
+
+func runReplayAsync(eng *Engine, events []model.Event) <-chan replayResult {
+	resultCh := make(chan replayResult, 1)
+	go func() {
+		summary, err := runReplay(eng, events)
+		resultCh <- replayResult{summary: summary, err: err}
+	}()
+	return resultCh
+}
+
+func waitForRequestStarts(t *testing.T, startCh <-chan struct{}, count int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	for range count {
+		select {
+		case <-startCh:
+		case <-deadline.C:
+			t.Fatalf("waitForRequestStarts(count=%d, timeout=%s) timed out", count, timeout)
+		}
+	}
+}
+
+func rampupTestEvents(target *url.URL, connections int) []model.Event {
+	events := []model.Event{{Type: model.EventMeta}}
+	for connectionID := 1; connectionID <= connections; connectionID++ {
+		events = append(events,
+			model.Event{Type: model.EventConnectionOpen, ConnectionID: connectionID},
+			model.Event{
+				Type:         model.EventRequest,
+				ConnectionID: connectionID,
+				Sequence:     1,
+				HTTP: model.HTTPRequestMeta{
+					Method:    http.MethodGet,
+					Scheme:    target.Scheme,
+					Authority: target.Host,
+					Path:      "/",
+				},
+			},
+			model.Event{Type: model.EventConnectionClose, ConnectionID: connectionID},
+		)
+	}
+	return events
+}
+
 func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	var attempts int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -537,6 +587,96 @@ func TestReplayRespectsShardAssignment(t *testing.T) {
 	}
 	if atomic.LoadInt64(&attempts) != expectedSent {
 		t.Fatalf("attempt count = %d, want %d", attempts, expectedSent)
+	}
+}
+
+func TestReplayZeroRampupStartsAllWorkersImmediately(t *testing.T) {
+	startCh := make(chan struct{}, 3)
+	releaseCh := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseCh)
+		})
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startCh <- struct{}{}
+		<-releaseCh
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+	t.Cleanup(release)
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.MaxVirtualUsersPerEngine = 3
+	cfg.Replay.MaxActiveConnectionsPerEngine = 3
+	cfg.Replay.RampupDuration = 0
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New())
+	resultCh := runReplayAsync(eng, rampupTestEvents(target, 3))
+
+	waitForRequestStarts(t, startCh, 3, 100*time.Millisecond)
+
+	release()
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("runReplay(eng, events) error: %v", result.err)
+	}
+	if got, want := result.summary.RequestsSent, int64(3); got != want {
+		t.Fatalf("summary.RequestsSent = %d, want %d", got, want)
+	}
+}
+
+func TestReplayRampupStagesWorkerActivation(t *testing.T) {
+	startCh := make(chan struct{}, 3)
+	releaseCh := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseCh)
+		})
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startCh <- struct{}{}
+		<-releaseCh
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+	t.Cleanup(release)
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.MaxVirtualUsersPerEngine = 3
+	cfg.Replay.MaxActiveConnectionsPerEngine = 3
+	cfg.Replay.RampupDuration = 300 * time.Millisecond
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New())
+	resultCh := runReplayAsync(eng, rampupTestEvents(target, 3))
+
+	waitForRequestStarts(t, startCh, 1, 150*time.Millisecond)
+	waitForRequestStarts(t, startCh, 1, 250*time.Millisecond)
+	waitForRequestStarts(t, startCh, 1, 350*time.Millisecond)
+
+	release()
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("runReplay(eng, events) error: %v", result.err)
+	}
+	if got, want := result.summary.RequestsSent, int64(3); got != want {
+		t.Fatalf("summary.RequestsSent = %d, want %d", got, want)
 	}
 }
 
