@@ -180,10 +180,8 @@ func (e *Engine) startWorkers(ctx context.Context, wg *sync.WaitGroup, jobs <-ch
 	vus := e.cfg.Replay.MaxVirtualUsersPerEngine
 	connSem := make(chan struct{}, e.cfg.Replay.MaxActiveConnectionsPerEngine)
 
-	for i := 0; i < vus; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range vus {
+		wg.Go(func() {
 			for job := range jobs {
 				select {
 				case <-ctx.Done():
@@ -194,7 +192,7 @@ func (e *Engine) startWorkers(ctx context.Context, wg *sync.WaitGroup, jobs <-ch
 				<-connSem
 				results <- s
 			}
-		}()
+		})
 	}
 }
 
@@ -524,10 +522,7 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 	var wg sync.WaitGroup
 
 	for _, streamRequests := range streams {
-		streamRequests := streamRequests
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			select {
 			case <-ctx.Done():
 				results <- Summary{ConnectionsAborted: 1, Outcome: RunFailed}
@@ -536,7 +531,7 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 			}
 			defer func() { <-streamSem }()
 			results <- e.replayConnectionSerialized(ctx, client, streamRequests, responsesBySequence, checkpoints)
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -609,21 +604,6 @@ func (e *Engine) shouldUseHTTP2MultiplexedMode(requests []model.Event) bool {
 		}
 	}
 	return false
-}
-
-func (e *Engine) filterGroupsByShard(groups map[model.ConnectionKey][]model.Event) map[model.ConnectionKey][]model.Event {
-	sharding := e.cfg.Replay.Sharding
-	if sharding.ShardCount <= 1 {
-		return groups
-	}
-	filtered := make(map[model.ConnectionKey][]model.Event)
-	for connectionKey, requests := range groups {
-		if !connectionBelongsToShard(connectionKey, sharding.ShardIndex, sharding.ShardCount) {
-			continue
-		}
-		filtered[connectionKey] = requests
-	}
-	return filtered
 }
 
 func connectionBelongsToShard(connectionKey model.ConnectionKey, shardIndex, shardCount int) bool {
@@ -834,12 +814,7 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 }
 
 func (e *Engine) shouldRetryStatus(statusCode int) bool {
-	for _, retryStatus := range e.cfg.Replay.Retry.RetryOnStatuses {
-		if retryStatus == statusCode {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(e.cfg.Replay.Retry.RetryOnStatuses, statusCode)
 }
 
 func (e *Engine) shouldRetryError(err error) bool {
@@ -964,10 +939,7 @@ func backoffDuration(strategy string, attempt int) time.Duration {
 	case "exponential":
 		// Use a capped exponential backoff computed with floats to avoid
 		// undefined behavior or overflow when shifting time.Duration.
-		exp := attempt - 1
-		if exp < 0 {
-			exp = 0
-		}
+		exp := max(attempt-1, 0)
 		if exp > 30 { // cap exponent to avoid absurd durations
 			exp = 30
 		}

@@ -543,7 +543,7 @@ func TestReplayRespectsShardAssignment(t *testing.T) {
 func TestConnectionBelongsToShardUsesNode(t *testing.T) {
 	baseKey := model.ConnectionKey{ConnectionID: 1}
 	baseShard := connectionBelongsToShard(baseKey, 0, 2)
-	for i := 0; i < 256; i++ {
+	for i := range 256 {
 		candidate := model.ConnectionKey{Node: fmt.Sprintf("envoy-%d", i), ConnectionID: 1}
 		if connectionBelongsToShard(candidate, 0, 2) != baseShard {
 			return
@@ -656,9 +656,9 @@ func TestReplaySkipsAlreadyCheckpointedSequence(t *testing.T) {
 
 func TestReplayHTTP2SerializedMode(t *testing.T) {
 	var maxInFlight int64
-	var inFlight int64
+	var inFlight atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		current := atomic.AddInt64(&inFlight, 1)
+		current := inFlight.Add(1)
 		for {
 			previous := atomic.LoadInt64(&maxInFlight)
 			if current <= previous || atomic.CompareAndSwapInt64(&maxInFlight, previous, current) {
@@ -666,7 +666,7 @@ func TestReplayHTTP2SerializedMode(t *testing.T) {
 			}
 		}
 		time.Sleep(80 * time.Millisecond)
-		atomic.AddInt64(&inFlight, -1)
+		inFlight.Add(-1)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	}))
@@ -701,9 +701,9 @@ func TestReplayHTTP2SerializedMode(t *testing.T) {
 
 func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 	var maxInFlight int64
-	var inFlight int64
+	var inFlight atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		current := atomic.AddInt64(&inFlight, 1)
+		current := inFlight.Add(1)
 		for {
 			previous := atomic.LoadInt64(&maxInFlight)
 			if current <= previous || atomic.CompareAndSwapInt64(&maxInFlight, previous, current) {
@@ -711,7 +711,7 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 			}
 		}
 		time.Sleep(80 * time.Millisecond)
-		atomic.AddInt64(&inFlight, -1)
+		inFlight.Add(-1)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	}))

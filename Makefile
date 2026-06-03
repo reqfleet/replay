@@ -9,10 +9,13 @@ LOG ?= requests.log
 GOOS ?= $(shell $(GO) env GOOS)
 GOARCH ?= $(shell $(GO) env GOARCH)
 
-.PHONY: test build tidy run run-sample clean docker-build e2e e2e-server-start e2e-server-stop alltests
+.PHONY: test build tidy run run-sample clean docker-build e2e e2e-server-start e2e-server-stop alltests staticcheck
 
-test:
+test: staticcheck
 	$(GO) test $(PKG) -count=1
+
+staticcheck:
+	$(GO) tool staticcheck ./...
 
 e2e-server-start:
 	@echo "Starting test server on localhost:6000..."

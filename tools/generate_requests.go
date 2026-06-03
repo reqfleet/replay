@@ -12,7 +12,7 @@ import (
 	"github.com/reqfleet/replay/internal/model"
 )
 
-func writeJSONLine(f *os.File, v interface{}) error {
+func writeJSONLine(f *os.File, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
