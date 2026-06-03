@@ -33,6 +33,9 @@ Metric names:
 - `shibuya_cpu_gauge`
 - `shibuya_mem_gauge`
 
+`shibuya_threads_gauge` reflects the number of replay clients created for the
+engine, not the live number of Go goroutines.
+
 ## Outcome model
 
 - Run outcomes: `success`, `partial_success`, `failed`

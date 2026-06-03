@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -135,20 +136,41 @@ func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
 	}
 }
 
-func TestRuntimeMetricsCollector(t *testing.T) {
+func TestWorkerClientCreationUpdatesThreadsGauge(t *testing.T) {
 	reg := metrics.New()
-	labels := config.Default().Labels
+	cfg := config.Default()
+	cfg.Replay.MaxVirtualUsersPerEngine = 3
+	labels := cfg.Labels
 	reg.SeedEngineLabels(labels)
-	stop := reg.StartRuntimeCollection(labels, 50*time.Millisecond)
-	defer stop()
 
-	time.Sleep(150 * time.Millisecond)
+	eng := New(cfg, reg)
+	ctx := t.Context()
 
-	g := reg.ThreadsGauge.WithLabelValues(labels.CollectionID, labels.PlanID, labels.RunID, labels.EngineNo, labels.Zone)
-	v := testutil.ToFloat64(g)
-	if v <= 0 {
-		t.Fatalf("threads gauge = %v, want > 0", v)
+	jobs := make(chan replayJob)
+	results := make(chan Summary)
+	var wg sync.WaitGroup
+	eng.startWorkers(ctx, &wg, jobs, results, nil)
+
+	want := float64(cfg.Replay.MaxVirtualUsersPerEngine)
+	deadline := time.After(time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		g := reg.ThreadsGauge.WithLabelValues(labels.CollectionID, labels.PlanID, labels.RunID, labels.EngineNo, labels.Zone)
+		if v := testutil.ToFloat64(g); v == want {
+			break
+		}
+
+		select {
+		case <-deadline:
+			t.Fatalf("threads gauge did not reach %v", want)
+		case <-ticker.C:
+		}
 	}
+
+	close(jobs)
+	wg.Wait()
 }
 
 // startOKServer returns an httptest server that returns 200 OK on any request.
