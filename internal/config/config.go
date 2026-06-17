@@ -13,28 +13,34 @@ import (
 type Config struct {
 	Replay  ReplayConfig         `yaml:"replay"`
 	Metrics MetricsConfig        `yaml:"metrics"`
-	Env     map[string]string    `yaml:"env"`
-	Labels  CommonMetricLabelSet `yaml:"labels"`
 	Target  TargetOverrideConfig `yaml:"target"`
-	Header  HeaderRewriteConfig  `yaml:"header_rewrite"`
+
+	Labels CommonMetricLabelSet `yaml:"labels"`
+	Env    map[string]string    `yaml:"env"`
+
+	Header HeaderRewriteConfig `yaml:"header_rewrite"`
 }
 
 type ReplayConfig struct {
-	MaxVirtualUsersPerEngine      int               `yaml:"max_virtual_users_per_engine"`
-	MaxActiveConnectionsPerEngine int               `yaml:"max_active_connections_per_engine"`
-	RampupDuration                time.Duration     `yaml:"rampup_duration"`
-	HTTP2                         HTTP2Config       `yaml:"http2"`
-	DryRun                        bool              `yaml:"dry_run"`
-	Verbose                       bool              `yaml:"verbose"`
-	PartialSuccessExitZero        bool              `yaml:"partial_success_exit_zero"`
-	Timeout                       TimeoutConfig     `yaml:"timeout"`
-	Retry                         RetryConfig       `yaml:"retry"`
-	Validation                    ValidationConfig  `yaml:"validation"`
-	Pacing                        PacingConfig      `yaml:"pacing"`
-	Lifecycle                     LifecycleConfig   `yaml:"lifecycle"`
-	Idempotency                   IdempotencyConfig `yaml:"idempotency"`
-	Sharding                      ShardingConfig    `yaml:"sharding"`
-	Checkpoint                    CheckpointConfig  `yaml:"checkpoint"`
+	Retry       RetryConfig       `yaml:"retry"`
+	Timeout     TimeoutConfig     `yaml:"timeout"`
+	HTTP2       HTTP2Config       `yaml:"http2"`
+	Idempotency IdempotencyConfig `yaml:"idempotency"`
+
+	Checkpoint CheckpointConfig `yaml:"checkpoint"`
+	Pacing     PacingConfig     `yaml:"pacing"`
+	Sharding   ShardingConfig   `yaml:"sharding"`
+	Validation ValidationConfig `yaml:"validation"`
+
+	MaxVirtualUsersPerEngine      int           `yaml:"max_virtual_users_per_engine"`
+	MaxActiveConnectionsPerEngine int           `yaml:"max_active_connections_per_engine"`
+	RampupDuration                time.Duration `yaml:"rampup_duration"`
+
+	Lifecycle LifecycleConfig `yaml:"lifecycle"`
+
+	DryRun                 bool `yaml:"dry_run"`
+	Verbose                bool `yaml:"verbose"`
+	PartialSuccessExitZero bool `yaml:"partial_success_exit_zero"`
 }
 
 type TimeoutConfig struct {
