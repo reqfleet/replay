@@ -108,6 +108,7 @@ func New(cfg config.Config, registry *metrics.Registry) *Engine {
 		IdleConnTimeout:     cfg.Replay.Timeout.IdleConnection,
 		MaxIdleConns:        cfg.Replay.MaxActiveConnectionsPerEngine,
 		MaxIdleConnsPerHost: cfg.Replay.MaxActiveConnectionsPerEngine,
+		ForceAttemptHTTP2:   true,
 	}
 	client := &http.Client{
 		Timeout:   cfg.Replay.Timeout.Request,
@@ -345,20 +346,22 @@ type replayJob struct {
 
 func (e *Engine) replayConnectionWithCheckpoint(ctx context.Context, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
 	// Create a per-connection client/transport to ensure socket isolation per connection_id.
-	client, transport := e.makePerConnectionClient()
+	multiplexed := e.shouldUseHTTP2MultiplexedMode(requests)
+	http2 := hasHTTP2Request(requests)
+	client, transport := e.makePerConnectionClient(http2)
 	defer func() {
 		if transport != nil {
 			transport.CloseIdleConnections()
 		}
 	}()
 
-	if e.shouldUseHTTP2MultiplexedMode(requests) {
+	if multiplexed {
 		return e.replayConnectionHTTP2Multiplexed(ctx, client, requests, responsesBySequence, checkpoints)
 	}
 	return e.replayConnectionSerialized(ctx, client, requests, responsesBySequence, checkpoints)
 }
 
-func (e *Engine) makePerConnectionClient() (*http.Client, *http.Transport) {
+func (e *Engine) makePerConnectionClient(http2 bool) (*http.Client, *http.Transport) {
 	dialer := &net.Dialer{Timeout: e.cfg.Replay.Timeout.Connect, KeepAlive: e.cfg.Replay.Timeout.IdleConnection}
 	tr := &http.Transport{
 		DialContext:         dialer.DialContext,
@@ -366,12 +369,27 @@ func (e *Engine) makePerConnectionClient() (*http.Client, *http.Transport) {
 		IdleConnTimeout:     e.cfg.Replay.Timeout.IdleConnection,
 		MaxIdleConns:        2,
 		MaxIdleConnsPerHost: 1,
+		MaxConnsPerHost:     1,
+	}
+	if http2 {
+		tr.ForceAttemptHTTP2 = true
+	} else {
+		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	}
 	client := &http.Client{
 		Timeout:   e.cfg.Replay.Timeout.Request,
 		Transport: tr,
 	}
 	return client, tr
+}
+
+func hasHTTP2Request(requests []model.Event) bool {
+	for _, req := range requests {
+		if strings.Contains(strings.ToUpper(req.HTTP.Version), "HTTP/2") {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Client, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
@@ -635,12 +653,17 @@ func (e *Engine) shouldUseHTTP2MultiplexedMode(requests []model.Event) bool {
 	if !strings.EqualFold(e.cfg.Replay.HTTP2.Mode, "multiplexed") {
 		return false
 	}
+	hasHTTP2 := false
+	streams := make(map[int]struct{})
 	for _, req := range requests {
 		if strings.Contains(strings.ToUpper(req.HTTP.Version), "HTTP/2") {
-			return true
+			hasHTTP2 = true
+		}
+		if req.StreamID > 0 {
+			streams[req.StreamID] = struct{}{}
 		}
 	}
-	return false
+	return hasHTTP2 && len(streams) > 1
 }
 
 func connectionBelongsToShard(connectionKey model.ConnectionKey, shardIndex, shardCount int) bool {

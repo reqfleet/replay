@@ -880,8 +880,11 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}
-	if atomic.LoadInt64(&maxInFlight) < 2 {
-		t.Fatalf("max in-flight = %d, want >= 2 for multiplexed mode", maxInFlight)
+	// With MaxConnsPerHost: 1 unconditionally configured, the HTTP/1.1 fallback
+	// forces concurrent streams to be serialized over a single TCP connection.
+	// Therefore, the maximum concurrent in-flight requests must be exactly 1.
+	if got := atomic.LoadInt64(&maxInFlight); got != 1 {
+		t.Fatalf("max in-flight = %d, want exactly 1 due to strict single-connection HTTP/1.1 fallback", got)
 	}
 }
 
