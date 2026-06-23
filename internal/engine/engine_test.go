@@ -843,7 +843,11 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 	var maxInFlight int64
 	var inFlight atomic.Int64
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Logf("Test server received request: %s Proto: %s NegotiatedProtocol: %q", r.URL.Path, r.Proto, r.TLS.NegotiatedProtocol)
+		negotiatedProto := ""
+		if r.TLS != nil {
+			negotiatedProto = r.TLS.NegotiatedProtocol
+		}
+		t.Logf("Test server received request: %s Proto: %s NegotiatedProtocol: %q", r.URL.Path, r.Proto, negotiatedProto)
 		current := inFlight.Add(1)
 		for {
 			previous := atomic.LoadInt64(&maxInFlight)

@@ -41,7 +41,8 @@ func TestCheckpointWrittenOnSuccess(t *testing.T) {
 		t.Fatalf("new checkpoint store: %v", err)
 	}
 
-	summary := e.replayConnectionSerialized(context.Background(), e.client, []model.Event{req}, nil, store)
+	client, _ := e.makePerConnectionClient(false)
+	summary := e.replayConnectionSerialized(context.Background(), client, []model.Event{req}, nil, store)
 	if summary.RequestsSent != 1 {
 		t.Fatalf("expect 1 request sent, got %d", summary.RequestsSent)
 	}
@@ -84,7 +85,8 @@ func TestCheckpointNotWrittenInDryRun(t *testing.T) {
 		t.Fatalf("new checkpoint store: %v", err)
 	}
 
-	summary := e.replayConnectionSerialized(context.Background(), e.client, []model.Event{req}, nil, store)
+	client, _ := e.makePerConnectionClient(false)
+	summary := e.replayConnectionSerialized(context.Background(), client, []model.Event{req}, nil, store)
 	if summary.Skipped == 0 {
 		t.Fatalf("expected skipped > 0 for dry run")
 	}
@@ -117,7 +119,8 @@ func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
 		t.Fatalf("new checkpoint store: %v", err)
 	}
 
-	summary := e.replayConnectionSerialized(context.Background(), e.client, []model.Event{req}, nil, store)
+	client, _ := e.makePerConnectionClient(false)
+	summary := e.replayConnectionSerialized(context.Background(), client, []model.Event{req}, nil, store)
 	if summary.Skipped != 1 {
 		t.Fatalf("expected 1 skipped, got %d", summary.Skipped)
 	}

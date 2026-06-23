@@ -86,7 +86,6 @@ type Summary struct {
 type Engine struct {
 	cfg                 config.Config
 	metrics             *metrics.Registry
-	client              *http.Client
 	parsedPathTemplates map[int][]PathTemplate
 }
 
@@ -101,24 +100,9 @@ type requestExecution struct {
 }
 
 func New(cfg config.Config, registry *metrics.Registry) *Engine {
-	dialer := &net.Dialer{Timeout: cfg.Replay.Timeout.Connect, KeepAlive: cfg.Replay.Timeout.IdleConnection}
-	transport := &http.Transport{
-		DialContext:         dialer.DialContext,
-		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: cfg.Replay.TLS.InsecureSkipVerify},
-		IdleConnTimeout:     cfg.Replay.Timeout.IdleConnection,
-		MaxIdleConns:        cfg.Replay.MaxActiveConnectionsPerEngine,
-		MaxIdleConnsPerHost: cfg.Replay.MaxActiveConnectionsPerEngine,
-		ForceAttemptHTTP2:   true,
-	}
-	client := &http.Client{
-		Timeout:   cfg.Replay.Timeout.Request,
-		Transport: transport,
-	}
-
 	return &Engine{
 		cfg:                 cfg,
 		metrics:             registry,
-		client:              client,
 		parsedPathTemplates: ParsePathTemplates(cfg.Metrics.PathTemplates),
 	}
 }
@@ -395,9 +379,11 @@ func (e *Engine) detectHTTP2(requests []model.Event) (http2 bool, multiplexed bo
 	streams := make(map[int]struct{})
 	for _, req := range requests {
 		if !http2 {
-			v := req.HTTP.Version
-			if strings.Contains(v, "HTTP/2") || strings.Contains(v, "http/2") || strings.Contains(v, "Http/2") {
+			if strings.Contains(strings.ToUpper(req.HTTP.Version), "HTTP/2") {
 				http2 = true
+				if !isMultiplexedMode {
+					break
+				}
 			}
 		}
 		if isMultiplexedMode && req.StreamID > 0 {
