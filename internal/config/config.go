@@ -25,6 +25,7 @@ type ReplayConfig struct {
 	Retry       RetryConfig       `yaml:"retry"`
 	Timeout     TimeoutConfig     `yaml:"timeout"`
 	HTTP2       HTTP2Config       `yaml:"http2"`
+	TLS         TLSConfig         `yaml:"tls"`
 	Idempotency IdempotencyConfig `yaml:"idempotency"`
 
 	Checkpoint CheckpointConfig `yaml:"checkpoint"`
@@ -41,6 +42,10 @@ type ReplayConfig struct {
 	DryRun                 bool `yaml:"dry_run"`
 	Verbose                bool `yaml:"verbose"`
 	PartialSuccessExitZero bool `yaml:"partial_success_exit_zero"`
+}
+
+type TLSConfig struct {
+	InsecureSkipVerify bool `yaml:"insecure_skip_verify"`
 }
 
 type TimeoutConfig struct {
@@ -140,6 +145,9 @@ func Default() Config {
 			HTTP2: HTTP2Config{
 				Mode:                 "serialized",
 				MaxConcurrentStreams: 16,
+			},
+			TLS: TLSConfig{
+				InsecureSkipVerify: false,
 			},
 			DryRun:                 false,
 			PartialSuccessExitZero: true,

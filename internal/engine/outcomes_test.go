@@ -36,7 +36,9 @@ func TestOutcomeAggregation_DryRunSerialized(t *testing.T) {
 		},
 	}
 
-	summary := e.replayConnectionSerialized(context.Background(), e.client, requests, nil, nil)
+	client, transport := e.makePerConnectionClient(false)
+	defer transport.CloseIdleConnections()
+	summary := e.replayConnectionSerialized(context.Background(), client, requests, nil, nil)
 
 	if got, want := summary.Skipped, int64(2); got != want {
 		t.Errorf("summary.Skipped = %v, want %v", got, want)
@@ -103,7 +105,9 @@ func TestOutcomeAggregation_ValidationFailure(t *testing.T) {
 		1: {Type: model.EventResponse, ConnectionID: 1, Sequence: 1, Status: 200},
 	}
 
-	summary := e.replayConnectionSerialized(context.Background(), e.client, requests, expected, nil)
+	client, transport := e.makePerConnectionClient(false)
+	defer transport.CloseIdleConnections()
+	summary := e.replayConnectionSerialized(context.Background(), client, requests, expected, nil)
 
 	if got, want := summary.ValidationFailed, int64(1); got != want {
 		t.Errorf("summary.ValidationFailed = %v, want %v", got, want)
@@ -136,7 +140,9 @@ func TestOutcomeAggregation_SendError(t *testing.T) {
 		HTTP:         model.HTTPRequestMeta{Scheme: "http", Authority: "example.invalid", Path: ""},
 	}
 
-	summary := e.replayConnectionSerialized(context.Background(), e.client, []model.Event{bad}, nil, nil)
+	client, transport := e.makePerConnectionClient(false)
+	defer transport.CloseIdleConnections()
+	summary := e.replayConnectionSerialized(context.Background(), client, []model.Event{bad}, nil, nil)
 
 	if got, want := summary.SendErrors, int64(1); got != want {
 		t.Errorf("summary.SendErrors = %v, want %v", got, want)
