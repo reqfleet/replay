@@ -274,6 +274,7 @@ func (e *Engine) bufferAndSchedule(ctx context.Context, events <-chan model.Even
 		return parseErr
 	}
 
+	// schedule any remaining connections that did not have a connection_close event
 	for id, b := range bufs {
 		if len(b.requests) == 0 {
 			continue
