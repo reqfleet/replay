@@ -2,8 +2,9 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 )
 
 func main() {
@@ -14,6 +15,7 @@ func main() {
 
 	fmt.Println("Test server listening on localhost:6000")
 	if err := http.ListenAndServe("localhost:6000", nil); err != nil {
-		log.Fatalf("Server failed: %v", err)
+		slog.Error("Server failed", "error", err)
+		os.Exit(1)
 	}
 }

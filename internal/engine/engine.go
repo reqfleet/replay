@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"log"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -509,10 +509,16 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		}
 		if expected, ok := responsesBySequence[requestEvent.Sequence]; ok {
 			if e.responseValidationFailed(expected, exec) {
-				if e.cfg.Replay.Verbose {
-					log.Printf("[VERBOSE] Validation failed: node=%s conn=%d seq=%d status=%d expected_status=%d", requestEvent.Node, requestEvent.ConnectionID, requestEvent.Sequence, exec.statusCode, expected.Status)
+				if slog.Default().Enabled(ctx, slog.LevelDebug) {
+					slog.DebugContext(ctx, "Validation failed",
+						"node", requestEvent.Node,
+						"conn", requestEvent.ConnectionID,
+						"seq", requestEvent.Sequence,
+						"status", exec.statusCode,
+						"expected_status", expected.Status,
+					)
 					if len(exec.body) > 0 {
-						log.Printf("[VERBOSE] Validation failed body: %s", exec.body)
+						slog.DebugContext(ctx, "Validation failed body", "body", string(exec.body))
 					}
 				}
 				result.ValidationFailed++
@@ -755,9 +761,12 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 		exec, err := e.executeRequest(ctx, client, requestEvent)
 		if err != nil {
 			lastErr = err
-			if e.cfg.Replay.Verbose {
-				log.Printf("[VERBOSE] Request failed: conn=%d seq=%d path=%s err=%v", requestEvent.ConnectionID, requestEvent.Sequence, requestEvent.HTTP.Path, err)
-			}
+			slog.DebugContext(ctx, "Request failed",
+				"conn", requestEvent.ConnectionID,
+				"seq", requestEvent.Sequence,
+				"path", requestEvent.HTTP.Path,
+				"error", err,
+			)
 			if attempt == maxAttempts || !e.shouldRetryError(err) {
 				return requestExecution{}, err
 			}
@@ -769,17 +778,23 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 
 		lastExec = exec
 		if attempt < maxAttempts && e.shouldRetryStatus(exec.statusCode) {
-			if e.cfg.Replay.Verbose {
-				log.Printf("[VERBOSE] Request retryable status: conn=%d seq=%d path=%s status=%d", requestEvent.ConnectionID, requestEvent.Sequence, requestEvent.HTTP.Path, exec.statusCode)
-			}
+			slog.DebugContext(ctx, "Request retryable status",
+				"conn", requestEvent.ConnectionID,
+				"seq", requestEvent.Sequence,
+				"path", requestEvent.HTTP.Path,
+				"status", exec.statusCode,
+			)
 			if sleepErr := e.sleepBackoff(ctx, attempt); sleepErr != nil {
 				return requestExecution{}, sleepErr
 			}
 			continue
 		}
-		if e.cfg.Replay.Verbose {
-			log.Printf("[VERBOSE] Request success: conn=%d seq=%d path=%s status=%d", requestEvent.ConnectionID, requestEvent.Sequence, requestEvent.HTTP.Path, exec.statusCode)
-		}
+		slog.DebugContext(ctx, "Request success",
+			"conn", requestEvent.ConnectionID,
+			"seq", requestEvent.Sequence,
+			"path", requestEvent.HTTP.Path,
+			"status", exec.statusCode,
+		)
 		return exec, nil
 	}
 
