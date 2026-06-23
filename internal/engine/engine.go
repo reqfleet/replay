@@ -509,15 +509,17 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		}
 		if expected, ok := responsesBySequence[requestEvent.Sequence]; ok {
 			if e.responseValidationFailed(expected, exec) {
-				slog.DebugContext(ctx, "Validation failed",
-					"node", requestEvent.Node,
-					"conn", requestEvent.ConnectionID,
-					"seq", requestEvent.Sequence,
-					"status", exec.statusCode,
-					"expected_status", expected.Status,
-				)
-				if len(exec.body) > 0 {
-					slog.DebugContext(ctx, "Validation failed body", "body", string(exec.body))
+				if slog.Default().Enabled(ctx, slog.LevelDebug) {
+					slog.DebugContext(ctx, "Validation failed",
+						"node", requestEvent.Node,
+						"conn", requestEvent.ConnectionID,
+						"seq", requestEvent.Sequence,
+						"status", exec.statusCode,
+						"expected_status", expected.Status,
+					)
+					if len(exec.body) > 0 {
+						slog.DebugContext(ctx, "Validation failed body", "body", string(exec.body))
+					}
 				}
 				result.ValidationFailed++
 				reqRes.Outcome = RequestValidationFailed
