@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -85,28 +85,43 @@ func main() {
 	requireOverride := flag.Bool("require-override", false, "fail if override-url is required but missing")
 	verboseFlag := flag.Bool("verbose", false, "enable verbose output (e.g. log response errors)")
 	flag.Parse()
+
+	// Initialize slog default logger
+	logLevel := slog.LevelInfo
+	if *verboseFlag {
+		logLevel = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: logLevel,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.LevelKey {
+				a.Value = slog.StringValue("[" + a.Value.String() + "]")
+			}
+			return a
+		},
+	})))
+
 	if *logPath == "" {
-		log.Println("-log is required")
+		slog.Error("-log is required")
 		os.Exit(2)
 	}
 	if *zstdFlag && *gzipFlag {
-		log.Println("cannot specify both -zstd and -gzip")
+		slog.Error("cannot specify both -zstd and -gzip")
 		os.Exit(2)
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Printf("load config: %v", err)
+		slog.Error("load config", "error", err)
 		os.Exit(2)
 	}
 	// Apply environment overrides (env > YAML)
 	cfg.ApplyEnv()
-	log.Printf(
-		"resolved labels: collection_id=%q plan_id=%q run_id=%q engine_no=%q zone=%q",
-		cfg.Labels.CollectionID,
-		cfg.Labels.PlanID,
-		cfg.Labels.RunID,
-		cfg.Labels.EngineNo,
-		cfg.Labels.Zone,
+	slog.Info("resolved labels",
+		"collection_id", cfg.Labels.CollectionID,
+		"plan_id", cfg.Labels.PlanID,
+		"run_id", cfg.Labels.RunID,
+		"engine_no", cfg.Labels.EngineNo,
+		"zone", cfg.Labels.Zone,
 	)
 	// Apply CLI overrides with higher precedence for safety-related flags
 	if *dryRunFlag {
@@ -123,12 +138,12 @@ func main() {
 	}
 
 	if cfg.Target.Require && cfg.Target.OverrideURL == "" {
-		log.Println("target override required but missing; aborting")
+		slog.Error("target override required but missing; aborting")
 		os.Exit(2)
 	}
 	for key, value := range cfg.Env {
 		if setErr := os.Setenv(key, value); setErr != nil {
-			log.Printf("set env %s: %v", key, setErr)
+			slog.Error("set env failed", "key", key, "error", setErr)
 			os.Exit(2)
 		}
 	}
@@ -150,10 +165,10 @@ func main() {
 		mux.Handle(cfg.Metrics.Path, registry.Handler())
 		go func() {
 			if serveErr := http.ListenAndServe(cfg.Metrics.ListenAddress, mux); serveErr != nil {
-				log.Printf("metrics server stopped: %v", serveErr)
+				slog.Error("metrics server stopped", "error", serveErr)
 			}
 		}()
-		log.Printf("metrics endpoint ready at http://%s%s", cfg.Metrics.ListenAddress, cfg.Metrics.Path)
+		slog.Info("metrics endpoint ready", "url", fmt.Sprintf("http://%s%s", cfg.Metrics.ListenAddress, cfg.Metrics.Path))
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -167,25 +182,24 @@ func main() {
 
 	summary, err := runReplayFromFile(ctx, cfg, registry, *logPath, format)
 	if err != nil {
-		log.Printf("parse log file: %v", err)
+		slog.Error("parse log file failed", "error", err)
 		os.Exit(2)
 	}
 
 	if cfg.Metrics.Enabled && cfg.Metrics.GracefulTerminationPeriod > 0 {
-		log.Printf("metrics graceful termination period: %s", cfg.Metrics.GracefulTerminationPeriod)
+		slog.Info("metrics graceful termination period", "period", cfg.Metrics.GracefulTerminationPeriod)
 		waitForMetricsGracePeriod(ctx, cfg.Metrics.GracefulTerminationPeriod)
 	}
 
-	log.Printf(
-		"replay outcome=%s sent=%d responses=%d send_errors=%d validation_failed=%d skipped=%d conn_done=%d conn_aborted=%d",
-		summary.Outcome,
-		summary.RequestsSent,
-		summary.ResponsesReceived,
-		summary.SendErrors,
-		summary.ValidationFailed,
-		summary.Skipped,
-		summary.ConnectionsDone,
-		summary.ConnectionsAborted,
+	slog.Info("replay finished",
+		"outcome", summary.Outcome,
+		"sent", summary.RequestsSent,
+		"responses", summary.ResponsesReceived,
+		"send_errors", summary.SendErrors,
+		"validation_failed", summary.ValidationFailed,
+		"skipped", summary.Skipped,
+		"conn_done", summary.ConnectionsDone,
+		"conn_aborted", summary.ConnectionsAborted,
 	)
 
 	exitCode := exitCodeForSummary(summary, cfg)
