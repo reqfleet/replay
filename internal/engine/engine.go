@@ -382,7 +382,8 @@ func (e *Engine) detectHTTP2(requests []model.Event) (http2 bool, multiplexed bo
 	}
 	for _, req := range requests {
 		if !http2 {
-			if strings.Contains(strings.ToUpper(req.HTTP.Version), "HTTP/2") {
+			version := req.HTTP.Version
+			if strings.Contains(version, "HTTP/2") || strings.Contains(version, "http/2") {
 				http2 = true
 				if !isMultiplexedMode {
 					break
