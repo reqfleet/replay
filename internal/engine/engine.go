@@ -376,7 +376,10 @@ func (e *Engine) makePerConnectionClient(http2 bool) (*http.Client, *http.Transp
 // detectHTTP2 returns (http2, multiplexed) based on the connection requests in a single pass.
 func (e *Engine) detectHTTP2(requests []model.Event) (http2 bool, multiplexed bool) {
 	isMultiplexedMode := strings.EqualFold(e.cfg.Replay.HTTP2.Mode, "multiplexed")
-	streams := make(map[int]struct{})
+	var streams map[int]struct{}
+	if isMultiplexedMode {
+		streams = make(map[int]struct{})
+	}
 	for _, req := range requests {
 		if !http2 {
 			if strings.Contains(strings.ToUpper(req.HTTP.Version), "HTTP/2") {
@@ -386,8 +389,12 @@ func (e *Engine) detectHTTP2(requests []model.Event) (http2 bool, multiplexed bo
 				}
 			}
 		}
-		if isMultiplexedMode && req.StreamID > 0 {
-			streams[req.StreamID] = struct{}{}
+		if isMultiplexedMode {
+			streamID := req.StreamID
+			if streamID == 0 {
+				streamID = 1
+			}
+			streams[streamID] = struct{}{}
 		}
 	}
 	multiplexed = isMultiplexedMode && http2 && len(streams) > 1
