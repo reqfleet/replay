@@ -842,7 +842,8 @@ func TestReplayHTTP2SerializedMode(t *testing.T) {
 func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 	var maxInFlight int64
 	var inFlight atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("Test server received request: %s Proto: %s NegotiatedProtocol: %q", r.URL.Path, r.Proto, r.TLS.NegotiatedProtocol)
 		current := inFlight.Add(1)
 		for {
 			previous := atomic.LoadInt64(&maxInFlight)
@@ -855,6 +856,8 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
 	defer srv.Close()
 
 	target, err := url.Parse(srv.URL)
@@ -865,6 +868,7 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.HTTP2.Mode = "multiplexed"
 	cfg.Replay.HTTP2.MaxConcurrentStreams = 8
+	cfg.Replay.TLS.InsecureSkipVerify = true
 	cfg.Replay.Idempotency.Enabled = false
 
 	eng := New(cfg, metrics.New())
@@ -880,11 +884,11 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
 	}
-	// With MaxConnsPerHost: 1 unconditionally configured, the HTTP/1.1 fallback
-	// forces concurrent streams to be serialized over a single TCP connection.
-	// Therefore, the maximum concurrent in-flight requests must be exactly 1.
-	if got := atomic.LoadInt64(&maxInFlight); got != 1 {
-		t.Fatalf("max in-flight = %d, want exactly 1 due to strict single-connection HTTP/1.1 fallback", got)
+	// With InsecureSkipVerify set to true and a TLS server, true HTTP/2 multiplexing
+	// is enabled. Both requests will be processed concurrently over a single connection,
+	// so the maximum concurrent in-flight requests should be exactly 2.
+	if got := atomic.LoadInt64(&maxInFlight); got != 2 {
+		t.Fatalf("max in-flight = %d, want exactly 2 for HTTP/2 multiplexed mode", got)
 	}
 }
 
