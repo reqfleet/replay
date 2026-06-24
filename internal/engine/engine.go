@@ -672,11 +672,6 @@ func groupRequestsByStream(requests []model.Event) map[int][]model.Event {
 		}
 		grouped[streamID] = append(grouped[streamID], req)
 	}
-	for streamID := range grouped {
-		sort.Slice(grouped[streamID], func(i, j int) bool {
-			return grouped[streamID][i].Sequence < grouped[streamID][j].Sequence
-		})
-	}
 	return grouped
 }
 
