@@ -1092,9 +1092,7 @@ func (e *Engine) buildRequestURL(event model.Event) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("parse request path: %w", err)
 		}
-		// Clone pre-parsed URL to prevent race conditions with concurrent goroutines mutating it.
-		override := *e.parsedOverrideURL
-		u := override.JoinPath(parsedPath.Path)
+		u := e.parsedOverrideURL.JoinPath(parsedPath.Path)
 		u.RawQuery = parsedPath.RawQuery
 		return u.String(), nil
 	}
