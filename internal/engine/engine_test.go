@@ -1074,6 +1074,60 @@ func TestOverrideURLPreservesQueryString(t *testing.T) {
 	}
 }
 
+func TestNewEngineAbsoluteURLValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		overrideURL string
+		expectValid bool
+	}{
+		{
+			name:        "Valid absolute HTTP URL",
+			overrideURL: "http://example.com",
+			expectValid: true,
+		},
+		{
+			name:        "Valid absolute HTTPS URL with path",
+			overrideURL: "https://api.example.com/v1",
+			expectValid: true,
+		},
+		{
+			name:        "Invalid relative URL (missing scheme)",
+			overrideURL: "example.com",
+			expectValid: false,
+		},
+		{
+			name:        "Invalid relative URL (missing host)",
+			overrideURL: "/relative/path",
+			expectValid: false,
+		},
+		{
+			name:        "Empty string",
+			overrideURL: "",
+			expectValid: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Target.OverrideURL = tt.overrideURL
+
+			eng := New(cfg, metrics.New())
+			if tt.expectValid {
+				if eng.parsedOverrideURL == nil {
+					t.Errorf("expected parsedOverrideURL to be non-nil for URL %q", tt.overrideURL)
+				} else if eng.parsedOverrideURL.String() != tt.overrideURL {
+					t.Errorf("expected parsed URL %q, got %q", tt.overrideURL, eng.parsedOverrideURL.String())
+				}
+			} else {
+				if eng.parsedOverrideURL != nil {
+					t.Errorf("expected parsedOverrideURL to be nil for invalid URL %q", tt.overrideURL)
+				}
+			}
+		})
+	}
+}
+
 func TestReplayAbortsConnectionAfterSendError(t *testing.T) {
 	var attempts int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

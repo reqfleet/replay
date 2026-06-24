@@ -103,9 +103,13 @@ type requestExecution struct {
 func New(cfg config.Config, registry *metrics.Registry) *Engine {
 	var parsedOverride *url.URL
 	if cfg.Target.OverrideURL != "" {
-		if u, err := url.Parse(cfg.Target.OverrideURL); err == nil {
+		u, err := url.Parse(cfg.Target.OverrideURL)
+		if err == nil && u.Scheme != "" && u.Host != "" {
 			parsedOverride = u
 		} else {
+			if err == nil {
+				err = fmt.Errorf("url must be absolute (include scheme and host)")
+			}
 			slog.Error("failed to parse config target.override_url", "url", cfg.Target.OverrideURL, "error", err)
 		}
 	}
