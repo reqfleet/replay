@@ -87,6 +87,7 @@ type Engine struct {
 	cfg                 config.Config
 	metrics             *metrics.Registry
 	parsedPathTemplates map[int][]PathTemplate
+	parsedOverrideURL   *url.URL
 }
 
 const maxBodyRead = 10 * 1024 * 1024 // 10 MiB
@@ -100,10 +101,23 @@ type requestExecution struct {
 }
 
 func New(cfg config.Config, registry *metrics.Registry) *Engine {
+	var parsedOverride *url.URL
+	if cfg.Target.OverrideURL != "" {
+		u, err := url.Parse(cfg.Target.OverrideURL)
+		if err == nil && u.Scheme != "" && u.Host != "" {
+			parsedOverride = u
+		} else {
+			if err == nil {
+				err = fmt.Errorf("url must be absolute (include scheme and host)")
+			}
+			slog.Error("failed to parse config target.override_url", "url", cfg.Target.OverrideURL, "error", err)
+		}
+	}
 	return &Engine{
 		cfg:                 cfg,
 		metrics:             registry,
 		parsedPathTemplates: ParsePathTemplates(cfg.Metrics.PathTemplates),
+		parsedOverrideURL:   parsedOverride,
 	}
 }
 
@@ -274,6 +288,7 @@ func (e *Engine) bufferAndSchedule(ctx context.Context, events <-chan model.Even
 		return parseErr
 	}
 
+	// schedule any remaining connections that did not have a connection_close event
 	for id, b := range bufs {
 		if len(b.requests) == 0 {
 			continue
@@ -838,13 +853,11 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	}
 
 	// Automatic Host/:authority rewrite when override_url is set.
-	if e.cfg.Target.OverrideURL != "" {
-		if override, err := url.Parse(e.cfg.Target.OverrideURL); err == nil {
-			// set request Host to override host (preserves path/query in URL)
-			req.Host = override.Host
-			// also set Host header explicitly for clarity
-			req.Header.Set("Host", override.Host)
-		}
+	if e.parsedOverrideURL != nil {
+		// set request Host to override host (preserves path/query in URL)
+		req.Host = e.parsedOverrideURL.Host
+		// also set Host header explicitly for clarity
+		req.Header.Set("Host", e.parsedOverrideURL.Host)
 	}
 
 	for key, value := range e.cfg.Header.Set {
@@ -1077,19 +1090,15 @@ func headersMismatch(expected map[string][]string, actual map[string][]string, i
 }
 
 func (e *Engine) buildRequestURL(event model.Event) (string, error) {
-	if e.cfg.Target.OverrideURL != "" {
-		override, err := url.Parse(e.cfg.Target.OverrideURL)
-		if err != nil {
-			return "", fmt.Errorf("parse override_url: %w", err)
-		}
+	if e.parsedOverrideURL != nil {
 		requestURI := event.HTTP.Path
 		parsedPath, err := url.ParseRequestURI(requestURI)
 		if err != nil {
 			return "", fmt.Errorf("parse request path: %w", err)
 		}
-		override = override.JoinPath(parsedPath.Path)
-		override.RawQuery = parsedPath.RawQuery
-		return override.String(), nil
+		u := e.parsedOverrideURL.JoinPath(parsedPath.Path)
+		u.RawQuery = parsedPath.RawQuery
+		return u.String(), nil
 	}
 
 	scheme := event.HTTP.Scheme
@@ -1102,7 +1111,7 @@ func (e *Engine) buildRequestURL(event model.Event) (string, error) {
 	if event.HTTP.Path == "" {
 		return "", fmt.Errorf("request path is required")
 	}
-	return fmt.Sprintf("%s://%s%s", scheme, event.HTTP.Authority, event.HTTP.Path), nil
+	return scheme + "://" + event.HTTP.Authority + event.HTTP.Path, nil
 }
 
 func resolvedRequestMethod(request model.Event) string {
