@@ -1340,6 +1340,107 @@ func TestNewEngineAbsoluteURLValidation(t *testing.T) {
 	}
 }
 
+func TestReplayStreamCancelsInFlightRequestOnRouteError(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	releaseCh := make(chan struct{})
+	var startedOnce sync.Once
+	var canceledOnce sync.Once
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseCh)
+		})
+	}
+	t.Cleanup(release)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startedOnce.Do(func() {
+			close(started)
+		})
+		select {
+		case <-r.Context().Done():
+			canceledOnce.Do(func() {
+				close(canceled)
+			})
+		case <-releaseCh:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		}
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Timeout.Request = 2 * time.Second
+	cfg.Replay.Idempotency.Enabled = false
+	eng := New(cfg, metrics.New())
+
+	events := make(chan model.Event)
+	resultCh := make(chan replayResult, 1)
+	go func() {
+		summary, err := eng.ReplayStream(context.Background(), events)
+		resultCh <- replayResult{summary: summary, err: err}
+	}()
+
+	events <- model.Event{Type: model.EventMeta}
+	events <- model.Event{Type: model.EventConnectionOpen, ConnectionID: 1}
+	events <- model.Event{
+		Type:         model.EventRequest,
+		ConnectionID: 1,
+		Sequence:     1,
+		HTTP: model.HTTPRequestMeta{
+			Method:    http.MethodGet,
+			Scheme:    target.Scheme,
+			Authority: target.Host,
+			Path:      "/slow",
+		},
+	}
+
+	select {
+	case <-started:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("request did not start")
+	}
+
+	events <- model.Event{
+		Type:         model.EventRequest,
+		ConnectionID: 2,
+		Sequence:     1,
+		HTTP: model.HTTPRequestMeta{
+			Method:    http.MethodGet,
+			Scheme:    target.Scheme,
+			Authority: target.Host,
+			Path:      "/missing-open",
+		},
+	}
+	close(events)
+
+	select {
+	case result := <-resultCh:
+		if result.err == nil {
+			t.Fatal("ReplayStream() error = nil, want route error")
+		}
+		if result.summary.Outcome != RunFailed {
+			t.Fatalf("summary.Outcome = %s, want %s", result.summary.Outcome, RunFailed)
+		}
+	case <-time.After(200 * time.Millisecond):
+		release()
+		result := <-resultCh
+		t.Fatalf("ReplayStream did not cancel in-flight request before route error returned; summary=%+v err=%v", result.summary, result.err)
+	}
+
+	select {
+	case <-canceled:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("in-flight request context was not canceled")
+	}
+}
+
 func TestReplayAbortsConnectionAfterSendError(t *testing.T) {
 	var attempts int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

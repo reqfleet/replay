@@ -143,6 +143,9 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 
 	e.metrics.SeedEngineLabels(e.cfg.Labels)
 
+	replayCtx, cancelReplay := context.WithCancel(ctx)
+	defer cancelReplay()
+
 	vus := e.cfg.Replay.MaxVirtualUsersPerEngine
 	if vus < 1 {
 		vus = 1
@@ -160,13 +163,14 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	for i := range workerChs {
 		activationDelay := workerActivationDelay(i, vus, e.cfg.Replay.RampupDuration)
 		wg.Go(func() {
-			results <- e.runEventWorker(ctx, workerChs[i], activationDelay, checkpoints, connSem)
+			results <- e.runEventWorker(replayCtx, workerChs[i], activationDelay, checkpoints, connSem)
 		})
 	}
 
-	routeErr := e.routeEvents(ctx, events, workerChs)
+	routeErr := e.routeEvents(replayCtx, events, workerChs)
 
 	if routeErr != nil {
+		cancelReplay()
 		go func() {
 			for range events {
 			}
