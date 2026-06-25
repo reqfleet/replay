@@ -50,16 +50,14 @@ func newCheckpointStore(path string) (*checkpointStore, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			// start background flusher even if file doesn't exist yet
-			store.wg.Add(1)
-			go store.flusher()
+			store.wg.Go(store.flusher)
 			return store, nil
 		}
 		return nil, fmt.Errorf("read checkpoint: %w", err)
 	}
 	if len(b) == 0 {
 		// start background flusher when file is empty
-		store.wg.Add(1)
-		go store.flusher()
+		store.wg.Go(store.flusher)
 		return store, nil
 	}
 	if err := json.Unmarshal(b, &store.data); err != nil {
@@ -74,8 +72,7 @@ func newCheckpointStore(path string) (*checkpointStore, error) {
 		store.data.Version = 1
 	}
 	// start background flusher
-	store.wg.Add(1)
-	go store.flusher()
+	store.wg.Go(store.flusher)
 	return store, nil
 }
 
@@ -87,6 +84,15 @@ func (c *checkpointStore) alreadyProcessed(connectionKey model.ConnectionKey, se
 	defer c.mu.Unlock()
 	last, ok := c.data.Connections[connectionKey]
 	return ok && sequence <= last
+}
+
+func (c *checkpointStore) lastProcessed(connectionKey model.ConnectionKey) int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.data.Connections[connectionKey]
 }
 
 func (c *checkpointStore) markProcessed(connectionKey model.ConnectionKey, sequence int) error {
@@ -161,7 +167,6 @@ func (c *checkpointStore) persist() error {
 
 // flusher runs in background and periodically persists queued updates.
 func (c *checkpointStore) flusher() {
-	defer c.wg.Done()
 	ticker := time.NewTicker(c.flushInterval)
 	defer ticker.Stop()
 	for {

@@ -230,15 +230,14 @@ file as the implicit close point when `connection_close` is absent.
 
 Replay engine MUST:
 
-1. Group events by `node` + `connection_id`
-2. Normalize events into a per-connection monotonic `sequence` when the
-  recorder did not emit one
-3. Sort by `sequence` within each connection
-4. Open one TCP connection per `node` + `connection_id`
-5. Replay requests in order
-6. Optionally sleep based on timestamp delta
-7. Close connection when `connection_close` event is encountered, or at EOF if
-  the recorder did not emit one
+1. Read events in append order without buffering the full capture.
+2. Route every non-meta event by `node` + `connection_id` to exactly one replay worker.
+3. Preserve the parser's per-connection monotonic `sequence`; replay MUST NOT reorder events.
+4. Open one replay connection state per `node` + `connection_id`.
+5. Replay requests in observed connection order for HTTP/1.1 and serialized HTTP/2.
+6. In multiplexed HTTP/2 mode, dispatch request sends concurrently as request events arrive.
+7. Optionally sleep based on timestamp deltas in observed connection order.
+8. Close connection state when `connection_close` is encountered, or at EOF if the recorder did not emit one.
 
 ### HTTP/1.1
 
@@ -249,10 +248,10 @@ Replay engine MUST:
 
 Two supported modes:
 
-1. Serialized mode (simplified replay)
-2. Multiplexed mode (advanced, preserves concurrency)
+1. Serialized mode, which sends requests one at a time in observed connection order.
+2. Multiplexed mode, which sends HTTP/2 requests concurrently on the shared per-connection client and joins in-flight requests at `connection_close` or EOF.
 
-Multiplexed mode requires stream-aware replay logic.
+Multiplexed mode uses stream-aware checkpointing so a later completed request cannot advance the checkpoint past an earlier in-flight request.
 
 ### 9.1 Distributed Replay for Large Captures
 
@@ -331,8 +330,8 @@ Normative behavior:
 
 1. A replay engine MUST NOT exceed `max_virtual_users_per_engine`.
 2. A replay engine MUST NOT exceed `max_active_connections_per_engine`.
-3. When either limit is reached, additional work MUST be queued and started when capacity becomes available.
-4. Implementations MUST preserve per-connection ordering and lifecycle semantics while queued.
+3. When either limit is reached, additional work MUST wait behind bounded worker or connection backpressure.
+4. Implementations MUST preserve per-connection ordering and lifecycle semantics while waiting.
 5. The specification does not require `max_requests_per_second` and does not use it as a primary control.
 
 Distributed replay note:
@@ -404,7 +403,11 @@ Replay runtime behavior SHOULD be configurable via a YAML file.
 Minimum configurable domains:
 
 * Timeouts: connect timeout, request timeout, optional idle/keepalive timeout.
+* HTTP/2 replay mode: serialized or multiplexed.
 * Retry policy: max retries, retryable error classes/statuses, backoff strategy.
+* Validation: status, header, body, and ignored-header controls.
+* Pacing: optional timestamp-delta replay with a maximum sleep cap.
+* Lifecycle: whether replay requires `connection_open` before requests.
 * Environment variables: key/value pairs injected into replay process/runtime.
 * Metrics server: listen address/port, endpoint enable toggle (default enabled), path (default `/metrics`).
 * Capacity controls: `max_virtual_users_per_engine`, `max_active_connections_per_engine`.
@@ -421,7 +424,10 @@ Example:
 ```yaml
 replay:
   max_virtual_users_per_engine: 20
+  rampup_duration: 0s
   max_active_connections_per_engine: 200
+  http2:
+    mode: serialized
   timeout:
     connect: 3s
     request: 30s
@@ -430,7 +436,27 @@ replay:
     max_attempts: 2
     backoff: exponential
     retry_on_statuses: [429, 502, 503, 504]
-    retry_on_errors: [timeout, connection_reset]
+    retry_on_errors: [timeout, connection_reset, network, tls]
+  validation:
+    enabled: true
+    status: true
+    headers: false
+    body: false
+    ignore_headers: [x-request-id, date]
+  pacing:
+    enabled: false
+    max_sleep_delta: 30s
+  lifecycle:
+    require_open: true
+  idempotency:
+    enabled: true
+    block_methods: [POST, PUT, PATCH, DELETE]
+    require_header_for_allow: [idempotency-key, x-idempotency-key]
+  sharding:
+    shard_index: 0
+    shard_count: 1
+  checkpoint:
+    file: "./checkpoint.json"
 metrics:
   enabled: true
   listen_address: "0.0.0.0:9102"

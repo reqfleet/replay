@@ -20,7 +20,6 @@ import (
 func TestCheckpointWrittenOnSuccess(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Lifecycle.RequireOpen = false
-	cfg.Replay.Lifecycle.RequireClose = false
 
 	reg := metrics.New()
 	e := New(cfg, reg)
@@ -66,7 +65,6 @@ func TestCheckpointWrittenOnSuccess(t *testing.T) {
 func TestCheckpointNotWrittenInDryRun(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Lifecycle.RequireOpen = false
-	cfg.Replay.Lifecycle.RequireClose = false
 	cfg.Replay.DryRun = true
 
 	reg := metrics.New()
@@ -103,7 +101,6 @@ func TestCheckpointNotWrittenInDryRun(t *testing.T) {
 func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Lifecycle.RequireOpen = false
-	cfg.Replay.Lifecycle.RequireClose = false
 	cfg.Replay.Idempotency.Enabled = true
 	cfg.Replay.Idempotency.BlockMethods = []string{"POST"}
 	cfg.Replay.Idempotency.RequireHeaderForAllow = []string{"x-idempotency-key"}
@@ -152,10 +149,20 @@ func TestWorkerClientCreationUpdatesThreadsGauge(t *testing.T) {
 	eng := New(cfg, reg)
 	ctx := t.Context()
 
-	jobs := make(chan replayJob)
-	results := make(chan Summary)
+	vus := cfg.Replay.MaxVirtualUsersPerEngine
+	workerChs := make([]chan model.Event, vus)
+	for i := range workerChs {
+		workerChs[i] = make(chan model.Event, 1)
+	}
+	connSem := make(chan struct{}, cfg.Replay.MaxActiveConnectionsPerEngine)
+	results := make(chan Summary, vus)
 	var wg sync.WaitGroup
-	eng.startWorkers(ctx, &wg, jobs, results, nil)
+	for i := range workerChs {
+		ch := workerChs[i]
+		wg.Go(func() {
+			results <- eng.runEventWorker(ctx, ch, 0, nil, connSem)
+		})
+	}
 
 	want := float64(cfg.Replay.MaxVirtualUsersPerEngine)
 	deadline := time.After(time.Second)
@@ -175,7 +182,9 @@ func TestWorkerClientCreationUpdatesThreadsGauge(t *testing.T) {
 		}
 	}
 
-	close(jobs)
+	for _, ch := range workerChs {
+		close(ch)
+	}
 	wg.Wait()
 }
 

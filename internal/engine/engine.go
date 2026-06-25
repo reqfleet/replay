@@ -64,10 +64,15 @@ type RequestResult struct {
 }
 
 type ConnectionResult struct {
-	Node         string            `json:"node,omitempty"`
-	ConnectionID int               `json:"connection_id"`
-	Outcome      ConnectionOutcome `json:"outcome"`
-	Requests     []RequestResult   `json:"requests"`
+	Node              string            `json:"node,omitempty"`
+	ConnectionID      int               `json:"connection_id"`
+	Outcome           ConnectionOutcome `json:"outcome"`
+	RequestsSent      int64             `json:"requests_sent,omitempty"`
+	ResponsesReceived int64             `json:"responses_received,omitempty"`
+	SendErrors        int64             `json:"send_errors,omitempty"`
+	ValidationFailed  int64             `json:"validation_failed,omitempty"`
+	Skipped           int64             `json:"skipped,omitempty"`
+	Requests          []RequestResult   `json:"requests,omitempty"`
 }
 
 type Summary struct {
@@ -122,9 +127,11 @@ func New(cfg config.Config, registry *metrics.Registry) *Engine {
 }
 
 // ReplayStream processes events from the provided channel as they arrive.
-// Connections are scheduled for replay when their corresponding
-// connection_close event is observed or when the input channel is closed.
-// This allows streaming large logs without holding all events in memory.
+// Events are routed to per-worker channels by connection assignment, providing
+// bounded backpressure without buffering entire connections in memory.
+// Each worker maintains per-connection state and replays HTTP/1.1 requests
+// synchronously as they arrive. HTTP/2 multiplexed requests are dispatched
+// concurrently on the shared per-connection client and joined at close/EOF.
 func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (Summary, error) {
 	checkpoints, err := newCheckpointStore(e.cfg.Replay.Checkpoint.File)
 	if err != nil {
@@ -135,82 +142,603 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	}
 
 	e.metrics.SeedEngineLabels(e.cfg.Labels)
-	jobs := make(chan replayJob)
-	results := make(chan Summary, 1024)
 
+	replayCtx, cancelReplay := context.WithCancel(ctx)
+	defer cancelReplay()
+
+	vus := e.cfg.Replay.MaxVirtualUsersPerEngine
+	if vus < 1 {
+		vus = 1
+	}
+	connSem := make(chan struct{}, e.cfg.Replay.MaxActiveConnectionsPerEngine)
+
+	workerChs := make([]chan model.Event, vus)
+	for i := range workerChs {
+		workerChs[i] = make(chan model.Event, eventChannelDepth)
+	}
+
+	results := make(chan Summary, vus)
 	var wg sync.WaitGroup
-	e.startWorkers(ctx, &wg, jobs, results, checkpoints)
 
-	parseErr := e.bufferAndSchedule(ctx, events, jobs)
-	if parseErr != nil {
-		// drain remaining events to unblock producer
+	for i := range workerChs {
+		activationDelay := workerActivationDelay(i, vus, e.cfg.Replay.RampupDuration)
+		wg.Go(func() {
+			results <- e.runEventWorker(replayCtx, workerChs[i], activationDelay, checkpoints, connSem)
+		})
+	}
+
+	routeErr := e.routeEvents(replayCtx, events, workerChs)
+
+	if routeErr != nil {
+		cancelReplay()
 		go func() {
 			for range events {
 			}
 		}()
-		// stop scheduling more jobs
-		close(jobs)
-		// wait for workers to finish and drain results
-		go func() { wg.Wait(); close(results) }()
-		for range results {
-		}
-		return Summary{Outcome: RunFailed}, parseErr
 	}
 
-	close(jobs)
+	for _, ch := range workerChs {
+		close(ch)
+	}
 
-	// close results when workers are done
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
+	wg.Wait()
+	close(results)
+
+	if routeErr != nil {
+		return Summary{Outcome: RunFailed}, routeErr
+	}
 
 	return e.aggregateResults(results), nil
 }
 
-type connBuf struct {
-	requests  []model.Event
-	responses map[int]model.Event
-	hasOpen   bool
-	hasClose  bool
+const eventChannelDepth = 256
+
+// connState holds per-connection state within an event worker.
+type connState struct {
+	connKey     model.ConnectionKey
+	client      *http.Client
+	transport   *http.Transport
+	http2       bool
+	multiplexed bool
+	detected    bool
+	semAcquired bool
+
+	// Per-connection event processing state
+	previousTimestamp    time.Time
+	previousTimestampSet bool
+	pendingActual        map[int]requestExecution
+	pendingExpected      map[int]model.Event
+	sent                 int64
+	responsesReceived    int64
+	sendErrors           int64
+	validationFailed     int64
+	skipped              int64
+	aborted              bool
+
+	// Concurrent H/2 checkpointing advances the persisted watermark only after
+	// every earlier observed request has reached a terminal checkpointable state.
+	checkpointWatermark int
+	checkpointOrder     []int
+	checkpointCompleted map[int]struct{}
+	// H/2 multiplexed requests run concurrently on the same http.Client.
+	// h2Mu protects the shared result/rendezvous fields above while those
+	// goroutines are in flight.
+	h2Mu sync.Mutex
+	h2WG sync.WaitGroup
 }
 
-func (e *Engine) startWorkers(ctx context.Context, wg *sync.WaitGroup, jobs <-chan replayJob, results chan<- Summary, checkpoints *checkpointStore) {
-	vus := e.cfg.Replay.MaxVirtualUsersPerEngine
-	connSem := make(chan struct{}, e.cfg.Replay.MaxActiveConnectionsPerEngine)
-
-	for vu := range vus {
-		activationDelay := workerActivationDelay(vu, vus, e.cfg.Replay.RampupDuration)
-		wg.Go(func() {
-			e.runWorker(ctx, activationDelay, jobs, results, checkpoints, connSem)
-		})
+func (e *Engine) newConnState(connKey model.ConnectionKey) *connState {
+	return &connState{
+		connKey:         connKey,
+		pendingActual:   make(map[int]requestExecution),
+		pendingExpected: make(map[int]model.Event),
 	}
 }
 
-func (e *Engine) runWorker(ctx context.Context, activationDelay time.Duration, jobs <-chan replayJob, results chan<- Summary, checkpoints *checkpointStore, connSem chan struct{}) {
+func (e *Engine) detectHTTP2ForConn(cs *connState, firstRequest model.Event) {
+	cs.detected = true
+	version := firstRequest.HTTP.Version
+	if strings.Contains(version, "HTTP/2") || strings.Contains(version, "http/2") {
+		cs.http2 = true
+	}
+	cs.multiplexed = strings.EqualFold(e.cfg.Replay.HTTP2.Mode, "multiplexed") && cs.http2
+}
+
+// routeEvents reads events and routes them to per-worker channels.
+// Connections are assigned to workers round-robin on first appearance,
+// ensuring even distribution. All events for a connection go to the same
+// worker, preserving per-connection ordering.
+func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, workerChs []chan model.Event) error {
+	opened := make(map[model.ConnectionKey]bool)
+	connWorker := make(map[model.ConnectionKey]int)
+	vus := len(workerChs)
+	nextWorker := 0
+
+	for ev := range events {
+		if ev.Type == model.EventMeta {
+			continue
+		}
+
+		connKey := model.ConnectionKey{Node: ev.Node, ConnectionID: ev.ConnectionID}
+		if !connectionBelongsToShard(connKey, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
+			continue
+		}
+
+		switch ev.Type {
+		case model.EventConnectionOpen:
+			opened[connKey] = true
+		case model.EventConnectionClose:
+			// Cleanup happens after the close event is routed so it reaches the
+			// worker that owns the connection state.
+		case model.EventRequest:
+			if e.cfg.Replay.Lifecycle.RequireOpen && !opened[connKey] {
+				return fmt.Errorf("connection %v missing connection_open", connKey)
+			}
+		}
+
+		workerIdx, ok := connWorker[connKey]
+		if !ok {
+			workerIdx = nextWorker % vus
+			nextWorker++
+			connWorker[connKey] = workerIdx
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case workerChs[workerIdx] <- ev:
+		}
+
+		if ev.Type == model.EventConnectionClose {
+			delete(opened, connKey)
+			delete(connWorker, connKey)
+		}
+	}
+
+	return nil
+}
+
+// runEventWorker processes events from its channel using per-connection state.
+// For HTTP/1.1, requests are processed synchronously as they arrive. For HTTP/2
+// multiplexed mode, requests are sent concurrently on the same per-connection
+// client and finalized when connection_close or EOF is observed.
+func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, activationDelay time.Duration, checkpoints *checkpointStore, connSem chan struct{}) Summary {
 	if err := waitForWorkerActivation(ctx, activationDelay); err != nil {
-		return
+		return Summary{}
 	}
 	if e.metrics != nil {
 		e.metrics.RecordClientCreated(e.cfg.Labels)
 	}
-	for job := range jobs {
-		select {
-		case <-ctx.Done():
-			return
-		case connSem <- struct{}{}:
+
+	conns := make(map[model.ConnectionKey]*connState)
+	result := Summary{}
+
+	for ev := range events {
+		if ctx.Err() != nil {
+			break
 		}
-		s := e.replayConnectionWithCheckpoint(ctx, job.requests, job.responsesBySequence, checkpoints)
-		<-connSem
-		results <- s
+
+		connKey := model.ConnectionKey{Node: ev.Node, ConnectionID: ev.ConnectionID}
+		cs := conns[connKey]
+
+		switch ev.Type {
+		case model.EventConnectionOpen:
+			if cs == nil {
+				cs = e.newConnState(connKey)
+				conns[connKey] = cs
+			}
+
+		case model.EventRequest:
+			if cs == nil {
+				cs = e.newConnState(connKey)
+				conns[connKey] = cs
+			}
+			if !cs.detected {
+				e.detectHTTP2ForConn(cs, ev)
+				if cs.multiplexed {
+					cs.checkpointWatermark = checkpoints.lastProcessed(connKey)
+				}
+				client, transport := e.makePerConnectionClient(cs.http2)
+				cs.client = client
+				cs.transport = transport
+				select {
+				case <-ctx.Done():
+					e.finalizeConn(ctx, cs, connSem, checkpoints, &result)
+					delete(conns, connKey)
+					continue
+				case connSem <- struct{}{}:
+					cs.semAcquired = true
+				}
+			}
+
+			if cs.multiplexed {
+				cs.h2Mu.Lock()
+				aborted := cs.aborted
+				cs.h2Mu.Unlock()
+				if !aborted {
+					e.processRequestConcurrent(ctx, cs, ev, checkpoints)
+				}
+			} else {
+				if !cs.aborted {
+					abort := e.processRequest(ctx, cs, ev, checkpoints)
+					if abort {
+						cs.aborted = true
+						e.closeConnResources(cs, connSem)
+					}
+				}
+			}
+
+		case model.EventResponse:
+			if cs == nil {
+				continue
+			}
+			if cs.multiplexed {
+				cs.h2Mu.Lock()
+				e.handleResponseEvent(cs, ev)
+				cs.h2Mu.Unlock()
+			} else {
+				e.handleResponseEvent(cs, ev)
+			}
+
+		case model.EventConnectionClose:
+			if cs == nil {
+				continue
+			}
+			e.finalizeConn(ctx, cs, connSem, checkpoints, &result)
+			delete(conns, connKey)
+		}
 	}
+
+	// EOF: finalize remaining connections
+	for _, cs := range conns {
+		e.finalizeConn(ctx, cs, connSem, checkpoints, &result)
+	}
+
+	return result
+}
+
+func (e *Engine) finalizeConn(ctx context.Context, cs *connState, connSem chan struct{}, checkpoints *checkpointStore, result *Summary) {
+	if !cs.detected {
+		e.closeConnResources(cs, connSem)
+		return
+	}
+
+	if cs.multiplexed {
+		cs.h2WG.Wait()
+	}
+	e.collectConnResults(cs, result)
+	e.closeConnResources(cs, connSem)
+}
+
+func (e *Engine) closeConnResources(cs *connState, connSem chan struct{}) {
+	if cs.transport != nil {
+		cs.transport.CloseIdleConnections()
+		cs.transport = nil
+	}
+	if cs.semAcquired {
+		<-connSem
+		cs.semAcquired = false
+	}
+}
+
+func (e *Engine) collectConnResults(cs *connState, result *Summary) {
+	result.RequestsSent += cs.sent
+	result.ResponsesReceived += cs.responsesReceived
+	result.SendErrors += cs.sendErrors
+	result.ValidationFailed += cs.validationFailed
+	result.Skipped += cs.skipped
+	if cs.aborted {
+		result.ConnectionsAborted++
+	} else {
+		result.ConnectionsDone++
+	}
+	connResult := ConnectionResult{
+		Node:              cs.connKey.Node,
+		ConnectionID:      cs.connKey.ConnectionID,
+		Outcome:           connOutcome(cs.aborted),
+		RequestsSent:      cs.sent,
+		ResponsesReceived: cs.responsesReceived,
+		SendErrors:        cs.sendErrors,
+		ValidationFailed:  cs.validationFailed,
+		Skipped:           cs.skipped,
+	}
+	result.ConnectionResults = append(result.ConnectionResults, connResult)
+}
+
+func connectionResultFromSummary(connKey model.ConnectionKey, outcome ConnectionOutcome, result Summary) ConnectionResult {
+	return ConnectionResult{
+		Node:              connKey.Node,
+		ConnectionID:      connKey.ConnectionID,
+		Outcome:           outcome,
+		RequestsSent:      result.RequestsSent,
+		ResponsesReceived: result.ResponsesReceived,
+		SendErrors:        result.SendErrors,
+		ValidationFailed:  result.ValidationFailed,
+		Skipped:           result.Skipped,
+	}
+}
+
+func connOutcome(aborted bool) ConnectionOutcome {
+	if aborted {
+		return ConnectionAborted
+	}
+	return ConnectionCompleted
+}
+
+// processRequest handles a single HTTP/1.1 request event synchronously.
+// Returns true if the connection should be aborted.
+func (e *Engine) processRequest(ctx context.Context, cs *connState, requestEvent model.Event, checkpoints *checkpointStore) (abort bool) {
+	if e.paceRequest(ctx, cs, requestEvent) != nil {
+		cs.aborted = true
+		return true
+	}
+
+	reqKey, reqRes, handled, abort := e.prepareRequest(cs, requestEvent, checkpoints)
+	if handled {
+		return abort
+	}
+
+	exec, err := e.sendRequest(ctx, cs.client, requestEvent)
+	if err != nil {
+		e.finishRequestError(cs, requestEvent, reqRes, err)
+		return true
+	}
+
+	abort = e.finishRequestSuccess(cs, requestEvent, reqRes, exec, checkpoints.markProcessed(reqKey, requestEvent.Sequence))
+	if !abort {
+		e.recordSuccessMetrics(requestEvent, exec)
+	}
+	return abort
+}
+
+// processRequestConcurrent handles a single HTTP/2 multiplexed request by
+// sending it on the shared per-connection client in its own goroutine. Go's
+// http.Transport is safe for concurrent use and owns the actual H/2 stream
+// multiplexing below this abstraction.
+func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, requestEvent model.Event, checkpoints *checkpointStore) {
+	if e.paceRequest(ctx, cs, requestEvent) != nil {
+		cs.h2Mu.Lock()
+		cs.aborted = true
+		cs.h2Mu.Unlock()
+		return
+	}
+
+	cs.h2Mu.Lock()
+	reqKey, reqRes, handled, commitSequence := e.prepareConcurrentRequest(cs, requestEvent, checkpoints)
+	cs.h2Mu.Unlock()
+	if commitSequence > 0 {
+		if err := checkpoints.markProcessed(reqKey, commitSequence); err != nil {
+			cs.h2Mu.Lock()
+			cs.aborted = true
+			reqRes.Error = err.Error()
+			cs.h2Mu.Unlock()
+		}
+	}
+	if handled {
+		return
+	}
+
+	cs.h2WG.Go(func() {
+		exec, err := e.sendRequest(ctx, cs.client, requestEvent)
+		if err != nil {
+			cs.h2Mu.Lock()
+			e.finishRequestError(cs, requestEvent, reqRes, err)
+			cs.h2Mu.Unlock()
+			return
+		}
+
+		cs.h2Mu.Lock()
+		abort := e.finishRequestSuccess(cs, requestEvent, reqRes, exec, nil)
+		commitSequence := 0
+		if !abort {
+			commitSequence = cs.completeCheckpointSequence(requestEvent.Sequence)
+		}
+		cs.h2Mu.Unlock()
+
+		if abort {
+			return
+		}
+		if commitSequence > 0 {
+			if err := checkpoints.markProcessed(reqKey, commitSequence); err != nil {
+				cs.h2Mu.Lock()
+				cs.aborted = true
+				reqRes.Error = err.Error()
+				cs.h2Mu.Unlock()
+				return
+			}
+		}
+		e.recordSuccessMetrics(requestEvent, exec)
+	})
+}
+
+func (e *Engine) paceRequest(ctx context.Context, cs *connState, requestEvent model.Event) error {
+	if err := e.sleepForPacing(ctx, cs.previousTimestamp, cs.previousTimestampSet, requestEvent.Timestamp); err != nil {
+		return err
+	}
+	if parsedTimestamp, ok := model.ParseTimestamp(requestEvent.Timestamp); ok {
+		cs.previousTimestamp = parsedTimestamp
+		cs.previousTimestampSet = true
+	}
+	return nil
+}
+
+func (e *Engine) prepareRequest(cs *connState, requestEvent model.Event, checkpoints *checkpointStore) (model.ConnectionKey, *RequestResult, bool, bool) {
+	reqKey := model.ConnectionKey{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID}
+	reqRes := &RequestResult{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID, Sequence: requestEvent.Sequence}
+
+	if checkpoints.alreadyProcessed(reqKey, requestEvent.Sequence) {
+		cs.skipped++
+		reqRes.Outcome = RequestSkipped
+		reqRes.Skipped = true
+		return reqKey, reqRes, true, false
+	}
+
+	if e.shouldSkipByIdempotencyPolicy(requestEvent) {
+		cs.skipped++
+		reqRes.Outcome = RequestSkipped
+		reqRes.Skipped = true
+		if err := checkpoints.markProcessed(reqKey, requestEvent.Sequence); err != nil {
+			cs.aborted = true
+			reqRes.Error = err.Error()
+			return reqKey, reqRes, true, true
+		}
+		return reqKey, reqRes, true, false
+	}
+
+	if e.cfg.Replay.DryRun {
+		cs.skipped++
+		reqRes.Outcome = RequestSkipped
+		reqRes.Skipped = true
+		return reqKey, reqRes, true, false
+	}
+
+	return reqKey, reqRes, false, false
+}
+
+func (e *Engine) prepareConcurrentRequest(cs *connState, requestEvent model.Event, checkpoints *checkpointStore) (model.ConnectionKey, *RequestResult, bool, int) {
+	reqKey := model.ConnectionKey{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID}
+	reqRes := &RequestResult{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID, Sequence: requestEvent.Sequence}
+
+	if checkpoints.alreadyProcessed(reqKey, requestEvent.Sequence) {
+		cs.skipped++
+		reqRes.Outcome = RequestSkipped
+		reqRes.Skipped = true
+		return reqKey, reqRes, true, 0
+	}
+
+	if e.shouldSkipByIdempotencyPolicy(requestEvent) {
+		cs.skipped++
+		reqRes.Outcome = RequestSkipped
+		reqRes.Skipped = true
+		cs.trackCheckpointSequence(requestEvent.Sequence)
+		return reqKey, reqRes, true, cs.completeCheckpointSequence(requestEvent.Sequence)
+	}
+
+	if e.cfg.Replay.DryRun {
+		cs.skipped++
+		reqRes.Outcome = RequestSkipped
+		reqRes.Skipped = true
+		return reqKey, reqRes, true, 0
+	}
+
+	cs.trackCheckpointSequence(requestEvent.Sequence)
+	return reqKey, reqRes, false, 0
+}
+
+func (cs *connState) trackCheckpointSequence(sequence int) {
+	if sequence <= cs.checkpointWatermark {
+		return
+	}
+	cs.checkpointOrder = append(cs.checkpointOrder, sequence)
+}
+
+func (cs *connState) completeCheckpointSequence(sequence int) int {
+	if sequence <= cs.checkpointWatermark {
+		return 0
+	}
+	previous := cs.checkpointWatermark
+	if cs.checkpointCompleted == nil {
+		cs.checkpointCompleted = make(map[int]struct{})
+	}
+	cs.checkpointCompleted[sequence] = struct{}{}
+	for len(cs.checkpointOrder) > 0 {
+		next := cs.checkpointOrder[0]
+		if _, ok := cs.checkpointCompleted[next]; !ok {
+			break
+		}
+		delete(cs.checkpointCompleted, next)
+		cs.checkpointWatermark = next
+		cs.checkpointOrder = cs.checkpointOrder[1:]
+	}
+	if cs.checkpointWatermark == previous {
+		return 0
+	}
+	return cs.checkpointWatermark
+}
+
+func (e *Engine) finishRequestError(cs *connState, requestEvent model.Event, reqRes *RequestResult, err error) {
+	cs.sendErrors++
+	cs.aborted = true
+	reqRes.Outcome = RequestSendError
+	reqRes.Error = err.Error()
+	e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
+}
+
+func (e *Engine) finishRequestSuccess(cs *connState, requestEvent model.Event, reqRes *RequestResult, exec requestExecution, checkpointErr error) bool {
+	cs.sent++
+	cs.responsesReceived++
+	reqRes.Outcome = RequestResponseReceived
+	reqRes.StatusCode = exec.statusCode
+	reqRes.LatencyMS = exec.latencyMS
+
+	if checkpointErr != nil {
+		cs.aborted = true
+		reqRes.Error = checkpointErr.Error()
+		return true
+	}
+
+	if !e.shouldRetainResponseForValidation() {
+		return false
+	}
+	if expected, ok := cs.pendingExpected[requestEvent.Sequence]; ok {
+		if e.responseValidationFailed(expected, exec) {
+			cs.validationFailed++
+			reqRes.Outcome = RequestValidationFailed
+			reqRes.ValidationFailed = true
+		}
+		delete(cs.pendingExpected, requestEvent.Sequence)
+	} else {
+		cs.pendingActual[requestEvent.Sequence] = exec
+	}
+	return false
+}
+
+// handleResponseEvent processes a response event for validation rendezvous.
+// If the actual response (from the target) is already available, validation
+// runs immediately. Otherwise, the expected response is stored for later.
+func (e *Engine) handleResponseEvent(cs *connState, ev model.Event) {
+	if !e.shouldRetainResponseForValidation() {
+		return
+	}
+	if actual, ok := cs.pendingActual[ev.Sequence]; ok {
+		if e.responseValidationFailed(ev, actual) {
+			cs.validationFailed++
+		}
+		delete(cs.pendingActual, ev.Sequence)
+	} else {
+		cs.pendingExpected[ev.Sequence] = ev
+	}
+}
+
+func (e *Engine) shouldRetainResponseForValidation() bool {
+	validation := e.cfg.Replay.Validation
+	return validation.Enabled && (validation.Status || validation.Headers || validation.Body)
+}
+
+func (e *Engine) recordSuccessMetrics(requestEvent model.Event, exec requestExecution) {
+	if !e.cfg.Metrics.Enabled || e.metrics == nil {
+		return
+	}
+	safeLabel := e.metricLabelForRequest(requestEvent)
+	e.metrics.LabelLatencyHistogram.WithLabelValues(
+		e.cfg.Labels.CollectionID, safeLabel, e.cfg.Labels.RunID,
+		e.cfg.Labels.EngineNo, e.cfg.Labels.PlanID, e.cfg.Labels.Zone,
+	).Observe(exec.latencyMS)
+	e.metrics.StatusCounter.WithLabelValues(
+		e.cfg.Labels.CollectionID, e.cfg.Labels.PlanID, e.cfg.Labels.RunID,
+		e.cfg.Labels.EngineNo, safeLabel, e.cfg.Labels.Zone,
+		fmt.Sprintf("%d", exec.statusCode),
+	).Inc()
+	e.metrics.EgressCounter.WithLabelValues(
+		e.cfg.Labels.CollectionID, e.cfg.Labels.PlanID, e.cfg.Labels.RunID,
+		e.cfg.Labels.EngineNo, safeLabel, e.cfg.Labels.Zone,
+	).Add(float64(exec.egressBytes))
 }
 
 func workerActivationDelay(workerIndex, totalWorkers int, rampup time.Duration) time.Duration {
 	if workerIndex <= 0 || totalWorkers <= 1 || rampup <= 0 {
 		return 0
 	}
-
 	return time.Duration(float64(rampup) * float64(workerIndex) / float64(totalWorkers-1))
 }
 
@@ -223,7 +751,6 @@ func waitForWorkerActivation(ctx context.Context, delay time.Duration) error {
 	}
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
-
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -232,84 +759,8 @@ func waitForWorkerActivation(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func (e *Engine) bufferAndSchedule(ctx context.Context, events <-chan model.Event, jobs chan<- replayJob) error {
-	bufs := make(map[model.ConnectionKey]*connBuf)
-	var parseErr error
-
-	for ev := range events {
-		if ev.Type == model.EventMeta {
-			continue
-		}
-		id := model.ConnectionKey{Node: ev.Node, ConnectionID: ev.ConnectionID}
-		b := bufs[id]
-		if b == nil {
-			b = &connBuf{responses: make(map[int]model.Event)}
-			bufs[id] = b
-		}
-
-		switch ev.Type {
-		case model.EventRequest:
-			b.requests = append(b.requests, ev)
-		case model.EventResponse:
-			if b.responses == nil {
-				b.responses = make(map[int]model.Event)
-			}
-			b.responses[ev.Sequence] = ev
-		case model.EventConnectionOpen:
-			b.hasOpen = true
-		case model.EventConnectionClose:
-			b.hasClose = true
-			if len(b.requests) == 0 {
-				delete(bufs, id)
-				continue
-			}
-			if e.cfg.Replay.Lifecycle.RequireOpen && !b.hasOpen {
-				parseErr = fmt.Errorf("connection %v missing connection_open", id)
-				break
-			}
-			if !connectionBelongsToShard(id, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
-				delete(bufs, id)
-				continue
-			}
-			sort.Slice(b.requests, func(i, j int) bool { return b.requests[i].Sequence < b.requests[j].Sequence })
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case jobs <- replayJob{requests: b.requests, responsesBySequence: b.responses}:
-			}
-			delete(bufs, id)
-		}
-		if parseErr != nil {
-			break
-		}
-	}
-
-	if parseErr != nil {
-		return parseErr
-	}
-
-	// schedule any remaining connections that did not have a connection_close event
-	for id, b := range bufs {
-		if len(b.requests) == 0 {
-			continue
-		}
-		if !connectionBelongsToShard(id, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
-			continue
-		}
-		sort.Slice(b.requests, func(i, j int) bool { return b.requests[i].Sequence < b.requests[j].Sequence })
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case jobs <- replayJob{requests: b.requests, responsesBySequence: b.responses}:
-		}
-	}
-
-	return nil
-}
-
 func (e *Engine) aggregateResults(results <-chan Summary) Summary {
 	final := Summary{Outcome: RunSuccess}
-	var allRequestResults []RequestResult
 	for s := range results {
 		final.RequestsSent += s.RequestsSent
 		final.ResponsesReceived += s.ResponsesReceived
@@ -318,14 +769,10 @@ func (e *Engine) aggregateResults(results <-chan Summary) Summary {
 		final.Skipped += s.Skipped
 		final.ConnectionsDone += s.ConnectionsDone
 		final.ConnectionsAborted += s.ConnectionsAborted
-		if len(s.RequestResults) > 0 {
-			allRequestResults = append(allRequestResults, s.RequestResults...)
-		}
 		if len(s.ConnectionResults) > 0 {
 			final.ConnectionResults = append(final.ConnectionResults, s.ConnectionResults...)
 		}
 	}
-	final.RequestResults = allRequestResults
 	if final.ConnectionsAborted > 0 {
 		final.Outcome = RunPartialSuccess
 	}
@@ -336,11 +783,6 @@ func (e *Engine) aggregateResults(results <-chan Summary) Summary {
 		final.Outcome = RunFailed
 	}
 	return final
-}
-
-type replayJob struct {
-	requests            []model.Event
-	responsesBySequence map[int]model.Event
 }
 
 func (e *Engine) replayConnectionWithCheckpoint(ctx context.Context, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
@@ -425,7 +867,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 
 	connID := requests[0].ConnectionID
 	connKey := model.ConnectionKey{Node: requests[0].Node, ConnectionID: connID}
-	connResult := ConnectionResult{Node: connKey.Node, ConnectionID: connKey.ConnectionID, Outcome: ConnectionCompleted, Requests: []RequestResult{}}
+	var connResult ConnectionResult
 
 	var previousTimestamp time.Time
 	previousTimestampSet := false
@@ -456,8 +898,6 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.Skipped++
 			reqRes.Outcome = RequestSkipped
 			reqRes.Skipped = true
-			connResult.Requests = append(connResult.Requests, reqRes)
-			result.RequestResults = append(result.RequestResults, reqRes)
 			continue
 		}
 
@@ -469,12 +909,8 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 				result.ConnectionsAborted++
 				result.Outcome = RunFailed
 				reqRes.Error = err.Error()
-				connResult.Requests = append(connResult.Requests, reqRes)
-				result.RequestResults = append(result.RequestResults, reqRes)
 				return result
 			}
-			connResult.Requests = append(connResult.Requests, reqRes)
-			result.RequestResults = append(result.RequestResults, reqRes)
 			continue
 		}
 
@@ -483,8 +919,6 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.Skipped++
 			reqRes.Outcome = RequestSkipped
 			reqRes.Skipped = true
-			connResult.Requests = append(connResult.Requests, reqRes)
-			result.RequestResults = append(result.RequestResults, reqRes)
 			continue
 		}
 
@@ -501,9 +935,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			reqRes.Outcome = RequestSendError
 			reqRes.Error = err.Error()
 			e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
-			connResult.Requests = append(connResult.Requests, reqRes)
-			result.RequestResults = append(result.RequestResults, reqRes)
-			connResult.Outcome = ConnectionAborted
+			connResult = connectionResultFromSummary(connKey, ConnectionAborted, result)
 			result.ConnectionResults = append(result.ConnectionResults, connResult)
 			return result
 		}
@@ -518,8 +950,6 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.ConnectionsAborted++
 			result.Outcome = RunFailed
 			reqRes.Error = err.Error()
-			connResult.Requests = append(connResult.Requests, reqRes)
-			result.RequestResults = append(result.RequestResults, reqRes)
 			return result
 		}
 		if expected, ok := responsesBySequence[requestEvent.Sequence]; ok {
@@ -544,8 +974,6 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 				}
 			}
 		}
-		connResult.Requests = append(connResult.Requests, reqRes)
-		result.RequestResults = append(result.RequestResults, reqRes)
 
 		if e.cfg.Metrics.Enabled && e.metrics != nil {
 			safeLabel := e.metricLabelForRequest(requestEvent)
@@ -587,11 +1015,10 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.Outcome = RunSuccess
 		}
 	}
-	// finalize connection result outcome
 	if result.ConnectionsAborted > 0 {
-		connResult.Outcome = ConnectionAborted
+		connResult = connectionResultFromSummary(connKey, ConnectionAborted, result)
 	} else {
-		connResult.Outcome = ConnectionCompleted
+		connResult = connectionResultFromSummary(connKey, ConnectionCompleted, result)
 	}
 	result.ConnectionResults = append(result.ConnectionResults, connResult)
 	return result
@@ -603,19 +1030,15 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 		return Summary{ConnectionsDone: 1, Outcome: RunSuccess}
 	}
 
-	streamSem := make(chan struct{}, e.cfg.Replay.HTTP2.MaxConcurrentStreams)
 	results := make(chan Summary, len(streams))
 	var wg sync.WaitGroup
 
 	for _, streamRequests := range streams {
 		wg.Go(func() {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				results <- Summary{ConnectionsAborted: 1, Outcome: RunFailed}
 				return
-			case streamSem <- struct{}{}:
 			}
-			defer func() { <-streamSem }()
 			results <- e.replayConnectionSerialized(ctx, client, streamRequests, responsesBySequence, checkpoints)
 		})
 	}
@@ -624,7 +1047,6 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 	close(results)
 
 	aggregated := Summary{Outcome: RunSuccess}
-	var combinedRequests []RequestResult
 	for streamResult := range results {
 		aggregated.RequestsSent += streamResult.RequestsSent
 		aggregated.ResponsesReceived += streamResult.ResponsesReceived
@@ -632,9 +1054,6 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 		aggregated.ValidationFailed += streamResult.ValidationFailed
 		aggregated.Skipped += streamResult.Skipped
 		aggregated.ConnectionsAborted += streamResult.ConnectionsAborted
-		if len(streamResult.RequestResults) > 0 {
-			combinedRequests = append(combinedRequests, streamResult.RequestResults...)
-		}
 	}
 
 	if aggregated.ConnectionsAborted > 0 {
@@ -654,12 +1073,11 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 	if len(requests) > 0 {
 		connKey = model.ConnectionKey{Node: requests[0].Node, ConnectionID: requests[0].ConnectionID}
 	}
-	connResult := ConnectionResult{Node: connKey.Node, ConnectionID: connKey.ConnectionID, Outcome: ConnectionCompleted, Requests: combinedRequests}
+	connResult := connectionResultFromSummary(connKey, ConnectionCompleted, aggregated)
 	if aggregated.ConnectionsAborted > 0 {
 		connResult.Outcome = ConnectionAborted
 	}
 	aggregated.ConnectionResults = append(aggregated.ConnectionResults, connResult)
-	aggregated.RequestResults = combinedRequests
 	return aggregated
 }
 

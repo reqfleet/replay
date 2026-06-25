@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -445,6 +446,26 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 	}
 }
 
+func TestFinishRequestSuccessDoesNotRetainDetailsWhenValidationDisabled(t *testing.T) {
+	cfg := config.Default()
+	cfg.Replay.Validation.Enabled = false
+	eng := New(cfg, metrics.New())
+	cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
+	req := model.Event{Type: model.EventRequest, ConnectionID: 1, Sequence: 1}
+	reqRes := &RequestResult{ConnectionID: 1, Sequence: 1}
+
+	abort := eng.finishRequestSuccess(cs, req, reqRes, requestExecution{statusCode: http.StatusOK, body: []byte("actual")}, nil)
+	if abort {
+		t.Fatal("finishRequestSuccess aborted unexpectedly")
+	}
+	if len(cs.pendingActual) != 0 {
+		t.Fatalf("pendingActual len = %d, want 0", len(cs.pendingActual))
+	}
+	if got, want := cs.sent, int64(1); got != want {
+		t.Fatalf("cs.sent = %d, want %d", got, want)
+	}
+}
+
 func TestReplaySkipsMutationWithoutIdempotencyHeader(t *testing.T) {
 	var attempts int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -587,6 +608,78 @@ func TestReplayRespectsShardAssignment(t *testing.T) {
 	}
 	if atomic.LoadInt64(&attempts) != expectedSent {
 		t.Fatalf("attempt count = %d, want %d", attempts, expectedSent)
+	}
+}
+
+func TestRouteEventsSkipsNonShardEventsBeforeLifecycleTracking(t *testing.T) {
+	cfg := config.Default()
+	cfg.Replay.Sharding.ShardCount = 2
+	cfg.Replay.Sharding.ShardIndex = 0
+
+	connKey := model.ConnectionKey{}
+	for connectionID := 1; connectionID <= 128; connectionID++ {
+		candidate := model.ConnectionKey{ConnectionID: connectionID}
+		if !connectionBelongsToShard(candidate, cfg.Replay.Sharding.ShardIndex, cfg.Replay.Sharding.ShardCount) {
+			connKey = candidate
+			break
+		}
+	}
+	if connKey == (model.ConnectionKey{}) {
+		t.Fatal("setup failed: could not find connection outside shard")
+	}
+
+	eng := New(cfg, metrics.New())
+	events := make(chan model.Event, 1)
+	events <- model.Event{
+		Type:         model.EventRequest,
+		ConnectionID: connKey.ConnectionID,
+		Sequence:     1,
+		HTTP: model.HTTPRequestMeta{
+			Method:    http.MethodGet,
+			Scheme:    "http",
+			Authority: "example.test",
+			Path:      "/",
+		},
+	}
+	close(events)
+
+	workerChs := []chan model.Event{make(chan model.Event, 1), make(chan model.Event, 1)}
+	if err := eng.routeEvents(context.Background(), events, workerChs); err != nil {
+		t.Fatalf("routeEvents(non-shard request without open) error = %v, want nil", err)
+	}
+	if got := len(workerChs[0]) + len(workerChs[1]); got != 0 {
+		t.Fatalf("routeEvents(non-shard request) routed %d events, want 0", got)
+	}
+}
+
+func TestRouteEventsSendsCloseToOwningWorker(t *testing.T) {
+	cfg := config.Default()
+	cfg.Replay.MaxVirtualUsersPerEngine = 2
+	eng := New(cfg, metrics.New())
+
+	events := make(chan model.Event, 3)
+	events <- model.Event{Type: model.EventConnectionOpen, ConnectionID: 1}
+	events <- model.Event{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/"}}
+	events <- model.Event{Type: model.EventConnectionClose, ConnectionID: 1}
+	close(events)
+
+	workerChs := []chan model.Event{make(chan model.Event, 3), make(chan model.Event, 3)}
+	if err := eng.routeEvents(context.Background(), events, workerChs); err != nil {
+		t.Fatalf("routeEvents() error = %v", err)
+	}
+
+	if got := len(workerChs[0]); got != 3 {
+		t.Fatalf("worker 0 received %d events, want 3", got)
+	}
+	if got := len(workerChs[1]); got != 0 {
+		t.Fatalf("worker 1 received %d events, want 0", got)
+	}
+
+	<-workerChs[0]
+	<-workerChs[0]
+	closeEvent := <-workerChs[0]
+	if closeEvent.Type != model.EventConnectionClose {
+		t.Fatalf("third worker-0 event = %s, want %s", closeEvent.Type, model.EventConnectionClose)
 	}
 }
 
@@ -871,7 +964,6 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Replay.HTTP2.Mode = "multiplexed"
-	cfg.Replay.HTTP2.MaxConcurrentStreams = 8
 	cfg.Replay.TLS.InsecureSkipVerify = true
 	cfg.Replay.Idempotency.Enabled = false
 
@@ -893,6 +985,166 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 	// so the maximum concurrent in-flight requests should be exactly 2.
 	if got := atomic.LoadInt64(&maxInFlight); got != 2 {
 		t.Fatalf("max in-flight = %d, want exactly 2 for HTTP/2 multiplexed mode", got)
+	}
+}
+
+func TestReplayHTTP2CheckpointWaitsForEarlierInFlightRequest(t *testing.T) {
+	slowStarted := make(chan struct{}, 1)
+	fastDone := make(chan struct{}, 1)
+	releaseSlow := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseSlow) }) }
+	t.Cleanup(release)
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/slow":
+			select {
+			case slowStarted <- struct{}{}:
+			default:
+			}
+			<-releaseSlow
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("slow"))
+		case "/fast":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("fast"))
+			select {
+			case fastDone <- struct{}{}:
+			default:
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	checkpointPath := filepath.Join(tmpDir, "checkpoint.json")
+	cfg := config.Default()
+	cfg.Replay.HTTP2.Mode = "multiplexed"
+	cfg.Replay.TLS.InsecureSkipVerify = true
+	cfg.Replay.Idempotency.Enabled = false
+	cfg.Replay.Checkpoint.File = checkpointPath
+
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/slow"}},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 3, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/fast"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	resultCh := runReplayAsync(eng, events)
+	select {
+	case <-slowStarted:
+	case <-time.After(time.Second):
+		t.Fatal("slow request did not start")
+	}
+	select {
+	case <-fastDone:
+	case <-time.After(time.Second):
+		t.Fatal("fast request did not finish")
+	}
+
+	if b, readErr := os.ReadFile(checkpointPath); readErr == nil {
+		var data struct {
+			Connections map[model.ConnectionKey]int `json:"connections"`
+		}
+		if err := json.Unmarshal(b, &data); err != nil {
+			t.Fatalf("unmarshal checkpoint before slow release: %v", err)
+		}
+		if got := data.Connections[model.ConnectionKey{ConnectionID: 1}]; got >= 2 {
+			t.Fatalf("checkpoint advanced to %d while sequence 1 was still in flight", got)
+		}
+	} else if !os.IsNotExist(readErr) {
+		t.Fatalf("read checkpoint before slow release: %v", readErr)
+	}
+
+	release()
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("replay failed: %v", result.err)
+	}
+	if got, want := result.summary.RequestsSent, int64(2); got != want {
+		t.Fatalf("summary.RequestsSent = %d, want %d", got, want)
+	}
+
+	b, err := os.ReadFile(checkpointPath)
+	if err != nil {
+		t.Fatalf("read checkpoint after replay: %v", err)
+	}
+	var data struct {
+		Connections map[model.ConnectionKey]int `json:"connections"`
+	}
+	if err := json.Unmarshal(b, &data); err != nil {
+		t.Fatalf("unmarshal checkpoint after replay: %v", err)
+	}
+	if got := data.Connections[model.ConnectionKey{ConnectionID: 1}]; got != 2 {
+		t.Fatalf("checkpoint sequence = %d, want 2", got)
+	}
+}
+
+func TestReplayHTTP2PacingUsesConnectionOrderWithUniqueStreamIDs(t *testing.T) {
+	type startRecord struct {
+		path string
+		at   time.Time
+	}
+	starts := make(chan startRecord, 2)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		starts <- startRecord{path: r.URL.Path, at: time.Now()}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	base := time.Date(2026, 2, 27, 3, 10, 21, 0, time.UTC)
+	cfg := config.Default()
+	cfg.Replay.HTTP2.Mode = "multiplexed"
+	cfg.Replay.TLS.InsecureSkipVerify = true
+	cfg.Replay.Idempotency.Enabled = false
+	cfg.Replay.Pacing.Enabled = true
+	cfg.Replay.Pacing.MaxSleepDelta = 200 * time.Millisecond
+
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 1, Sequence: 1, Timestamp: base.Format(time.RFC3339Nano), HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"}},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 3, Sequence: 2, Timestamp: base.Add(100 * time.Millisecond).Format(time.RFC3339Nano), HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if got, want := summary.RequestsSent, int64(2); got != want {
+		t.Fatalf("summary.RequestsSent = %d, want %d", got, want)
+	}
+
+	first := <-starts
+	second := <-starts
+	if first.path != "/a" || second.path != "/b" {
+		t.Fatalf("request order = %s then %s, want /a then /b", first.path, second.path)
+	}
+	if delta := second.at.Sub(first.at); delta < 80*time.Millisecond {
+		t.Fatalf("request start delta = %s, want at least 80ms", delta)
 	}
 }
 
@@ -1128,6 +1380,107 @@ func TestNewEngineAbsoluteURLValidation(t *testing.T) {
 	}
 }
 
+func TestReplayStreamCancelsInFlightRequestOnRouteError(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	releaseCh := make(chan struct{})
+	var startedOnce sync.Once
+	var canceledOnce sync.Once
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseCh)
+		})
+	}
+	t.Cleanup(release)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startedOnce.Do(func() {
+			close(started)
+		})
+		select {
+		case <-r.Context().Done():
+			canceledOnce.Do(func() {
+				close(canceled)
+			})
+		case <-releaseCh:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		}
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Timeout.Request = 2 * time.Second
+	cfg.Replay.Idempotency.Enabled = false
+	eng := New(cfg, metrics.New())
+
+	events := make(chan model.Event)
+	resultCh := make(chan replayResult, 1)
+	go func() {
+		summary, err := eng.ReplayStream(context.Background(), events)
+		resultCh <- replayResult{summary: summary, err: err}
+	}()
+
+	events <- model.Event{Type: model.EventMeta}
+	events <- model.Event{Type: model.EventConnectionOpen, ConnectionID: 1}
+	events <- model.Event{
+		Type:         model.EventRequest,
+		ConnectionID: 1,
+		Sequence:     1,
+		HTTP: model.HTTPRequestMeta{
+			Method:    http.MethodGet,
+			Scheme:    target.Scheme,
+			Authority: target.Host,
+			Path:      "/slow",
+		},
+	}
+
+	select {
+	case <-started:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("request did not start")
+	}
+
+	events <- model.Event{
+		Type:         model.EventRequest,
+		ConnectionID: 2,
+		Sequence:     1,
+		HTTP: model.HTTPRequestMeta{
+			Method:    http.MethodGet,
+			Scheme:    target.Scheme,
+			Authority: target.Host,
+			Path:      "/missing-open",
+		},
+	}
+	close(events)
+
+	select {
+	case result := <-resultCh:
+		if result.err == nil {
+			t.Fatal("ReplayStream() error = nil, want route error")
+		}
+		if result.summary.Outcome != RunFailed {
+			t.Fatalf("summary.Outcome = %s, want %s", result.summary.Outcome, RunFailed)
+		}
+	case <-time.After(200 * time.Millisecond):
+		release()
+		result := <-resultCh
+		t.Fatalf("ReplayStream did not cancel in-flight request before route error returned; summary=%+v err=%v", result.summary, result.err)
+	}
+
+	select {
+	case <-canceled:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("in-flight request context was not canceled")
+	}
+}
+
 func TestReplayAbortsConnectionAfterSendError(t *testing.T) {
 	var attempts int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1140,7 +1493,6 @@ func TestReplayAbortsConnectionAfterSendError(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Idempotency.Enabled = false
 	cfg.Replay.Lifecycle.RequireOpen = false
-	cfg.Replay.Lifecycle.RequireClose = false
 
 	eng := New(cfg, metrics.New())
 	events := []model.Event{

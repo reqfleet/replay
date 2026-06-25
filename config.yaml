@@ -4,7 +4,6 @@ replay:
   max_active_connections_per_engine: 200
   http2:
     mode: serialized
-    max_concurrent_streams: 16
   timeout:
     connect: 3s
     request: 30s
@@ -25,7 +24,6 @@ replay:
     max_sleep_delta: 30s
   lifecycle:
     require_open: true
-    require_close: true
   idempotency:
     enabled: true
     block_methods: [POST, PUT, PATCH, DELETE]

@@ -1,3 +1,4 @@
+// Package config loads and validates replay runtime configuration.
 package config
 
 import (
@@ -55,8 +56,7 @@ type TimeoutConfig struct {
 }
 
 type HTTP2Config struct {
-	Mode                 string `yaml:"mode"`
-	MaxConcurrentStreams int    `yaml:"max_concurrent_streams"`
+	Mode string `yaml:"mode"`
 }
 
 type RetryConfig struct {
@@ -80,8 +80,7 @@ type PacingConfig struct {
 }
 
 type LifecycleConfig struct {
-	RequireOpen  bool `yaml:"require_open"`
-	RequireClose bool `yaml:"require_close"`
+	RequireOpen bool `yaml:"require_open"`
 }
 
 type IdempotencyConfig struct {
@@ -143,8 +142,7 @@ func Default() Config {
 			MaxActiveConnectionsPerEngine: 200,
 			RampupDuration:                0,
 			HTTP2: HTTP2Config{
-				Mode:                 "serialized",
-				MaxConcurrentStreams: 16,
+				Mode: "serialized",
 			},
 			TLS: TLSConfig{
 				InsecureSkipVerify: false,
@@ -169,8 +167,7 @@ func Default() Config {
 				MaxSleepDelta: 30 * time.Second,
 			},
 			Lifecycle: LifecycleConfig{
-				RequireOpen:  true,
-				RequireClose: true,
+				RequireOpen: true,
 			},
 			Idempotency: IdempotencyConfig{
 				Enabled:               true,
@@ -243,9 +240,6 @@ func (c Config) Validate() error {
 	case "", "serialized", "multiplexed":
 	default:
 		return errors.New("replay.http2.mode must be one of: serialized, multiplexed")
-	}
-	if c.Replay.HTTP2.MaxConcurrentStreams <= 0 {
-		return errors.New("replay.http2.max_concurrent_streams must be > 0")
 	}
 	if c.Replay.Pacing.MaxSleepDelta < 0 {
 		return errors.New("replay.pacing.max_sleep_delta must be >= 0")
