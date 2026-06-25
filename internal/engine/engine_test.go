@@ -923,7 +923,6 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Replay.HTTP2.Mode = "multiplexed"
-	cfg.Replay.HTTP2.MaxConcurrentStreams = 8
 	cfg.Replay.TLS.InsecureSkipVerify = true
 	cfg.Replay.Idempotency.Enabled = false
 
@@ -1453,7 +1452,6 @@ func TestReplayAbortsConnectionAfterSendError(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Idempotency.Enabled = false
 	cfg.Replay.Lifecycle.RequireOpen = false
-	cfg.Replay.Lifecycle.RequireClose = false
 
 	eng := New(cfg, metrics.New())
 	events := []model.Event{

@@ -1031,19 +1031,15 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 		return Summary{ConnectionsDone: 1, Outcome: RunSuccess}
 	}
 
-	streamSem := make(chan struct{}, e.cfg.Replay.HTTP2.MaxConcurrentStreams)
 	results := make(chan Summary, len(streams))
 	var wg sync.WaitGroup
 
 	for _, streamRequests := range streams {
 		wg.Go(func() {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				results <- Summary{ConnectionsAborted: 1, Outcome: RunFailed}
 				return
-			case streamSem <- struct{}{}:
 			}
-			defer func() { <-streamSem }()
 			results <- e.replayConnectionSerialized(ctx, client, streamRequests, responsesBySequence, checkpoints)
 		})
 	}

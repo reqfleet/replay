@@ -256,6 +256,12 @@ func TestLoadParsesRampupDuration(t *testing.T) {
 	}
 }
 
+func TestSampleConfigLoads(t *testing.T) {
+	if _, err := Load("../../config.yaml"); err != nil {
+		t.Fatalf("Load sample config: %v", err)
+	}
+}
+
 func TestValidateRejectsNegativeRampupDuration(t *testing.T) {
 	cfg := Default()
 	cfg.Replay.RampupDuration = -1 * time.Second

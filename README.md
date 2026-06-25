@@ -108,7 +108,6 @@ replay:
   rampup_duration: 0s  # 0s disables ramp-up; 30s stages VUs over 30 seconds
   http2:
     mode: serialized  # serialized|multiplexed
-    max_concurrent_streams: 16
   retry:
     max_attempts: 2
     backoff: exponential  # none|fixed|exponential
@@ -125,7 +124,6 @@ replay:
     max_sleep_delta: 30s
   lifecycle:
     require_open: true
-    require_close: true
   idempotency:
     enabled: true
     block_methods: [POST, PUT, PATCH, DELETE]
@@ -142,9 +140,9 @@ When a recorded response exists for a request (`connection_id` + `sequence`), mi
 When the target is unreachable or times out, the request is recorded as `send_error`, the run remains `partial_success`, and `shibuya_status_counter` is incremented with a synthetic transport status.
 
 When idempotency safeguards are enabled, mutation methods are skipped unless one of the allow headers is present.
-Lifecycle checks require both `connection_open` and `connection_close` events per replayed connection.
+Lifecycle checks require `connection_open` before each replayed connection. `connection_close` is optional; EOF finalizes any still-open connections.
 
 Sharding routes connections by `node` + `connection_id` hash (`shard_index` / `shard_count`) and only replays the local shard.
 If `checkpoint.file` is set, completed sequences are persisted and skipped on the next run using the same `node` + `connection_id` identity.
 For HTTP/2 traffic, `serialized` replays requests sequentially, while `multiplexed`
-replays by stream with bounded stream concurrency.
+dispatches requests concurrently on the shared per-connection client and waits for them at `connection_close` or EOF.

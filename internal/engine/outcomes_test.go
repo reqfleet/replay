@@ -16,7 +16,6 @@ func TestOutcomeAggregation_DryRunSerialized(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.DryRun = true
 	cfg.Replay.Lifecycle.RequireOpen = false
-	cfg.Replay.Lifecycle.RequireClose = false
 
 	reg := metrics.New()
 	e := New(cfg, reg)
@@ -70,7 +69,6 @@ func TestOutcomeAggregation_DryRunSerialized(t *testing.T) {
 func TestOutcomeAggregation_ValidationFailure(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Lifecycle.RequireOpen = false
-	cfg.Replay.Lifecycle.RequireClose = false
 	cfg.Replay.Validation.Enabled = true
 	cfg.Replay.Validation.Status = true
 
@@ -118,7 +116,6 @@ func TestOutcomeAggregation_ValidationFailure(t *testing.T) {
 func TestOutcomeAggregation_SendError(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Lifecycle.RequireOpen = false
-	cfg.Replay.Lifecycle.RequireClose = false
 
 	reg := metrics.New()
 	e := New(cfg, reg)
@@ -155,7 +152,6 @@ func TestOutcomeAggregation_SendError(t *testing.T) {
 func TestOutcomeAggregation_HTTP2Multiplexed(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Lifecycle.RequireOpen = false
-	cfg.Replay.Lifecycle.RequireClose = false
 	cfg.Replay.HTTP2.Mode = "multiplexed"
 
 	reg := metrics.New()
