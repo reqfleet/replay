@@ -146,10 +146,7 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	replayCtx, cancelReplay := context.WithCancel(ctx)
 	defer cancelReplay()
 
-	vus := e.cfg.Replay.MaxVirtualUsersPerEngine
-	if vus < 1 {
-		vus = 1
-	}
+	vus := max(e.cfg.Replay.MaxVirtualUsersPerEngine, 1)
 	connSem := make(chan struct{}, e.cfg.Replay.MaxActiveConnectionsPerEngine)
 
 	workerChs := make([]chan model.Event, vus)
@@ -343,7 +340,7 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 				cs.transport = transport
 				select {
 				case <-ctx.Done():
-					e.finalizeConn(ctx, cs, connSem, checkpoints, &result)
+					e.finalizeConn(cs, connSem, &result)
 					delete(conns, connKey)
 					continue
 				case connSem <- struct{}{}:
@@ -384,20 +381,20 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 			if cs == nil {
 				continue
 			}
-			e.finalizeConn(ctx, cs, connSem, checkpoints, &result)
+			e.finalizeConn(cs, connSem, &result)
 			delete(conns, connKey)
 		}
 	}
 
 	// EOF: finalize remaining connections
 	for _, cs := range conns {
-		e.finalizeConn(ctx, cs, connSem, checkpoints, &result)
+		e.finalizeConn(cs, connSem, &result)
 	}
 
 	return result
 }
 
-func (e *Engine) finalizeConn(ctx context.Context, cs *connState, connSem chan struct{}, checkpoints *checkpointStore, result *Summary) {
+func (e *Engine) finalizeConn(cs *connState, connSem chan struct{}, result *Summary) {
 	if !cs.detected {
 		e.closeConnResources(cs, connSem)
 		return
@@ -473,18 +470,18 @@ func (e *Engine) processRequest(ctx context.Context, cs *connState, requestEvent
 		return true
 	}
 
-	reqKey, reqRes, handled, abort := e.prepareRequest(cs, requestEvent, checkpoints)
+	reqKey, handled, abort := e.prepareRequest(cs, requestEvent, checkpoints)
 	if handled {
 		return abort
 	}
 
 	exec, err := e.sendRequest(ctx, cs.client, requestEvent)
 	if err != nil {
-		e.finishRequestError(cs, requestEvent, reqRes, err)
+		e.finishRequestError(cs, requestEvent, err)
 		return true
 	}
 
-	abort = e.finishRequestSuccess(cs, requestEvent, reqRes, exec, checkpoints.markProcessed(reqKey, requestEvent.Sequence))
+	abort = e.finishRequestSuccess(cs, requestEvent, exec, checkpoints.markProcessed(reqKey, requestEvent.Sequence))
 	if !abort {
 		e.recordSuccessMetrics(requestEvent, exec)
 	}
@@ -504,13 +501,12 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 	}
 
 	cs.h2Mu.Lock()
-	reqKey, reqRes, handled, commitSequence := e.prepareConcurrentRequest(cs, requestEvent, checkpoints)
+	reqKey, handled, commitSequence := e.prepareConcurrentRequest(cs, requestEvent, checkpoints)
 	cs.h2Mu.Unlock()
 	if commitSequence > 0 {
 		if err := checkpoints.markProcessed(reqKey, commitSequence); err != nil {
 			cs.h2Mu.Lock()
 			cs.aborted = true
-			reqRes.Error = err.Error()
 			cs.h2Mu.Unlock()
 		}
 	}
@@ -522,13 +518,13 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 		exec, err := e.sendRequest(ctx, cs.client, requestEvent)
 		if err != nil {
 			cs.h2Mu.Lock()
-			e.finishRequestError(cs, requestEvent, reqRes, err)
+			e.finishRequestError(cs, requestEvent, err)
 			cs.h2Mu.Unlock()
 			return
 		}
 
 		cs.h2Mu.Lock()
-		abort := e.finishRequestSuccess(cs, requestEvent, reqRes, exec, nil)
+		abort := e.finishRequestSuccess(cs, requestEvent, exec, nil)
 		commitSequence := 0
 		if !abort {
 			commitSequence = cs.completeCheckpointSequence(requestEvent.Sequence)
@@ -542,7 +538,6 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 			if err := checkpoints.markProcessed(reqKey, commitSequence); err != nil {
 				cs.h2Mu.Lock()
 				cs.aborted = true
-				reqRes.Error = err.Error()
 				cs.h2Mu.Unlock()
 				return
 			}
@@ -562,67 +557,52 @@ func (e *Engine) paceRequest(ctx context.Context, cs *connState, requestEvent mo
 	return nil
 }
 
-func (e *Engine) prepareRequest(cs *connState, requestEvent model.Event, checkpoints *checkpointStore) (model.ConnectionKey, *RequestResult, bool, bool) {
+func (e *Engine) prepareRequest(cs *connState, requestEvent model.Event, checkpoints *checkpointStore) (model.ConnectionKey, bool, bool) {
 	reqKey := model.ConnectionKey{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID}
-	reqRes := &RequestResult{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID, Sequence: requestEvent.Sequence}
 
 	if checkpoints.alreadyProcessed(reqKey, requestEvent.Sequence) {
 		cs.skipped++
-		reqRes.Outcome = RequestSkipped
-		reqRes.Skipped = true
-		return reqKey, reqRes, true, false
+		return reqKey, true, false
 	}
 
 	if e.shouldSkipByIdempotencyPolicy(requestEvent) {
 		cs.skipped++
-		reqRes.Outcome = RequestSkipped
-		reqRes.Skipped = true
 		if err := checkpoints.markProcessed(reqKey, requestEvent.Sequence); err != nil {
 			cs.aborted = true
-			reqRes.Error = err.Error()
-			return reqKey, reqRes, true, true
+			return reqKey, true, true
 		}
-		return reqKey, reqRes, true, false
+		return reqKey, true, false
 	}
 
 	if e.cfg.Replay.DryRun {
 		cs.skipped++
-		reqRes.Outcome = RequestSkipped
-		reqRes.Skipped = true
-		return reqKey, reqRes, true, false
+		return reqKey, true, false
 	}
 
-	return reqKey, reqRes, false, false
+	return reqKey, false, false
 }
 
-func (e *Engine) prepareConcurrentRequest(cs *connState, requestEvent model.Event, checkpoints *checkpointStore) (model.ConnectionKey, *RequestResult, bool, int) {
+func (e *Engine) prepareConcurrentRequest(cs *connState, requestEvent model.Event, checkpoints *checkpointStore) (model.ConnectionKey, bool, int) {
 	reqKey := model.ConnectionKey{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID}
-	reqRes := &RequestResult{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID, Sequence: requestEvent.Sequence}
 
 	if checkpoints.alreadyProcessed(reqKey, requestEvent.Sequence) {
 		cs.skipped++
-		reqRes.Outcome = RequestSkipped
-		reqRes.Skipped = true
-		return reqKey, reqRes, true, 0
+		return reqKey, true, 0
 	}
 
 	if e.shouldSkipByIdempotencyPolicy(requestEvent) {
 		cs.skipped++
-		reqRes.Outcome = RequestSkipped
-		reqRes.Skipped = true
 		cs.trackCheckpointSequence(requestEvent.Sequence)
-		return reqKey, reqRes, true, cs.completeCheckpointSequence(requestEvent.Sequence)
+		return reqKey, true, cs.completeCheckpointSequence(requestEvent.Sequence)
 	}
 
 	if e.cfg.Replay.DryRun {
 		cs.skipped++
-		reqRes.Outcome = RequestSkipped
-		reqRes.Skipped = true
-		return reqKey, reqRes, true, 0
+		return reqKey, true, 0
 	}
 
 	cs.trackCheckpointSequence(requestEvent.Sequence)
-	return reqKey, reqRes, false, 0
+	return reqKey, false, 0
 }
 
 func (cs *connState) trackCheckpointSequence(sequence int) {
@@ -656,24 +636,18 @@ func (cs *connState) completeCheckpointSequence(sequence int) int {
 	return cs.checkpointWatermark
 }
 
-func (e *Engine) finishRequestError(cs *connState, requestEvent model.Event, reqRes *RequestResult, err error) {
+func (e *Engine) finishRequestError(cs *connState, requestEvent model.Event, err error) {
 	cs.sendErrors++
 	cs.aborted = true
-	reqRes.Outcome = RequestSendError
-	reqRes.Error = err.Error()
 	e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
 }
 
-func (e *Engine) finishRequestSuccess(cs *connState, requestEvent model.Event, reqRes *RequestResult, exec requestExecution, checkpointErr error) bool {
+func (e *Engine) finishRequestSuccess(cs *connState, requestEvent model.Event, exec requestExecution, checkpointErr error) bool {
 	cs.sent++
 	cs.responsesReceived++
-	reqRes.Outcome = RequestResponseReceived
-	reqRes.StatusCode = exec.statusCode
-	reqRes.LatencyMS = exec.latencyMS
 
 	if checkpointErr != nil {
 		cs.aborted = true
-		reqRes.Error = checkpointErr.Error()
 		return true
 	}
 
@@ -683,8 +657,6 @@ func (e *Engine) finishRequestSuccess(cs *connState, requestEvent model.Event, r
 	if expected, ok := cs.pendingExpected[requestEvent.Sequence]; ok {
 		if e.responseValidationFailed(expected, exec) {
 			cs.validationFailed++
-			reqRes.Outcome = RequestValidationFailed
-			reqRes.ValidationFailed = true
 		}
 		delete(cs.pendingExpected, requestEvent.Sequence)
 	} else {
@@ -892,23 +864,17 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		}
 
 		requestKey := model.ConnectionKey{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID}
-		reqRes := RequestResult{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID, Sequence: requestEvent.Sequence}
 
 		if checkpoints.alreadyProcessed(requestKey, requestEvent.Sequence) {
 			result.Skipped++
-			reqRes.Outcome = RequestSkipped
-			reqRes.Skipped = true
 			continue
 		}
 
 		if e.shouldSkipByIdempotencyPolicy(requestEvent) {
 			result.Skipped++
-			reqRes.Outcome = RequestSkipped
-			reqRes.Skipped = true
 			if err := checkpoints.markProcessed(requestKey, requestEvent.Sequence); err != nil {
 				result.ConnectionsAborted++
 				result.Outcome = RunFailed
-				reqRes.Error = err.Error()
 				return result
 			}
 			continue
@@ -917,8 +883,6 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		// Dry-run: do not send network requests; count as skipped (do not persist checkpoint)
 		if e.cfg.Replay.DryRun {
 			result.Skipped++
-			reqRes.Outcome = RequestSkipped
-			reqRes.Skipped = true
 			continue
 		}
 
@@ -932,8 +896,6 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			} else {
 				result.Outcome = RunFailed
 			}
-			reqRes.Outcome = RequestSendError
-			reqRes.Error = err.Error()
 			e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
 			connResult = connectionResultFromSummary(connKey, ConnectionAborted, result)
 			result.ConnectionResults = append(result.ConnectionResults, connResult)
@@ -942,14 +904,10 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 
 		result.RequestsSent++
 		result.ResponsesReceived++
-		reqRes.Outcome = RequestResponseReceived
-		reqRes.StatusCode = exec.statusCode
-		reqRes.LatencyMS = exec.latencyMS
 
 		if err := checkpoints.markProcessed(requestKey, requestEvent.Sequence); err != nil {
 			result.ConnectionsAborted++
 			result.Outcome = RunFailed
-			reqRes.Error = err.Error()
 			return result
 		}
 		if expected, ok := responsesBySequence[requestEvent.Sequence]; ok {
@@ -967,8 +925,6 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 					}
 				}
 				result.ValidationFailed++
-				reqRes.Outcome = RequestValidationFailed
-				reqRes.ValidationFailed = true
 				if result.Outcome == "" {
 					result.Outcome = RunPartialSuccess
 				}

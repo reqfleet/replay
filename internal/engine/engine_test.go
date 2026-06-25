@@ -452,9 +452,8 @@ func TestFinishRequestSuccessDoesNotRetainDetailsWhenValidationDisabled(t *testi
 	eng := New(cfg, metrics.New())
 	cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
 	req := model.Event{Type: model.EventRequest, ConnectionID: 1, Sequence: 1}
-	reqRes := &RequestResult{ConnectionID: 1, Sequence: 1}
 
-	abort := eng.finishRequestSuccess(cs, req, reqRes, requestExecution{statusCode: http.StatusOK, body: []byte("actual")}, nil)
+	abort := eng.finishRequestSuccess(cs, req, requestExecution{statusCode: http.StatusOK, body: []byte("actual")}, nil)
 	if abort {
 		t.Fatal("finishRequestSuccess aborted unexpectedly")
 	}

@@ -41,8 +41,7 @@ func BenchmarkMatchPathTemplate(b *testing.B) {
 	})
 	path := "/users/123/orders"
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		MatchPathTemplate(path, templates)
 	}
 }
@@ -55,8 +54,7 @@ func BenchmarkMatchPathTemplateMismatch(b *testing.B) {
 	})
 	path := "/users/123/orders/xyz/123"
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		MatchPathTemplate(path, templates)
 	}
 }
