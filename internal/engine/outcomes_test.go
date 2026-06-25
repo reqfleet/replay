@@ -46,19 +46,8 @@ func TestOutcomeAggregation_DryRunSerialized(t *testing.T) {
 	if got, want := summary.RequestsSent, int64(0); got != want {
 		t.Errorf("summary.RequestsSent = %v, want %v", got, want)
 	}
-	if got, want := len(summary.RequestResults), 2; got != want {
-		t.Fatalf("len(summary.RequestResults) = %v, want %v", got, want)
-	}
-	for i, r := range summary.RequestResults {
-		if r.Outcome != RequestSkipped {
-			t.Errorf("RequestResults[%d].Outcome = %v, want %v", i, r.Outcome, RequestSkipped)
-		}
-		if !r.Skipped {
-			t.Errorf("RequestResults[%d].Skipped = false, want true", i)
-		}
-		if r.ConnectionID != 1 {
-			t.Errorf("RequestResults[%d].ConnectionID = %v, want %v", i, r.ConnectionID, 1)
-		}
+	if got := len(summary.RequestResults); got != 0 {
+		t.Fatalf("len(summary.RequestResults) = %v, want 0", got)
 	}
 	if got, want := len(summary.ConnectionResults), 1; got != want {
 		t.Fatalf("len(summary.ConnectionResults) = %v, want %v", got, want)
@@ -67,8 +56,11 @@ func TestOutcomeAggregation_DryRunSerialized(t *testing.T) {
 	if conn.ConnectionID != 1 {
 		t.Errorf("ConnectionResults[0].ConnectionID = %v, want %v", conn.ConnectionID, 1)
 	}
-	if got, want := len(conn.Requests), 2; got != want {
-		t.Errorf("conn.Requests len = %v, want %v", got, want)
+	if got := len(conn.Requests); got != 0 {
+		t.Errorf("conn.Requests len = %v, want 0", got)
+	}
+	if got, want := conn.Skipped, int64(2); got != want {
+		t.Errorf("conn.Skipped = %v, want %v", got, want)
 	}
 	if conn.Outcome != ConnectionCompleted {
 		t.Errorf("conn.Outcome = %v, want %v", conn.Outcome, ConnectionCompleted)
@@ -112,15 +104,14 @@ func TestOutcomeAggregation_ValidationFailure(t *testing.T) {
 	if got, want := summary.ValidationFailed, int64(1); got != want {
 		t.Errorf("summary.ValidationFailed = %v, want %v", got, want)
 	}
-	if len(summary.RequestResults) != 1 {
-		t.Fatalf("len(summary.RequestResults) = %v, want %v", len(summary.RequestResults), 1)
+	if got := len(summary.RequestResults); got != 0 {
+		t.Fatalf("len(summary.RequestResults) = %v, want 0", got)
 	}
-	rr := summary.RequestResults[0]
-	if rr.Outcome != RequestValidationFailed {
-		t.Errorf("Request outcome = %v, want %v", rr.Outcome, RequestValidationFailed)
+	if got, want := len(summary.ConnectionResults), 1; got != want {
+		t.Fatalf("len(summary.ConnectionResults) = %v, want %v", got, want)
 	}
-	if rr.StatusCode != 500 {
-		t.Errorf("Request status = %v, want %v", rr.StatusCode, 500)
+	if got, want := summary.ConnectionResults[0].ValidationFailed, int64(1); got != want {
+		t.Errorf("ConnectionResults[0].ValidationFailed = %v, want %v", got, want)
 	}
 }
 
@@ -150,15 +141,14 @@ func TestOutcomeAggregation_SendError(t *testing.T) {
 	if got, want := summary.ConnectionsAborted, int64(1); got != want {
 		t.Errorf("summary.ConnectionsAborted = %v, want %v", got, want)
 	}
-	if len(summary.RequestResults) != 1 {
-		t.Fatalf("len(summary.RequestResults) = %v, want %v", len(summary.RequestResults), 1)
+	if got := len(summary.RequestResults); got != 0 {
+		t.Fatalf("len(summary.RequestResults) = %v, want 0", got)
 	}
-	rr := summary.RequestResults[0]
-	if rr.Outcome != RequestSendError {
-		t.Errorf("Request outcome = %v, want %v", rr.Outcome, RequestSendError)
+	if got, want := len(summary.ConnectionResults), 1; got != want {
+		t.Fatalf("len(summary.ConnectionResults) = %v, want %v", got, want)
 	}
-	if rr.Error == "" {
-		t.Errorf("expected non-empty error for send failure")
+	if got, want := summary.ConnectionResults[0].SendErrors, int64(1); got != want {
+		t.Errorf("ConnectionResults[0].SendErrors = %v, want %v", got, want)
 	}
 }
 
@@ -189,13 +179,16 @@ func TestOutcomeAggregation_HTTP2Multiplexed(t *testing.T) {
 	if got, want := summary.RequestsSent, int64(2); got != want {
 		t.Errorf("summary.RequestsSent = %v, want %v", got, want)
 	}
-	if len(summary.RequestResults) != 2 {
-		t.Fatalf("len(summary.RequestResults) = %v, want %v", len(summary.RequestResults), 2)
+	if got := len(summary.RequestResults); got != 0 {
+		t.Fatalf("len(summary.RequestResults) = %v, want 0", got)
 	}
 	if len(summary.ConnectionResults) != 1 {
 		t.Fatalf("len(summary.ConnectionResults) = %v, want %v", len(summary.ConnectionResults), 1)
 	}
-	if got, want := len(summary.ConnectionResults[0].Requests), 2; got != want {
-		t.Errorf("connection requests = %v, want %v", got, want)
+	if got := len(summary.ConnectionResults[0].Requests); got != 0 {
+		t.Errorf("connection requests = %v, want 0", got)
+	}
+	if got, want := summary.ConnectionResults[0].RequestsSent, int64(2); got != want {
+		t.Errorf("ConnectionResults[0].RequestsSent = %v, want %v", got, want)
 	}
 }

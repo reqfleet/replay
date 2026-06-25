@@ -86,12 +86,10 @@ CLI flags are applied last and take highest precedence for safety-related settin
 
 ## Programmatic outcome details
 
-In addition to the summary printed to stdout, the engine maintains structured outcome types (used by SDKs and future outputs):
+In addition to the summary printed to stdout, the engine maintains aggregate outcome types for programmatic consumption:
 
-- `RequestResult` — fields: `node`, `connection_id`, `sequence`, `outcome` (`sent`, `send_error`, `response_received`, `validation_failed`, `skipped`), `status_code`, `latency_ms`, `error`, `validation_failed`, `skipped`.
-- `ConnectionResult` — fields: `node`, `connection_id`, `outcome` (`completed`/`aborted`), `requests` (array of `RequestResult`).
-
-These are aggregated into the engine `Summary` for programmatic consumption or future JSON output.
+- `ConnectionResult` — fields: `node`, `connection_id`, `outcome` (`completed`/`aborted`), plus per-connection aggregate counters (`requests_sent`, `responses_received`, `send_errors`, `validation_failed`, `skipped`).
+- `RequestResult` — retained as an API type for future bounded detail output; `Summary.RequestResults` and `ConnectionResult.Requests` are not populated during normal replay so large captures do not retain one result per request.
 
 ## Migration note
 

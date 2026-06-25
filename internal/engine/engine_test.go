@@ -446,7 +446,7 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 	}
 }
 
-func TestFinishRequestSuccessDoesNotRetainActualWhenValidationDisabled(t *testing.T) {
+func TestFinishRequestSuccessDoesNotRetainDetailsWhenValidationDisabled(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Validation.Enabled = false
 	eng := New(cfg, metrics.New())
@@ -461,11 +461,8 @@ func TestFinishRequestSuccessDoesNotRetainActualWhenValidationDisabled(t *testin
 	if len(cs.pendingActual) != 0 {
 		t.Fatalf("pendingActual len = %d, want 0", len(cs.pendingActual))
 	}
-	if len(cs.reqResultBySeq) != 0 {
-		t.Fatalf("reqResultBySeq len = %d, want 0", len(cs.reqResultBySeq))
-	}
-	if got, want := len(cs.requestResults), 1; got != want {
-		t.Fatalf("requestResults len = %d, want %d", got, want)
+	if got, want := cs.sent, int64(1); got != want {
+		t.Fatalf("cs.sent = %d, want %d", got, want)
 	}
 }
 

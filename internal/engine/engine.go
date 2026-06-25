@@ -64,10 +64,15 @@ type RequestResult struct {
 }
 
 type ConnectionResult struct {
-	Node         string            `json:"node,omitempty"`
-	ConnectionID int               `json:"connection_id"`
-	Outcome      ConnectionOutcome `json:"outcome"`
-	Requests     []RequestResult   `json:"requests"`
+	Node              string            `json:"node,omitempty"`
+	ConnectionID      int               `json:"connection_id"`
+	Outcome           ConnectionOutcome `json:"outcome"`
+	RequestsSent      int64             `json:"requests_sent,omitempty"`
+	ResponsesReceived int64             `json:"responses_received,omitempty"`
+	SendErrors        int64             `json:"send_errors,omitempty"`
+	ValidationFailed  int64             `json:"validation_failed,omitempty"`
+	Skipped           int64             `json:"skipped,omitempty"`
+	Requests          []RequestResult   `json:"requests,omitempty"`
 }
 
 type Summary struct {
@@ -199,8 +204,6 @@ type connState struct {
 	previousTimestampSet bool
 	pendingActual        map[int]requestExecution
 	pendingExpected      map[int]model.Event
-	reqResultBySeq       map[int]*RequestResult
-	requestResults       []*RequestResult
 	sent                 int64
 	responsesReceived    int64
 	sendErrors           int64
@@ -225,8 +228,6 @@ func (e *Engine) newConnState(connKey model.ConnectionKey) *connState {
 		connKey:         connKey,
 		pendingActual:   make(map[int]requestExecution),
 		pendingExpected: make(map[int]model.Event),
-		reqResultBySeq:  make(map[int]*RequestResult),
-		requestResults:  []*RequestResult{},
 	}
 }
 
@@ -429,16 +430,29 @@ func (e *Engine) collectConnResults(cs *connState, result *Summary) {
 		result.ConnectionsDone++
 	}
 	connResult := ConnectionResult{
-		Node:         cs.connKey.Node,
-		ConnectionID: cs.connKey.ConnectionID,
-		Outcome:      connOutcome(cs.aborted),
-		Requests:     make([]RequestResult, len(cs.requestResults)),
-	}
-	for i, rr := range cs.requestResults {
-		connResult.Requests[i] = *rr
+		Node:              cs.connKey.Node,
+		ConnectionID:      cs.connKey.ConnectionID,
+		Outcome:           connOutcome(cs.aborted),
+		RequestsSent:      cs.sent,
+		ResponsesReceived: cs.responsesReceived,
+		SendErrors:        cs.sendErrors,
+		ValidationFailed:  cs.validationFailed,
+		Skipped:           cs.skipped,
 	}
 	result.ConnectionResults = append(result.ConnectionResults, connResult)
-	result.RequestResults = append(result.RequestResults, connResult.Requests...)
+}
+
+func connectionResultFromSummary(connKey model.ConnectionKey, outcome ConnectionOutcome, result Summary) ConnectionResult {
+	return ConnectionResult{
+		Node:              connKey.Node,
+		ConnectionID:      connKey.ConnectionID,
+		Outcome:           outcome,
+		RequestsSent:      result.RequestsSent,
+		ResponsesReceived: result.ResponsesReceived,
+		SendErrors:        result.SendErrors,
+		ValidationFailed:  result.ValidationFailed,
+		Skipped:           result.Skipped,
+	}
 }
 
 func connOutcome(aborted bool) ConnectionOutcome {
@@ -553,7 +567,6 @@ func (e *Engine) prepareRequest(cs *connState, requestEvent model.Event, checkpo
 		cs.skipped++
 		reqRes.Outcome = RequestSkipped
 		reqRes.Skipped = true
-		cs.requestResults = append(cs.requestResults, reqRes)
 		return reqKey, reqRes, true, false
 	}
 
@@ -561,7 +574,6 @@ func (e *Engine) prepareRequest(cs *connState, requestEvent model.Event, checkpo
 		cs.skipped++
 		reqRes.Outcome = RequestSkipped
 		reqRes.Skipped = true
-		cs.requestResults = append(cs.requestResults, reqRes)
 		if err := checkpoints.markProcessed(reqKey, requestEvent.Sequence); err != nil {
 			cs.aborted = true
 			reqRes.Error = err.Error()
@@ -574,7 +586,6 @@ func (e *Engine) prepareRequest(cs *connState, requestEvent model.Event, checkpo
 		cs.skipped++
 		reqRes.Outcome = RequestSkipped
 		reqRes.Skipped = true
-		cs.requestResults = append(cs.requestResults, reqRes)
 		return reqKey, reqRes, true, false
 	}
 
@@ -589,7 +600,6 @@ func (e *Engine) prepareConcurrentRequest(cs *connState, requestEvent model.Even
 		cs.skipped++
 		reqRes.Outcome = RequestSkipped
 		reqRes.Skipped = true
-		cs.requestResults = append(cs.requestResults, reqRes)
 		return reqKey, reqRes, true, 0
 	}
 
@@ -597,7 +607,6 @@ func (e *Engine) prepareConcurrentRequest(cs *connState, requestEvent model.Even
 		cs.skipped++
 		reqRes.Outcome = RequestSkipped
 		reqRes.Skipped = true
-		cs.requestResults = append(cs.requestResults, reqRes)
 		cs.trackCheckpointSequence(requestEvent.Sequence)
 		return reqKey, reqRes, true, cs.completeCheckpointSequence(requestEvent.Sequence)
 	}
@@ -606,7 +615,6 @@ func (e *Engine) prepareConcurrentRequest(cs *connState, requestEvent model.Even
 		cs.skipped++
 		reqRes.Outcome = RequestSkipped
 		reqRes.Skipped = true
-		cs.requestResults = append(cs.requestResults, reqRes)
 		return reqKey, reqRes, true, 0
 	}
 
@@ -650,7 +658,6 @@ func (e *Engine) finishRequestError(cs *connState, requestEvent model.Event, req
 	cs.aborted = true
 	reqRes.Outcome = RequestSendError
 	reqRes.Error = err.Error()
-	cs.requestResults = append(cs.requestResults, reqRes)
 	e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
 }
 
@@ -664,12 +671,10 @@ func (e *Engine) finishRequestSuccess(cs *connState, requestEvent model.Event, r
 	if checkpointErr != nil {
 		cs.aborted = true
 		reqRes.Error = checkpointErr.Error()
-		cs.requestResults = append(cs.requestResults, reqRes)
 		return true
 	}
 
 	if !e.shouldRetainResponseForValidation() {
-		cs.requestResults = append(cs.requestResults, reqRes)
 		return false
 	}
 	if expected, ok := cs.pendingExpected[requestEvent.Sequence]; ok {
@@ -679,12 +684,9 @@ func (e *Engine) finishRequestSuccess(cs *connState, requestEvent model.Event, r
 			reqRes.ValidationFailed = true
 		}
 		delete(cs.pendingExpected, requestEvent.Sequence)
-		delete(cs.reqResultBySeq, requestEvent.Sequence)
 	} else {
 		cs.pendingActual[requestEvent.Sequence] = exec
-		cs.reqResultBySeq[requestEvent.Sequence] = reqRes
 	}
-	cs.requestResults = append(cs.requestResults, reqRes)
 	return false
 }
 
@@ -698,13 +700,8 @@ func (e *Engine) handleResponseEvent(cs *connState, ev model.Event) {
 	if actual, ok := cs.pendingActual[ev.Sequence]; ok {
 		if e.responseValidationFailed(ev, actual) {
 			cs.validationFailed++
-			if rr, ok := cs.reqResultBySeq[ev.Sequence]; ok {
-				rr.Outcome = RequestValidationFailed
-				rr.ValidationFailed = true
-			}
 		}
 		delete(cs.pendingActual, ev.Sequence)
-		delete(cs.reqResultBySeq, ev.Sequence)
 	} else {
 		cs.pendingExpected[ev.Sequence] = ev
 	}
@@ -761,7 +758,6 @@ func waitForWorkerActivation(ctx context.Context, delay time.Duration) error {
 
 func (e *Engine) aggregateResults(results <-chan Summary) Summary {
 	final := Summary{Outcome: RunSuccess}
-	var allRequestResults []RequestResult
 	for s := range results {
 		final.RequestsSent += s.RequestsSent
 		final.ResponsesReceived += s.ResponsesReceived
@@ -770,14 +766,10 @@ func (e *Engine) aggregateResults(results <-chan Summary) Summary {
 		final.Skipped += s.Skipped
 		final.ConnectionsDone += s.ConnectionsDone
 		final.ConnectionsAborted += s.ConnectionsAborted
-		if len(s.RequestResults) > 0 {
-			allRequestResults = append(allRequestResults, s.RequestResults...)
-		}
 		if len(s.ConnectionResults) > 0 {
 			final.ConnectionResults = append(final.ConnectionResults, s.ConnectionResults...)
 		}
 	}
-	final.RequestResults = allRequestResults
 	if final.ConnectionsAborted > 0 {
 		final.Outcome = RunPartialSuccess
 	}
@@ -872,7 +864,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 
 	connID := requests[0].ConnectionID
 	connKey := model.ConnectionKey{Node: requests[0].Node, ConnectionID: connID}
-	connResult := ConnectionResult{Node: connKey.Node, ConnectionID: connKey.ConnectionID, Outcome: ConnectionCompleted, Requests: []RequestResult{}}
+	connResult := ConnectionResult{Node: connKey.Node, ConnectionID: connKey.ConnectionID, Outcome: ConnectionCompleted}
 
 	var previousTimestamp time.Time
 	previousTimestampSet := false
@@ -903,8 +895,6 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.Skipped++
 			reqRes.Outcome = RequestSkipped
 			reqRes.Skipped = true
-			connResult.Requests = append(connResult.Requests, reqRes)
-			result.RequestResults = append(result.RequestResults, reqRes)
 			continue
 		}
 
@@ -916,12 +906,8 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 				result.ConnectionsAborted++
 				result.Outcome = RunFailed
 				reqRes.Error = err.Error()
-				connResult.Requests = append(connResult.Requests, reqRes)
-				result.RequestResults = append(result.RequestResults, reqRes)
 				return result
 			}
-			connResult.Requests = append(connResult.Requests, reqRes)
-			result.RequestResults = append(result.RequestResults, reqRes)
 			continue
 		}
 
@@ -930,8 +916,6 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.Skipped++
 			reqRes.Outcome = RequestSkipped
 			reqRes.Skipped = true
-			connResult.Requests = append(connResult.Requests, reqRes)
-			result.RequestResults = append(result.RequestResults, reqRes)
 			continue
 		}
 
@@ -948,9 +932,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			reqRes.Outcome = RequestSendError
 			reqRes.Error = err.Error()
 			e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
-			connResult.Requests = append(connResult.Requests, reqRes)
-			result.RequestResults = append(result.RequestResults, reqRes)
-			connResult.Outcome = ConnectionAborted
+			connResult = connectionResultFromSummary(connKey, ConnectionAborted, result)
 			result.ConnectionResults = append(result.ConnectionResults, connResult)
 			return result
 		}
@@ -965,8 +947,6 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.ConnectionsAborted++
 			result.Outcome = RunFailed
 			reqRes.Error = err.Error()
-			connResult.Requests = append(connResult.Requests, reqRes)
-			result.RequestResults = append(result.RequestResults, reqRes)
 			return result
 		}
 		if expected, ok := responsesBySequence[requestEvent.Sequence]; ok {
@@ -991,8 +971,6 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 				}
 			}
 		}
-		connResult.Requests = append(connResult.Requests, reqRes)
-		result.RequestResults = append(result.RequestResults, reqRes)
 
 		if e.cfg.Metrics.Enabled && e.metrics != nil {
 			safeLabel := e.metricLabelForRequest(requestEvent)
@@ -1034,11 +1012,10 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.Outcome = RunSuccess
 		}
 	}
-	// finalize connection result outcome
 	if result.ConnectionsAborted > 0 {
-		connResult.Outcome = ConnectionAborted
+		connResult = connectionResultFromSummary(connKey, ConnectionAborted, result)
 	} else {
-		connResult.Outcome = ConnectionCompleted
+		connResult = connectionResultFromSummary(connKey, ConnectionCompleted, result)
 	}
 	result.ConnectionResults = append(result.ConnectionResults, connResult)
 	return result
@@ -1071,7 +1048,6 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 	close(results)
 
 	aggregated := Summary{Outcome: RunSuccess}
-	var combinedRequests []RequestResult
 	for streamResult := range results {
 		aggregated.RequestsSent += streamResult.RequestsSent
 		aggregated.ResponsesReceived += streamResult.ResponsesReceived
@@ -1079,9 +1055,6 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 		aggregated.ValidationFailed += streamResult.ValidationFailed
 		aggregated.Skipped += streamResult.Skipped
 		aggregated.ConnectionsAborted += streamResult.ConnectionsAborted
-		if len(streamResult.RequestResults) > 0 {
-			combinedRequests = append(combinedRequests, streamResult.RequestResults...)
-		}
 	}
 
 	if aggregated.ConnectionsAborted > 0 {
@@ -1101,12 +1074,11 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 	if len(requests) > 0 {
 		connKey = model.ConnectionKey{Node: requests[0].Node, ConnectionID: requests[0].ConnectionID}
 	}
-	connResult := ConnectionResult{Node: connKey.Node, ConnectionID: connKey.ConnectionID, Outcome: ConnectionCompleted, Requests: combinedRequests}
+	connResult := connectionResultFromSummary(connKey, ConnectionCompleted, aggregated)
 	if aggregated.ConnectionsAborted > 0 {
 		connResult.Outcome = ConnectionAborted
 	}
 	aggregated.ConnectionResults = append(aggregated.ConnectionResults, connResult)
-	aggregated.RequestResults = combinedRequests
 	return aggregated
 }
 
