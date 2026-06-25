@@ -611,6 +611,47 @@ func TestReplayRespectsShardAssignment(t *testing.T) {
 	}
 }
 
+func TestRouteEventsSkipsNonShardEventsBeforeLifecycleTracking(t *testing.T) {
+	cfg := config.Default()
+	cfg.Replay.Sharding.ShardCount = 2
+	cfg.Replay.Sharding.ShardIndex = 0
+
+	connKey := model.ConnectionKey{}
+	for connectionID := 1; connectionID <= 128; connectionID++ {
+		candidate := model.ConnectionKey{ConnectionID: connectionID}
+		if !connectionBelongsToShard(candidate, cfg.Replay.Sharding.ShardIndex, cfg.Replay.Sharding.ShardCount) {
+			connKey = candidate
+			break
+		}
+	}
+	if connKey == (model.ConnectionKey{}) {
+		t.Fatal("setup failed: could not find connection outside shard")
+	}
+
+	eng := New(cfg, metrics.New())
+	events := make(chan model.Event, 1)
+	events <- model.Event{
+		Type:         model.EventRequest,
+		ConnectionID: connKey.ConnectionID,
+		Sequence:     1,
+		HTTP: model.HTTPRequestMeta{
+			Method:    http.MethodGet,
+			Scheme:    "http",
+			Authority: "example.test",
+			Path:      "/",
+		},
+	}
+	close(events)
+
+	workerChs := []chan model.Event{make(chan model.Event, 1), make(chan model.Event, 1)}
+	if err := eng.routeEvents(context.Background(), events, workerChs); err != nil {
+		t.Fatalf("routeEvents(non-shard request without open) error = %v, want nil", err)
+	}
+	if got := len(workerChs[0]) + len(workerChs[1]); got != 0 {
+		t.Fatalf("routeEvents(non-shard request) routed %d events, want 0", got)
+	}
+}
+
 func TestRouteEventsSendsCloseToOwningWorker(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.MaxVirtualUsersPerEngine = 2

@@ -260,6 +260,9 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 		}
 
 		connKey := model.ConnectionKey{Node: ev.Node, ConnectionID: ev.ConnectionID}
+		if !connectionBelongsToShard(connKey, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
+			continue
+		}
 
 		switch ev.Type {
 		case model.EventConnectionOpen:
@@ -271,10 +274,6 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 			if e.cfg.Replay.Lifecycle.RequireOpen && !opened[connKey] {
 				return fmt.Errorf("connection %v missing connection_open", connKey)
 			}
-		}
-
-		if !connectionBelongsToShard(connKey, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
-			continue
 		}
 
 		workerIdx, ok := connWorker[connKey]
@@ -868,7 +867,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 
 	connID := requests[0].ConnectionID
 	connKey := model.ConnectionKey{Node: requests[0].Node, ConnectionID: connID}
-	connResult := ConnectionResult{Node: connKey.Node, ConnectionID: connKey.ConnectionID, Outcome: ConnectionCompleted}
+	var connResult ConnectionResult
 
 	var previousTimestamp time.Time
 	previousTimestampSet := false
