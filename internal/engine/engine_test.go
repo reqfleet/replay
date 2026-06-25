@@ -1056,6 +1056,61 @@ func TestReplayHTTP2CheckpointWaitsForEarlierInFlightRequest(t *testing.T) {
 	}
 }
 
+func TestReplayHTTP2PacingUsesConnectionOrderWithUniqueStreamIDs(t *testing.T) {
+	type startRecord struct {
+		path string
+		at   time.Time
+	}
+	starts := make(chan startRecord, 2)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		starts <- startRecord{path: r.URL.Path, at: time.Now()}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	base := time.Date(2026, 2, 27, 3, 10, 21, 0, time.UTC)
+	cfg := config.Default()
+	cfg.Replay.HTTP2.Mode = "multiplexed"
+	cfg.Replay.TLS.InsecureSkipVerify = true
+	cfg.Replay.Idempotency.Enabled = false
+	cfg.Replay.Pacing.Enabled = true
+	cfg.Replay.Pacing.MaxSleepDelta = 200 * time.Millisecond
+
+	eng := New(cfg, metrics.New())
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 1, Sequence: 1, Timestamp: base.Format(time.RFC3339Nano), HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"}},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 3, Sequence: 2, Timestamp: base.Add(100 * time.Millisecond).Format(time.RFC3339Nano), HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if got, want := summary.RequestsSent, int64(2); got != want {
+		t.Fatalf("summary.RequestsSent = %d, want %d", got, want)
+	}
+
+	first := <-starts
+	second := <-starts
+	if first.path != "/a" || second.path != "/b" {
+		t.Fatalf("request order = %s then %s, want /a then /b", first.path, second.path)
+	}
+	if delta := second.at.Sub(first.at); delta < 80*time.Millisecond {
+		t.Fatalf("request start delta = %s, want at least 80ms", delta)
+	}
+}
+
 func TestPerConnectionSocketOwnership(t *testing.T) {
 	var mu sync.Mutex
 	addrs := make(map[string]struct{})

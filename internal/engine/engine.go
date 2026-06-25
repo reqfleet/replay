@@ -194,18 +194,19 @@ type connState struct {
 	detected    bool
 	semAcquired bool
 
-	// Per-event processing state
-	streamPacing      map[int]*streamPacingState
-	pendingActual     map[int]requestExecution
-	pendingExpected   map[int]model.Event
-	reqResultBySeq    map[int]*RequestResult
-	requestResults    []*RequestResult
-	sent              int64
-	responsesReceived int64
-	sendErrors        int64
-	validationFailed  int64
-	skipped           int64
-	aborted           bool
+	// Per-connection event processing state
+	previousTimestamp    time.Time
+	previousTimestampSet bool
+	pendingActual        map[int]requestExecution
+	pendingExpected      map[int]model.Event
+	reqResultBySeq       map[int]*RequestResult
+	requestResults       []*RequestResult
+	sent                 int64
+	responsesReceived    int64
+	sendErrors           int64
+	validationFailed     int64
+	skipped              int64
+	aborted              bool
 
 	// Concurrent H/2 checkpointing advances the persisted watermark only after
 	// every earlier observed request has reached a terminal checkpointable state.
@@ -219,15 +220,9 @@ type connState struct {
 	h2WG sync.WaitGroup
 }
 
-type streamPacingState struct {
-	previousTimestamp    time.Time
-	previousTimestampSet bool
-}
-
 func (e *Engine) newConnState(connKey model.ConnectionKey) *connState {
 	return &connState{
 		connKey:         connKey,
-		streamPacing:    make(map[int]*streamPacingState),
 		pendingActual:   make(map[int]requestExecution),
 		pendingExpected: make(map[int]model.Event),
 		reqResultBySeq:  make(map[int]*RequestResult),
@@ -540,21 +535,12 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 }
 
 func (e *Engine) paceRequest(ctx context.Context, cs *connState, requestEvent model.Event) error {
-	streamID := requestEvent.StreamID
-	if streamID == 0 {
-		streamID = 1
-	}
-	ps := cs.streamPacing[streamID]
-	if ps == nil {
-		ps = &streamPacingState{}
-		cs.streamPacing[streamID] = ps
-	}
-	if err := e.sleepForPacing(ctx, ps.previousTimestamp, ps.previousTimestampSet, requestEvent.Timestamp); err != nil {
+	if err := e.sleepForPacing(ctx, cs.previousTimestamp, cs.previousTimestampSet, requestEvent.Timestamp); err != nil {
 		return err
 	}
 	if parsedTimestamp, ok := model.ParseTimestamp(requestEvent.Timestamp); ok {
-		ps.previousTimestamp = parsedTimestamp
-		ps.previousTimestampSet = true
+		cs.previousTimestamp = parsedTimestamp
+		cs.previousTimestampSet = true
 	}
 	return nil
 }
