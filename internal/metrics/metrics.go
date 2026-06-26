@@ -25,41 +25,42 @@ type Registry struct {
 	labelsMu   sync.RWMutex
 }
 
-func New() *Registry {
+func New(cfg config.MetricsConfig) *Registry {
 	r := prometheus.NewRegistry()
 	buckets := prometheus.DefBuckets
+	commonLabels := cfg.CommonLabelNames()
 
 	out := &Registry{
 		LabelLatencyHistogram: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Namespace: "shibuya",
+			Namespace: cfg.Namespace,
 			Name:      "latency_label_milliseconds",
 			Buckets:   toMillisecondsBuckets(buckets),
-		}, []string{"collection_id", "label", "run_id", "engine_no", "plan_id", "zone"}),
+		}, appendLabels(commonLabels, "label")),
 		StatusCounter: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "shibuya",
+			Namespace: cfg.Namespace,
 			Name:      "status_counter",
 			Help:      "HTTP status distribution counter",
-		}, []string{"collection_id", "plan_id", "run_id", "engine_no", "label", "zone", "status"}),
+		}, appendLabels(commonLabels, "label", "status")),
 		EgressCounter: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "shibuya",
+			Namespace: cfg.Namespace,
 			Name:      "egress_bytes_counter",
 			Help:      "Total egress bytes used by engine",
-		}, []string{"collection_id", "plan_id", "run_id", "engine_no", "label", "zone"}),
+		}, appendLabels(commonLabels, "label")),
 		ThreadsGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: "shibuya",
+			Namespace: cfg.Namespace,
 			Name:      "threads_gauge",
 			Help:      "Number of replay clients created for the engine",
-		}, []string{"collection_id", "plan_id", "run_id", "engine_no", "zone"}),
+		}, commonLabels),
 		CPU: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: "shibuya",
+			Namespace: cfg.Namespace,
 			Name:      "cpu_gauge",
 			Help:      "Logical CPUs available to the process (not CPU utilization)",
-		}, []string{"collection_id", "plan_id", "run_id", "engine_no", "zone"}),
+		}, commonLabels),
 		Mem: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: "shibuya",
+			Namespace: cfg.Namespace,
 			Name:      "mem_gauge",
 			Help:      "Memory used by engine",
-		}, []string{"collection_id", "plan_id", "run_id", "engine_no", "zone"}),
+		}, commonLabels),
 		r:          r,
 		seenLabels: make(map[string]struct{}),
 	}
@@ -112,20 +113,30 @@ func (r *Registry) Handler() http.Handler {
 	return promhttp.HandlerFor(r.r, promhttp.HandlerOpts{})
 }
 
-func (r *Registry) SeedEngineLabels(labels config.CommonMetricLabelSet) {
-	r.ThreadsGauge.WithLabelValues(labels.CollectionID, labels.PlanID, labels.RunID, labels.EngineNo, labels.Zone).Set(0)
-	r.CPU.WithLabelValues(labels.CollectionID, labels.PlanID, labels.RunID, labels.EngineNo, labels.Zone).Set(0)
-	r.Mem.WithLabelValues(labels.CollectionID, labels.PlanID, labels.RunID, labels.EngineNo, labels.Zone).Set(0)
+func (r *Registry) SeedEngineLabels(commonLabelValues []string) {
+	r.ThreadsGauge.WithLabelValues(commonLabelValues...).Set(0)
+	r.CPU.WithLabelValues(commonLabelValues...).Set(0)
+	r.Mem.WithLabelValues(commonLabelValues...).Set(0)
 }
 
-func (r *Registry) RecordClientCreated(labels config.CommonMetricLabelSet) {
-	r.ThreadsGauge.WithLabelValues(labels.CollectionID, labels.PlanID, labels.RunID, labels.EngineNo, labels.Zone).Inc()
+func (r *Registry) RecordClientCreated(commonLabelValues []string) {
+	r.ThreadsGauge.WithLabelValues(commonLabelValues...).Inc()
+}
+
+func (r *Registry) RecordRequest(commonLabelValues []string, label string, latencyMS float64, status string, egressBytes int64) {
+	r.LabelLatencyHistogram.WithLabelValues(appendLabelValues(commonLabelValues, label)...).Observe(latencyMS)
+	r.StatusCounter.WithLabelValues(appendLabelValues(commonLabelValues, label, status)...).Inc()
+	r.EgressCounter.WithLabelValues(appendLabelValues(commonLabelValues, label)...).Add(float64(egressBytes))
+}
+
+func (r *Registry) RecordStatus(commonLabelValues []string, label string, status string) {
+	r.StatusCounter.WithLabelValues(appendLabelValues(commonLabelValues, label, status)...).Inc()
 }
 
 // StartRuntimeCollection starts a background goroutine that updates runtime
 // metrics (memory and a CPU proxy) for the provided labels at the given
 // interval. It returns a stop function that cancels the collector.
-func (r *Registry) StartRuntimeCollection(labels config.CommonMetricLabelSet, interval time.Duration) func() {
+func (r *Registry) StartRuntimeCollection(commonLabelValues []string, interval time.Duration) func() {
 	if interval <= 0 {
 		interval = time.Second * 5
 	}
@@ -137,9 +148,9 @@ func (r *Registry) StartRuntimeCollection(labels config.CommonMetricLabelSet, in
 			select {
 			case <-ticker.C:
 				runtime.ReadMemStats(&m)
-				r.Mem.WithLabelValues(labels.CollectionID, labels.PlanID, labels.RunID, labels.EngineNo, labels.Zone).Set(float64(m.Alloc))
+				r.Mem.WithLabelValues(commonLabelValues...).Set(float64(m.Alloc))
 				// CPU: report number of CPUs as a proxy to avoid OS-specific code.
-				r.CPU.WithLabelValues(labels.CollectionID, labels.PlanID, labels.RunID, labels.EngineNo, labels.Zone).Set(float64(runtime.NumCPU()))
+				r.CPU.WithLabelValues(commonLabelValues...).Set(float64(runtime.NumCPU()))
 			case <-done:
 				ticker.Stop()
 				return
@@ -147,6 +158,20 @@ func (r *Registry) StartRuntimeCollection(labels config.CommonMetricLabelSet, in
 		}
 	}()
 	return func() { close(done) }
+}
+
+func appendLabels(commonLabels []string, names ...string) []string {
+	out := make([]string, 0, len(commonLabels)+len(names))
+	out = append(out, commonLabels...)
+	out = append(out, names...)
+	return out
+}
+
+func appendLabelValues(commonLabelValues []string, values ...string) []string {
+	out := make([]string, 0, len(commonLabelValues)+len(values))
+	out = append(out, commonLabelValues...)
+	out = append(out, values...)
+	return out
 }
 
 func toMillisecondsBuckets(b []float64) []float64 {

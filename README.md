@@ -21,19 +21,19 @@ By default, metrics are exposed at:
 
 - `http://0.0.0.0:9102/metrics`
 
-Metric names:
+Metric names with the default `replay` namespace:
 
-- `shibuya_latency_label_milliseconds`
-- `shibuya_latency_label_milliseconds_bucket`
-- `shibuya_latency_label_milliseconds_sum`
-- `shibuya_latency_label_milliseconds_count`
-- `shibuya_status_counter`
-- `shibuya_egress_bytes_counter`
-- `shibuya_threads_gauge`
-- `shibuya_cpu_gauge`
-- `shibuya_mem_gauge`
+- `replay_latency_label_milliseconds`
+- `replay_latency_label_milliseconds_bucket`
+- `replay_latency_label_milliseconds_sum`
+- `replay_latency_label_milliseconds_count`
+- `replay_status_counter`
+- `replay_egress_bytes_counter`
+- `replay_threads_gauge`
+- `replay_cpu_gauge`
+- `replay_mem_gauge`
 
-`shibuya_threads_gauge` reflects the number of replay clients created for the
+`replay_threads_gauge` reflects the number of replay clients created for the
 engine, not the live number of Go goroutines.
 
 ## Outcome model
@@ -45,7 +45,7 @@ engine, not the live number of Go goroutines.
   - `0` for `partial_success` by default
   - set `REPLAY_PARTIAL_SUCCESS_EXIT_ZERO=false` to force `1` on `partial_success`
 
-`shibuya_status_counter` includes both numeric HTTP response codes and synthetic transport statuses such as `timeout`, `connection_refused`, `connection_reset`, `tls`, `network`, and `send_error` when a request fails before any response is received.
+`replay_status_counter` includes both numeric HTTP response codes and synthetic transport statuses such as `timeout`, `connection_refused`, `connection_reset`, `tls`, `network`, and `send_error` when a request fails before any response is received.
 
 ## CLI & environment precedence
 
@@ -57,22 +57,14 @@ Notable CLI flags (also available via env):
 - `--require-override` / `REPLAY_REQUIRE_OVERRIDE`: fail if override missing.
 - `--config` path: YAML config file (loaded before env and CLI overrides).
 
-Environment variables for metrics and labels:
-- `METRICS_ENABLED`, `METRICS_LISTEN_ADDRESS`, `METRICS_PATH`, `METRICS_GRACEFUL_TERMINATION_PERIOD`
+Environment variables for metrics:
+- `METRICS_ENABLED`, `METRICS_NAMESPACE`, `METRICS_LISTEN_ADDRESS`, `METRICS_PATH`, `METRICS_GRACEFUL_TERMINATION_PERIOD`
 
 `metrics.graceful_termination_period` keeps the process alive after replay completes so the metrics endpoint remains scrapeable for a short window before exit. The default is `5s`.
 
-## Ramp-up
-
-`replay.rampup_duration` linearly stages virtual user activation over wall-clock time.
-
-- `0s` disables ramp-up and preserves the current immediate startup behavior.
-- `100` target VUs with `100s` ramp-up reaches the full `100` VUs by `100s`.
-- Ramp-up only affects when VUs begin consuming replay jobs. `max_active_connections_per_engine`, HTTP/2 stream limits, and per-request pacing continue to behave independently.
-
-All metric labels can also point at env vars directly from YAML:
-- `labels.collection_id_env`, `labels.plan_id_env`, `labels.run_id_env`, `labels.engine_no_env`, `labels.zone_env`
-- if the configured env var is unset or empty, replay falls back to the corresponding literal `labels.*` value
+Common Prometheus labels are configured with `metrics.common_labels`:
+- each entry has `name`, literal fallback `value`, and optional `env`
+- if the configured env var is unset or empty, replay falls back to the literal `value`
 - replay resolves these env-ref keys from the process environment first and from the YAML `env:` map second
 
 CLI flags are applied last and take highest precedence for safety-related settings.
@@ -133,11 +125,23 @@ replay:
     shard_count: 1
   checkpoint:
     file: "./checkpoint.json"
+metrics:
+  namespace: replay
+  common_labels:
+    - name: run_id
+      value: unknown
+      env: REPLAY_RUN_ID
+    - name: worker_id
+      value: "0"
+      env: REPLAY_WORKER_ID
+    - name: zone
+      value: unknown
+      env: REPLAY_ZONE
 ```
 
 When a recorded response exists for a request (`connection_id` + `sequence`), mismatches increment `validation_failed` and produce `partial_success`.
 
-When the target is unreachable or times out, the request is recorded as `send_error`, the run remains `partial_success`, and `shibuya_status_counter` is incremented with a synthetic transport status.
+When the target is unreachable or times out, the request is recorded as `send_error`, the run remains `partial_success`, and `replay_status_counter` is incremented with a synthetic transport status.
 
 When idempotency safeguards are enabled, mutation methods are skipped unless one of the allow headers is present.
 Lifecycle checks require `connection_open` before each replayed connection. `connection_close` is optional; EOF finalizes any still-open connections.

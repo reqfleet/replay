@@ -91,6 +91,7 @@ type Summary struct {
 type Engine struct {
 	cfg                 config.Config
 	metrics             *metrics.Registry
+	metricLabelValues   []string
 	parsedPathTemplates map[int][]PathTemplate
 	parsedOverrideURL   *url.URL
 }
@@ -121,6 +122,7 @@ func New(cfg config.Config, registry *metrics.Registry) *Engine {
 	return &Engine{
 		cfg:                 cfg,
 		metrics:             registry,
+		metricLabelValues:   cfg.Metrics.CommonLabelValues(),
 		parsedPathTemplates: ParsePathTemplates(cfg.Metrics.PathTemplates),
 		parsedOverrideURL:   parsedOverride,
 	}
@@ -141,7 +143,9 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 		defer checkpoints.Close()
 	}
 
-	e.metrics.SeedEngineLabels(e.cfg.Labels)
+	if e.metrics != nil {
+		e.metrics.SeedEngineLabels(e.metricLabelValues)
+	}
 
 	replayCtx, cancelReplay := context.WithCancel(ctx)
 	defer cancelReplay()
@@ -304,7 +308,7 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 		return Summary{}
 	}
 	if e.metrics != nil {
-		e.metrics.RecordClientCreated(e.cfg.Labels)
+		e.metrics.RecordClientCreated(e.metricLabelValues)
 	}
 
 	conns := make(map[model.ConnectionKey]*connState)
@@ -692,19 +696,7 @@ func (e *Engine) recordSuccessMetrics(requestEvent model.Event, exec requestExec
 		return
 	}
 	safeLabel := e.metricLabelForRequest(requestEvent)
-	e.metrics.LabelLatencyHistogram.WithLabelValues(
-		e.cfg.Labels.CollectionID, safeLabel, e.cfg.Labels.RunID,
-		e.cfg.Labels.EngineNo, e.cfg.Labels.PlanID, e.cfg.Labels.Zone,
-	).Observe(exec.latencyMS)
-	e.metrics.StatusCounter.WithLabelValues(
-		e.cfg.Labels.CollectionID, e.cfg.Labels.PlanID, e.cfg.Labels.RunID,
-		e.cfg.Labels.EngineNo, safeLabel, e.cfg.Labels.Zone,
-		fmt.Sprintf("%d", exec.statusCode),
-	).Inc()
-	e.metrics.EgressCounter.WithLabelValues(
-		e.cfg.Labels.CollectionID, e.cfg.Labels.PlanID, e.cfg.Labels.RunID,
-		e.cfg.Labels.EngineNo, safeLabel, e.cfg.Labels.Zone,
-	).Add(float64(exec.egressBytes))
+	e.metrics.RecordRequest(e.metricLabelValues, safeLabel, exec.latencyMS, fmt.Sprintf("%d", exec.statusCode), exec.egressBytes)
 }
 
 func workerActivationDelay(workerIndex, totalWorkers int, rampup time.Duration) time.Duration {
@@ -931,34 +923,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			}
 		}
 
-		if e.cfg.Metrics.Enabled && e.metrics != nil {
-			safeLabel := e.metricLabelForRequest(requestEvent)
-			e.metrics.LabelLatencyHistogram.WithLabelValues(
-				e.cfg.Labels.CollectionID,
-				safeLabel,
-				e.cfg.Labels.RunID,
-				e.cfg.Labels.EngineNo,
-				e.cfg.Labels.PlanID,
-				e.cfg.Labels.Zone,
-			).Observe(exec.latencyMS)
-			e.metrics.StatusCounter.WithLabelValues(
-				e.cfg.Labels.CollectionID,
-				e.cfg.Labels.PlanID,
-				e.cfg.Labels.RunID,
-				e.cfg.Labels.EngineNo,
-				safeLabel,
-				e.cfg.Labels.Zone,
-				fmt.Sprintf("%d", exec.statusCode),
-			).Inc()
-			e.metrics.EgressCounter.WithLabelValues(
-				e.cfg.Labels.CollectionID,
-				e.cfg.Labels.PlanID,
-				e.cfg.Labels.RunID,
-				e.cfg.Labels.EngineNo,
-				safeLabel,
-				e.cfg.Labels.Zone,
-			).Add(float64(exec.egressBytes))
-		}
+		e.recordSuccessMetrics(requestEvent, exec)
 	}
 
 	if result.ConnectionsAborted == 0 {
@@ -1352,15 +1317,7 @@ func (e *Engine) recordStatusMetric(requestEvent model.Event, status string) {
 		return
 	}
 	safeLabel := e.metricLabelForRequest(requestEvent)
-	e.metrics.StatusCounter.WithLabelValues(
-		e.cfg.Labels.CollectionID,
-		e.cfg.Labels.PlanID,
-		e.cfg.Labels.RunID,
-		e.cfg.Labels.EngineNo,
-		safeLabel,
-		e.cfg.Labels.Zone,
-		status,
-	).Inc()
+	e.metrics.RecordStatus(e.metricLabelValues, safeLabel, status)
 }
 
 func (e *Engine) sleepBackoff(ctx context.Context, attempt int) error {

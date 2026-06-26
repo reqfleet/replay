@@ -116,13 +116,11 @@ func main() {
 	}
 	// Apply environment overrides (env > YAML)
 	cfg.ApplyEnv()
-	slog.Info("resolved labels",
-		"collection_id", cfg.Labels.CollectionID,
-		"plan_id", cfg.Labels.PlanID,
-		"run_id", cfg.Labels.RunID,
-		"engine_no", cfg.Labels.EngineNo,
-		"zone", cfg.Labels.Zone,
-	)
+	if err := cfg.Validate(); err != nil {
+		slog.Error("validate config", "error", err)
+		os.Exit(2)
+	}
+	slog.Info("resolved metric labels", cfg.Metrics.CommonLabelAttrs()...)
 	// Apply CLI overrides with higher precedence for safety-related flags
 	if *dryRunFlag {
 		cfg.Replay.DryRun = true
@@ -151,13 +149,14 @@ func main() {
 	// We'll stream the parsed events into the engine to avoid building
 	// a large in-memory slice for big log files.
 
-	registry := metrics.New()
+	registry := metrics.New(cfg.Metrics)
+	metricLabelValues := cfg.Metrics.CommonLabelValues()
 	// seed labels early so collectors and the server can report immediately
-	registry.SeedEngineLabels(cfg.Labels)
+	registry.SeedEngineLabels(metricLabelValues)
 	var stopMetrics func()
 	if cfg.Metrics.Enabled {
 		// start runtime collectors (memory/CPU)
-		stopMetrics = registry.StartRuntimeCollection(cfg.Labels, 5*time.Second)
+		stopMetrics = registry.StartRuntimeCollection(metricLabelValues, 5*time.Second)
 		if stopMetrics != nil {
 			defer stopMetrics()
 		}

@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -44,19 +45,16 @@ func TestConfigPrecedence(t *testing.T) {
 		"  override_url: \"http://fromyaml\"\n" +
 		"metrics:\n" +
 		"  enabled: false\n" +
+		"  namespace: \"custom\"\n" +
 		"  listen_address: \"127.0.0.1:11111\"\n" +
 		"  path: \"/m\"\n" +
-		"labels:\n" +
-		"  collection_id: \"col-yaml\"\n" +
-		"  collection_id_env: \"COLLECTION_ID_FROM_ENV\"\n" +
-		"  plan_id: \"plan-yaml\"\n" +
-		"  plan_id_env: \"PLAN_ID_FROM_ENV\"\n" +
-		"  run_id: \"run-yaml\"\n" +
-		"  run_id_env: \"RUN_ID_FROM_ENV\"\n" +
-		"  engine_no: \"1\"\n" +
-		"  engine_no_env: \"ENGINE_NO_FROM_ENV\"\n" +
-		"  zone: \"zone-yaml\"\n" +
-		"  zone_env: \"ZONE_FROM_ENV\"\n"
+		"  common_labels:\n" +
+		"    - name: \"tenant_id\"\n" +
+		"      value: \"tenant-yaml\"\n" +
+		"      env: \"TENANT_ID_FROM_ENV\"\n" +
+		"    - name: \"run_id\"\n" +
+		"      value: \"run-yaml\"\n" +
+		"      env: \"RUN_ID_FROM_ENV\"\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -69,11 +67,9 @@ func TestConfigPrecedence(t *testing.T) {
 	t.Setenv("REPLAY_OVERRIDE_URL", "http://fromenv")
 	t.Setenv("REPLAY_DRY_RUN", "true")
 	t.Setenv("METRICS_ENABLED", "true")
-	t.Setenv("COLLECTION_ID_FROM_ENV", "col-from-config-env")
-	t.Setenv("PLAN_ID_FROM_ENV", "plan-from-config-env")
+	t.Setenv("TENANT_ID_FROM_ENV", "tenant-from-config-env")
 	t.Setenv("RUN_ID_FROM_ENV", "run-from-config-env")
-	t.Setenv("ENGINE_NO_FROM_ENV", "17")
-	t.Setenv("ZONE_FROM_ENV", "zone-from-config-env")
+	t.Setenv("METRICS_NAMESPACE", "envnamespace")
 	t.Setenv("METRICS_GRACEFUL_TERMINATION_PERIOD", "2s")
 
 	cfg.ApplyEnv()
@@ -90,20 +86,15 @@ func TestConfigPrecedence(t *testing.T) {
 	if got, want := cfg.Metrics.GracefulTerminationPeriod, 2*time.Second; got != want {
 		t.Fatalf("cfg.Metrics.GracefulTerminationPeriod = %v, want %v", got, want)
 	}
-	if cfg.Labels.CollectionID != "col-from-config-env" {
-		t.Fatalf("cfg.Labels.CollectionID = %q, want %q", cfg.Labels.CollectionID, "col-from-config-env")
+	if got, want := cfg.Metrics.Namespace, "envnamespace"; got != want {
+		t.Fatalf("cfg.Metrics.Namespace = %q, want %q", got, want)
 	}
-	if cfg.Labels.PlanID != "plan-from-config-env" {
-		t.Fatalf("cfg.Labels.PlanID = %q, want %q", cfg.Labels.PlanID, "plan-from-config-env")
+	wantLabels := []MetricLabel{
+		{Name: "tenant_id", Value: "tenant-from-config-env", Env: "TENANT_ID_FROM_ENV"},
+		{Name: "run_id", Value: "run-from-config-env", Env: "RUN_ID_FROM_ENV"},
 	}
-	if cfg.Labels.RunID != "run-from-config-env" {
-		t.Fatalf("cfg.Labels.RunID = %q, want %q", cfg.Labels.RunID, "run-from-config-env")
-	}
-	if cfg.Labels.EngineNo != "17" {
-		t.Fatalf("cfg.Labels.EngineNo = %q, want %q", cfg.Labels.EngineNo, "17")
-	}
-	if cfg.Labels.Zone != "zone-from-config-env" {
-		t.Fatalf("cfg.Labels.Zone = %q, want %q", cfg.Labels.Zone, "zone-from-config-env")
+	if !reflect.DeepEqual(cfg.Metrics.CommonLabels, wantLabels) {
+		t.Fatalf("cfg.Metrics.CommonLabels = %+v, want %+v", cfg.Metrics.CommonLabels, wantLabels)
 	}
 
 	// CLI (applied after ApplyEnv) should be highest precedence
@@ -113,76 +104,53 @@ func TestConfigPrecedence(t *testing.T) {
 	}
 }
 
-func TestApplyEnvLabelRefsFallback(t *testing.T) {
+func TestApplyEnvMetricLabelRefsFallback(t *testing.T) {
 	tests := []struct {
 		name      string
 		configure func(*Config)
-		want      CommonMetricLabelSet
+		want      []MetricLabel
 	}{
 		{
 			name: "falls back to literal yaml values when configured env vars are missing",
 			configure: func(cfg *Config) {
-				cfg.Labels.CollectionID = "col-yaml"
-				cfg.Labels.CollectionIDEnv = "MISSING_COLLECTION_ID"
-				cfg.Labels.PlanID = "plan-yaml"
-				cfg.Labels.PlanIDEnv = "MISSING_PLAN_ID"
-				cfg.Labels.RunID = "run-yaml"
-				cfg.Labels.RunIDEnv = "MISSING_RUN_ID"
-				cfg.Labels.EngineNo = "1"
-				cfg.Labels.EngineNoEnv = "MISSING_ENGINE_NO"
-				cfg.Labels.Zone = "zone-yaml"
-				cfg.Labels.ZoneEnv = "MISSING_ZONE"
+				cfg.Metrics.CommonLabels = []MetricLabel{
+					{Name: "tenant_id", Value: "tenant-yaml", Env: "MISSING_TENANT_ID"},
+					{Name: "run_id", Value: "run-yaml", Env: "MISSING_RUN_ID"},
+				}
 			},
-			want: CommonMetricLabelSet{
-				CollectionID: "col-yaml",
-				PlanID:       "plan-yaml",
-				RunID:        "run-yaml",
-				EngineNo:     "1",
-				Zone:         "zone-yaml",
+			want: []MetricLabel{
+				{Name: "tenant_id", Value: "tenant-yaml", Env: "MISSING_TENANT_ID"},
+				{Name: "run_id", Value: "run-yaml", Env: "MISSING_RUN_ID"},
 			},
 		},
 		{
 			name: "uses cfg env values before they are exported into process env",
 			configure: func(cfg *Config) {
-				cfg.Labels.CollectionID = "col-yaml"
-				cfg.Labels.CollectionIDEnv = "COLLECTION_ID_FROM_CFG_ENV"
-				cfg.Labels.PlanID = "plan-yaml"
-				cfg.Labels.PlanIDEnv = "PLAN_ID_FROM_CFG_ENV"
-				cfg.Labels.RunID = "run-yaml"
-				cfg.Labels.RunIDEnv = "RUN_ID_FROM_CFG_ENV"
-				cfg.Labels.EngineNo = "1"
-				cfg.Labels.EngineNoEnv = "ENGINE_NO_FROM_CFG_ENV"
-				cfg.Labels.Zone = "zone-yaml"
-				cfg.Labels.ZoneEnv = "ZONE_FROM_CFG_ENV"
-				cfg.Env["COLLECTION_ID_FROM_CFG_ENV"] = "col-from-cfg-env"
-				cfg.Env["PLAN_ID_FROM_CFG_ENV"] = "plan-from-cfg-env"
+				cfg.Metrics.CommonLabels = []MetricLabel{
+					{Name: "tenant_id", Value: "tenant-yaml", Env: "TENANT_ID_FROM_CFG_ENV"},
+					{Name: "run_id", Value: "run-yaml", Env: "RUN_ID_FROM_CFG_ENV"},
+				}
+				cfg.Env["TENANT_ID_FROM_CFG_ENV"] = "tenant-from-cfg-env"
 				cfg.Env["RUN_ID_FROM_CFG_ENV"] = "run-from-cfg-env"
-				cfg.Env["ENGINE_NO_FROM_CFG_ENV"] = "9"
-				cfg.Env["ZONE_FROM_CFG_ENV"] = "zone-from-cfg-env"
 			},
-			want: CommonMetricLabelSet{
-				CollectionID: "col-from-cfg-env",
-				PlanID:       "plan-from-cfg-env",
-				RunID:        "run-from-cfg-env",
-				EngineNo:     "9",
-				Zone:         "zone-from-cfg-env",
+			want: []MetricLabel{
+				{Name: "tenant_id", Value: "tenant-from-cfg-env", Env: "TENANT_ID_FROM_CFG_ENV"},
+				{Name: "run_id", Value: "run-from-cfg-env", Env: "RUN_ID_FROM_CFG_ENV"},
 			},
 		},
 		{
 			name: "falls back to defaults when no literal override is provided",
 			configure: func(cfg *Config) {
-				cfg.Labels.CollectionIDEnv = "MISSING_COLLECTION_ID"
-				cfg.Labels.PlanIDEnv = "MISSING_PLAN_ID"
-				cfg.Labels.RunIDEnv = "MISSING_RUN_ID"
-				cfg.Labels.EngineNoEnv = "MISSING_ENGINE_NO"
-				cfg.Labels.ZoneEnv = "MISSING_ZONE"
+				cfg.Metrics.CommonLabels = []MetricLabel{
+					{Name: "run_id", Value: "unknown", Env: "MISSING_RUN_ID"},
+					{Name: "worker_id", Value: "0", Env: "MISSING_WORKER_ID"},
+					{Name: "zone", Value: "unknown", Env: "MISSING_ZONE"},
+				}
 			},
-			want: CommonMetricLabelSet{
-				CollectionID: "unknown",
-				PlanID:       "unknown",
-				RunID:        "unknown",
-				EngineNo:     "0",
-				Zone:         "unknown",
+			want: []MetricLabel{
+				{Name: "run_id", Value: "unknown", Env: "MISSING_RUN_ID"},
+				{Name: "worker_id", Value: "0", Env: "MISSING_WORKER_ID"},
+				{Name: "zone", Value: "unknown", Env: "MISSING_ZONE"},
 			},
 		},
 	}
@@ -194,20 +162,8 @@ func TestApplyEnvLabelRefsFallback(t *testing.T) {
 
 			cfg.ApplyEnv()
 
-			if got := cfg.Labels.CollectionID; got != tt.want.CollectionID {
-				t.Fatalf("cfg.Labels.CollectionID = %q, want %q", got, tt.want.CollectionID)
-			}
-			if got := cfg.Labels.PlanID; got != tt.want.PlanID {
-				t.Fatalf("cfg.Labels.PlanID = %q, want %q", got, tt.want.PlanID)
-			}
-			if got := cfg.Labels.RunID; got != tt.want.RunID {
-				t.Fatalf("cfg.Labels.RunID = %q, want %q", got, tt.want.RunID)
-			}
-			if got := cfg.Labels.EngineNo; got != tt.want.EngineNo {
-				t.Fatalf("cfg.Labels.EngineNo = %q, want %q", got, tt.want.EngineNo)
-			}
-			if got := cfg.Labels.Zone; got != tt.want.Zone {
-				t.Fatalf("cfg.Labels.Zone = %q, want %q", got, tt.want.Zone)
+			if !reflect.DeepEqual(cfg.Metrics.CommonLabels, tt.want) {
+				t.Fatalf("cfg.Metrics.CommonLabels = %+v, want %+v", cfg.Metrics.CommonLabels, tt.want)
 			}
 		})
 	}
@@ -275,5 +231,56 @@ func TestValidateRejectsNegativeMetricsGracefulTerminationPeriod(t *testing.T) {
 	cfg.Metrics.GracefulTerminationPeriod = -1 * time.Second
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for negative metrics graceful termination period")
+	}
+}
+
+func TestValidateRejectsInvalidMetricCommonLabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels []MetricLabel
+	}{
+		{
+			name:   "empty",
+			labels: []MetricLabel{{Name: "", Value: "x"}},
+		},
+		{
+			name:   "reserved",
+			labels: []MetricLabel{{Name: "status", Value: "x"}},
+		},
+		{
+			name:   "reserved_prefix",
+			labels: []MetricLabel{{Name: "__tenant_id", Value: "x"}},
+		},
+		{
+			name:   "duplicate",
+			labels: []MetricLabel{{Name: "tenant_id", Value: "a"}, {Name: "tenant_id", Value: "b"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Metrics.CommonLabels = tt.labels
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("Validate() with labels %+v error = nil, want error", tt.labels)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsInvalidMetricsNamespace(t *testing.T) {
+	cfg := Default()
+	cfg.Metrics.Namespace = "bad-namespace"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() with invalid metrics namespace error = nil, want error")
+	}
+}
+
+func TestApplyEnvInvalidMetricsNamespaceFailsValidation(t *testing.T) {
+	t.Setenv("METRICS_NAMESPACE", "bad-namespace")
+	cfg := Default()
+	cfg.ApplyEnv()
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() after invalid METRICS_NAMESPACE error = nil, want error")
 	}
 }

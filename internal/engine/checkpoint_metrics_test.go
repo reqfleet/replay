@@ -21,7 +21,7 @@ func TestCheckpointWrittenOnSuccess(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Lifecycle.RequireOpen = false
 
-	reg := metrics.New()
+	reg := metrics.New(cfg.Metrics)
 	e := New(cfg, reg)
 
 	srv := startOKServer()
@@ -114,7 +114,7 @@ func TestCheckpointNotWrittenInDryRun(t *testing.T) {
 	cfg.Replay.Lifecycle.RequireOpen = false
 	cfg.Replay.DryRun = true
 
-	reg := metrics.New()
+	reg := metrics.New(cfg.Metrics)
 	e := New(cfg, reg)
 
 	srv := startOKServer()
@@ -152,7 +152,7 @@ func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
 	cfg.Replay.Idempotency.BlockMethods = []string{"POST"}
 	cfg.Replay.Idempotency.RequireHeaderForAllow = []string{"x-idempotency-key"}
 
-	reg := metrics.New()
+	reg := metrics.New(cfg.Metrics)
 	e := New(cfg, reg)
 
 	// no server needed because idempotency skip happens before network
@@ -187,11 +187,11 @@ func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
 }
 
 func TestWorkerClientCreationUpdatesThreadsGauge(t *testing.T) {
-	reg := metrics.New()
 	cfg := config.Default()
 	cfg.Replay.MaxVirtualUsersPerEngine = 3
-	labels := cfg.Labels
-	reg.SeedEngineLabels(labels)
+	reg := metrics.New(cfg.Metrics)
+	metricLabelValues := cfg.Metrics.CommonLabelValues()
+	reg.SeedEngineLabels(metricLabelValues)
 
 	eng := New(cfg, reg)
 	ctx := t.Context()
@@ -217,7 +217,7 @@ func TestWorkerClientCreationUpdatesThreadsGauge(t *testing.T) {
 	defer ticker.Stop()
 
 	for {
-		g := reg.ThreadsGauge.WithLabelValues(labels.CollectionID, labels.PlanID, labels.RunID, labels.EngineNo, labels.Zone)
+		g := reg.ThreadsGauge.WithLabelValues(metricLabelValues...)
 		if v := testutil.ToFloat64(g); v == want {
 			break
 		}

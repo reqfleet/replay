@@ -104,8 +104,8 @@ func TestRunReplayFromFile_TransportFailures(t *testing.T) {
 			defer cleanup()
 
 			logPath := writeReplayLog(t, authority)
-			registry := metrics.New()
-			registry.SeedEngineLabels(cfg.Labels)
+			registry := metrics.New(cfg.Metrics)
+			registry.SeedEngineLabels(cfg.Metrics.CommonLabelValues())
 
 			summary, err := runReplayFromFile(context.Background(), cfg, registry, logPath, "")
 			if err != nil {
