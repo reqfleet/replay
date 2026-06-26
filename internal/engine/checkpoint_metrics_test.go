@@ -62,6 +62,53 @@ func TestCheckpointWrittenOnSuccess(t *testing.T) {
 	}
 }
 
+func TestCheckpointFlushBatchesUntilClose(t *testing.T) {
+	tmp := t.TempDir()
+	ckPath := filepath.Join(tmp, "checkpoint.json")
+	store := newCheckpointStoreWithInterval(ckPath, 24*time.Hour)
+	store.wg.Go(store.flusher)
+
+	key := model.ConnectionKey{Node: "envoy-a", ConnectionID: 1}
+	if err := store.markProcessed(key, 1); err != nil {
+		t.Fatalf("mark initial checkpoint: %v", err)
+	}
+	if got := readCheckpointSequence(t, ckPath, key); got != 1 {
+		t.Fatalf("checkpoint sequence after initial write = %d, want 1", got)
+	}
+
+	if err := store.markProcessed(key, 2); err != nil {
+		t.Fatalf("mark second checkpoint: %v", err)
+	}
+	if err := store.markProcessed(key, 3); err != nil {
+		t.Fatalf("mark third checkpoint: %v", err)
+	}
+	if got := readCheckpointSequence(t, ckPath, key); got != 1 {
+		t.Fatalf("checkpoint sequence before batch flush = %d, want 1", got)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("close checkpoint store: %v", err)
+	}
+	if got := readCheckpointSequence(t, ckPath, key); got != 3 {
+		t.Fatalf("checkpoint sequence after final flush = %d, want 3", got)
+	}
+}
+
+func readCheckpointSequence(t *testing.T, path string, key model.ConnectionKey) int {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	var data struct {
+		Connections map[model.ConnectionKey]int `json:"connections"`
+	}
+	if err := json.Unmarshal(b, &data); err != nil {
+		t.Fatalf("unmarshal checkpoint: %v", err)
+	}
+	return data.Connections[key]
+}
+
 func TestCheckpointNotWrittenInDryRun(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Lifecycle.RequireOpen = false
