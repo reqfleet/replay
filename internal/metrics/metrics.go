@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"net/http"
+	"os"
 	"runtime"
 	"sync"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/reqfleet/containerstats"
 	"github.com/reqfleet/replay/internal/config"
 )
+
+const cgroupV2ControllersPath = "/sys/fs/cgroup/cgroup.controllers"
 
 type Registry struct {
 	LabelLatencyHistogram *prometheus.HistogramVec
@@ -55,7 +58,7 @@ func New(cfg config.MetricsConfig) *Registry {
 		CPU: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,
 			Name:      "cpu_gauge",
-			Help:      "Container CPU usage delta per interval when running in a cgroup; host logical CPU count otherwise",
+			Help:      "Container CPU cores used when running in a cgroup; host logical CPU count otherwise",
 		}, commonLabels),
 		Mem: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,
@@ -170,6 +173,7 @@ type runtimeMetricsCollector struct {
 	readHostMemory      func() uint64
 	readHostCPU         func() int
 	interval            time.Duration
+	cpuUsageUnit        time.Duration
 	previousCPUUsage    uint64
 	cpuInitialized      bool
 }
@@ -187,22 +191,23 @@ func newRuntimeMetricsCollector(interval time.Duration) *runtimeMetricsCollector
 		readHostMemory:      readHostMemoryAlloc,
 		readHostCPU:         runtime.NumCPU,
 		interval:            interval,
+		cpuUsageUnit:        detectContainerCPUUsageUnit(),
 	}
 }
 
 func (c *runtimeMetricsCollector) snapshot() runtimeMetrics {
 	cpu, setCPU := c.cpuUsage()
 	return runtimeMetrics{
-		cpu:    float64(cpu),
+		cpu:    cpu,
 		memory: float64(c.memoryUsage()),
 		setCPU: setCPU,
 	}
 }
 
-func (c *runtimeMetricsCollector) cpuUsage() (uint64, bool) {
+func (c *runtimeMetricsCollector) cpuUsage() (float64, bool) {
 	cpuUsage, err := c.readContainerCPU()
 	if err != nil {
-		return uint64(c.readHostCPU()), true
+		return float64(c.readHostCPU()), true
 	}
 	if !c.cpuInitialized || cpuUsage < c.previousCPUUsage {
 		c.previousCPUUsage = cpuUsage
@@ -210,7 +215,7 @@ func (c *runtimeMetricsCollector) cpuUsage() (uint64, bool) {
 		return 0, false
 	}
 
-	used := calculateCPUUsage(cpuUsage, c.previousCPUUsage, c.interval)
+	used := calculateCPUUsage(cpuUsage, c.previousCPUUsage, c.interval, c.cpuUsageUnit)
 	c.previousCPUUsage = cpuUsage
 	return used, true
 }
@@ -223,11 +228,21 @@ func (c *runtimeMetricsCollector) memoryUsage() uint64 {
 	return memory
 }
 
-func calculateCPUUsage(cpuUsage, previousCPUUsage uint64, interval time.Duration) uint64 {
+func calculateCPUUsage(cpuUsage, previousCPUUsage uint64, interval, usageUnit time.Duration) float64 {
 	if interval <= 0 {
 		interval = time.Second
 	}
-	return (cpuUsage - previousCPUUsage) * uint64(time.Millisecond) / uint64(interval)
+	if usageUnit <= 0 {
+		usageUnit = time.Microsecond
+	}
+	return float64(cpuUsage-previousCPUUsage) * float64(usageUnit) / float64(interval)
+}
+
+func detectContainerCPUUsageUnit() time.Duration {
+	if _, err := os.Stat(cgroupV2ControllersPath); err == nil {
+		return time.Microsecond
+	}
+	return time.Nanosecond
 }
 
 func readHostMemoryAlloc() uint64 {

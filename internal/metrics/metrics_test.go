@@ -76,6 +76,7 @@ func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 		containerMemoryErr  error
 		hostCPU             int
 		hostMemory          uint64
+		cpuUsageUnit        time.Duration
 		wantCPU             []float64
 		wantSetCPU          []bool
 		wantMemory          float64
@@ -84,21 +85,23 @@ func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 	}{
 		{
 			name:            "container_stats_available",
-			containerCPU:    []uint64{1000, 11_000},
+			containerCPU:    []uint64{1000, 3_501_000},
 			containerMemory: 34,
+			cpuUsageUnit:    time.Microsecond,
 			hostCPU:         8,
 			hostMemory:      1024,
-			wantCPU:         []float64{0, 10},
+			wantCPU:         []float64{0, 3.5},
 			wantSetCPU:      []bool{false, true},
 			wantMemory:      34,
 		},
 		{
 			name:            "initial_zero_cpu_usage",
-			containerCPU:    []uint64{0, 10_000},
+			containerCPU:    []uint64{0, 3_500_000},
 			containerMemory: 34,
+			cpuUsageUnit:    time.Microsecond,
 			hostCPU:         8,
 			hostMemory:      1024,
-			wantCPU:         []float64{0, 10},
+			wantCPU:         []float64{0, 3.5},
 			wantSetCPU:      []bool{false, true},
 			wantMemory:      34,
 		},
@@ -167,7 +170,8 @@ func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 					hostCPUCalls++
 					return tt.hostCPU
 				},
-				interval: time.Second,
+				interval:     time.Second,
+				cpuUsageUnit: tt.cpuUsageUnit,
 			}
 
 			for i := range tt.wantCPU {
@@ -193,8 +197,46 @@ func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 }
 
 func TestCalculateCPUUsage(t *testing.T) {
-	got := calculateCPUUsage(51_000, 1_000, 5*time.Second)
-	if got != 10 {
-		t.Errorf("calculateCPUUsage(51000, 1000, 5s) = %d, want 10", got)
+	tests := []struct {
+		name             string
+		cpuUsage         uint64
+		previousCPUUsage uint64
+		interval         time.Duration
+		usageUnit        time.Duration
+		want             float64
+	}{
+		{
+			name:             "cgroup_v2_microseconds",
+			cpuUsage:         3_501_000,
+			previousCPUUsage: 1_000,
+			interval:         time.Second,
+			usageUnit:        time.Microsecond,
+			want:             3.5,
+		},
+		{
+			name:             "cgroup_v1_nanoseconds",
+			cpuUsage:         3_501_000_000,
+			previousCPUUsage: 1_000_000,
+			interval:         time.Second,
+			usageUnit:        time.Nanosecond,
+			want:             3.5,
+		},
+		{
+			name:             "longer_interval",
+			cpuUsage:         10_000_000,
+			previousCPUUsage: 0,
+			interval:         5 * time.Second,
+			usageUnit:        time.Microsecond,
+			want:             2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := calculateCPUUsage(tt.cpuUsage, tt.previousCPUUsage, tt.interval, tt.usageUnit)
+			if got != tt.want {
+				t.Errorf("calculateCPUUsage(%d, %d, %s, %s) = %v, want %v", tt.cpuUsage, tt.previousCPUUsage, tt.interval, tt.usageUnit, got, tt.want)
+			}
+		})
 	}
 }
