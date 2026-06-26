@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/goccy/go-yaml"
@@ -16,8 +17,7 @@ type Config struct {
 	Metrics MetricsConfig        `yaml:"metrics"`
 	Target  TargetOverrideConfig `yaml:"target"`
 
-	Labels CommonMetricLabelSet `yaml:"labels"`
-	Env    map[string]string    `yaml:"env"`
+	Env map[string]string `yaml:"env"`
 
 	Header HeaderRewriteConfig `yaml:"header_rewrite"`
 }
@@ -100,29 +100,19 @@ type CheckpointConfig struct {
 
 type MetricsConfig struct {
 	Enabled                   bool          `yaml:"enabled"`
+	Namespace                 string        `yaml:"namespace"`
 	ListenAddress             string        `yaml:"listen_address"`
 	Path                      string        `yaml:"path"`
 	PathTemplates             []string      `yaml:"path_templates"`
 	MaxLabels                 int           `yaml:"max_labels"`
+	CommonLabels              []MetricLabel `yaml:"common_labels"`
 	GracefulTerminationPeriod time.Duration `yaml:"graceful_termination_period"`
 }
 
-type CommonMetricLabelSet struct {
-	CollectionID    string `yaml:"collection_id"`
-	CollectionIDEnv string `yaml:"collection_id_env"`
-	PlanID          string `yaml:"plan_id"`
-	PlanIDEnv       string `yaml:"plan_id_env"`
-	RunID           string `yaml:"run_id"`
-	RunIDEnv        string `yaml:"run_id_env"`
-	EngineNo        string `yaml:"engine_no"`
-	EngineNoEnv     string `yaml:"engine_no_env"`
-	Zone            string `yaml:"zone"`
-	ZoneEnv         string `yaml:"zone_env"`
-}
-
-type labelEnvSpec struct {
-	value     *string
-	configEnv string
+type MetricLabel struct {
+	Name  string `yaml:"name"`
+	Value string `yaml:"value"`
+	Env   string `yaml:"env"`
 }
 
 type TargetOverrideConfig struct {
@@ -181,21 +171,20 @@ func Default() Config {
 			Checkpoint: CheckpointConfig{},
 		},
 		Metrics: MetricsConfig{
-			Enabled:                   true,
-			ListenAddress:             "0.0.0.0:9102",
-			Path:                      "/metrics",
-			PathTemplates:             []string{},
-			MaxLabels:                 20,
+			Enabled:       true,
+			Namespace:     "replay",
+			ListenAddress: "0.0.0.0:9102",
+			Path:          "/metrics",
+			PathTemplates: []string{},
+			MaxLabels:     20,
+			CommonLabels: []MetricLabel{
+				{Name: "run_id", Value: "unknown", Env: "REPLAY_RUN_ID"},
+				{Name: "worker_id", Value: "0", Env: "REPLAY_WORKER_ID"},
+				{Name: "zone", Value: "unknown", Env: "REPLAY_ZONE"},
+			},
 			GracefulTerminationPeriod: 5 * time.Second,
 		},
-		Env: map[string]string{},
-		Labels: CommonMetricLabelSet{
-			CollectionID: "unknown",
-			PlanID:       "unknown",
-			RunID:        "unknown",
-			EngineNo:     "0",
-			Zone:         "unknown",
-		},
+		Env:    map[string]string{},
 		Target: TargetOverrideConfig{},
 		Header: HeaderRewriteConfig{Set: map[string]string{}},
 	}
@@ -253,16 +242,24 @@ func (c Config) Validate() error {
 	if c.Metrics.GracefulTerminationPeriod < 0 {
 		return errors.New("metrics.graceful_termination_period must be >= 0")
 	}
-
+	if c.Metrics.MaxLabels < 0 {
+		return errors.New("metrics.max_labels must be >= 0")
+	}
+	if c.Metrics.Namespace != "" && !isValidMetricLabelName(c.Metrics.Namespace) {
+		return errors.New("metrics.namespace must be a valid Prometheus metric namespace")
+	}
+	if err := validateMetricLabels(c.Metrics.CommonLabels); err != nil {
+		return err
+	}
 	if c.Metrics.Enabled {
+		if c.Metrics.Namespace == "" {
+			return errors.New("metrics.namespace is required")
+		}
 		if c.Metrics.Path == "" {
 			return errors.New("metrics.path is required")
 		}
 		if c.Metrics.ListenAddress == "" {
 			return errors.New("metrics.listen_address is required")
-		}
-		if c.Metrics.MaxLabels < 0 {
-			return errors.New("metrics.max_labels must be >= 0")
 		}
 	}
 	return nil
@@ -271,8 +268,7 @@ func (c Config) Validate() error {
 // ApplyEnv applies well-known environment variable overrides to the config.
 // Precedence order is: defaults -> YAML -> environment -> CLI (applied by caller).
 func (c *Config) ApplyEnv() {
-	c.applyLabelOverrides()
-
+	c.applyMetricLabelOverrides()
 	if v, ok := os.LookupEnv("REPLAY_DRY_RUN"); ok {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Replay.DryRun = b
@@ -312,6 +308,9 @@ func (c *Config) ApplyEnv() {
 			c.Metrics.GracefulTerminationPeriod = d
 		}
 	}
+	if v, ok := os.LookupEnv("METRICS_NAMESPACE"); ok && v != "" {
+		c.Metrics.Namespace = v
+	}
 
 	if v, ok := os.LookupEnv("REPLAY_PARTIAL_SUCCESS_EXIT_ZERO"); ok {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -320,19 +319,10 @@ func (c *Config) ApplyEnv() {
 	}
 }
 
-func (c *Config) applyLabelOverrides() {
-	for _, spec := range c.labelEnvSpecs() {
-		*spec.value = c.resolveLabelValue(*spec.value, spec.configEnv)
-	}
-}
-
-func (c *Config) labelEnvSpecs() []labelEnvSpec {
-	return []labelEnvSpec{
-		{value: &c.Labels.CollectionID, configEnv: c.Labels.CollectionIDEnv},
-		{value: &c.Labels.PlanID, configEnv: c.Labels.PlanIDEnv},
-		{value: &c.Labels.RunID, configEnv: c.Labels.RunIDEnv},
-		{value: &c.Labels.EngineNo, configEnv: c.Labels.EngineNoEnv},
-		{value: &c.Labels.Zone, configEnv: c.Labels.ZoneEnv},
+func (c *Config) applyMetricLabelOverrides() {
+	for i := range c.Metrics.CommonLabels {
+		label := &c.Metrics.CommonLabels[i]
+		label.Value = c.resolveLabelValue(label.Value, label.Env)
 	}
 }
 
@@ -344,6 +334,75 @@ func (c *Config) resolveLabelValue(currentValue, envKey string) string {
 		return value
 	}
 	return currentValue
+}
+
+func (m MetricsConfig) CommonLabelNames() []string {
+	names := make([]string, len(m.CommonLabels))
+	for i, label := range m.CommonLabels {
+		names[i] = label.Name
+	}
+	return names
+}
+
+func (m MetricsConfig) CommonLabelValues() []string {
+	values := make([]string, len(m.CommonLabels))
+	for i, label := range m.CommonLabels {
+		values[i] = label.Value
+	}
+	return values
+}
+
+func (m MetricsConfig) CommonLabelAttrs() []any {
+	attrs := make([]any, 0, len(m.CommonLabels)*2)
+	for _, label := range m.CommonLabels {
+		attrs = append(attrs, label.Name, label.Value)
+	}
+	return attrs
+}
+
+func validateMetricLabels(labels []MetricLabel) error {
+	seen := make(map[string]struct{}, len(labels))
+	for _, label := range labels {
+		if !isValidMetricLabelName(label.Name) {
+			return fmt.Errorf("metrics.common_labels contains invalid label name %q", label.Name)
+		}
+		if isReservedMetricLabel(label.Name) {
+			return fmt.Errorf("metrics.common_labels contains reserved label name %q", label.Name)
+		}
+		if _, ok := seen[label.Name]; ok {
+			return fmt.Errorf("metrics.common_labels contains duplicate label name %q", label.Name)
+		}
+		seen[label.Name] = struct{}{}
+	}
+	return nil
+}
+
+func isReservedMetricLabel(name string) bool {
+	if strings.HasPrefix(name, "__") {
+		return true
+	}
+	switch name {
+	case "label", "status", "le":
+		return true
+	default:
+		return false
+	}
+}
+
+func isValidMetricLabelName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			continue
+		}
+		if i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func lookupEnvValue(key string, fallbacks map[string]string) (string, bool) {

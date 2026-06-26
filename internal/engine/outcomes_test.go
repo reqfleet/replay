@@ -17,7 +17,7 @@ func TestOutcomeAggregation_DryRunSerialized(t *testing.T) {
 	cfg.Replay.DryRun = true
 	cfg.Replay.Lifecycle.RequireOpen = false
 
-	reg := metrics.New()
+	reg := metrics.New(cfg.Metrics)
 	e := New(cfg, reg)
 
 	requests := []model.Event{
@@ -72,7 +72,7 @@ func TestOutcomeAggregation_ValidationFailure(t *testing.T) {
 	cfg.Replay.Validation.Enabled = true
 	cfg.Replay.Validation.Status = true
 
-	reg := metrics.New()
+	reg := metrics.New(cfg.Metrics)
 	e := New(cfg, reg)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +117,7 @@ func TestOutcomeAggregation_SendError(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Lifecycle.RequireOpen = false
 
-	reg := metrics.New()
+	reg := metrics.New(cfg.Metrics)
 	e := New(cfg, reg)
 
 	// Missing path will cause buildRequestURL to error and be treated as send error
@@ -154,7 +154,7 @@ func TestOutcomeAggregation_HTTP2Multiplexed(t *testing.T) {
 	cfg.Replay.Lifecycle.RequireOpen = false
 	cfg.Replay.HTTP2.Mode = "multiplexed"
 
-	reg := metrics.New()
+	reg := metrics.New(cfg.Metrics)
 	e := New(cfg, reg)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

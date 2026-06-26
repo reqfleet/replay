@@ -380,21 +380,21 @@ Endpoint requirements:
 3. Endpoint SHOULD be enabled by default and bind address/port MUST be configurable.
 4. Endpoint MUST remain available during the full replay lifecycle, including startup and shutdown windows where feasible.
 
-Metric catalog:
+Metric catalog with the default `replay` namespace:
 
-* `shibuya_latency_label_milliseconds`
-* `shibuya_latency_label_milliseconds_bucket`
-* `shibuya_latency_label_milliseconds_sum`
-* `shibuya_latency_label_milliseconds_count`
-* `shibuya_status_counter`
-* `shibuya_egress_bytes_counter`
-* `shibuya_threads_gauge`
-* `shibuya_cpu_gauge`
-* `shibuya_mem_gauge`
+* `replay_latency_label_milliseconds`
+* `replay_latency_label_milliseconds_bucket`
+* `replay_latency_label_milliseconds_sum`
+* `replay_latency_label_milliseconds_count`
+* `replay_status_counter`
+* `replay_egress_bytes_counter`
+* `replay_threads_gauge`
+* `replay_cpu_gauge`
+* `replay_mem_gauge`
 
-Label conventions SHOULD follow engine metric definitions, including dimensions such as `collection_id`, `plan_id`, `run_id`, `engine_no`, `label`, `zone`, and metric-specific labels like `status` and `le`.
+Engine-specific integrations MAY configure a different Prometheus namespace and common label set. Label conventions SHOULD include configurable common dimensions plus metric-specific labels such as `label`, `status`, and `le`.
 
-For `shibuya_status_counter`, the `status` label MAY contain either a numeric HTTP status code or a synthetic transport status such as `timeout`, `connection_refused`, `connection_reset`, `tls`, `network`, or `send_error` when no HTTP response was received.
+For `replay_status_counter`, the `status` label MAY contain either a numeric HTTP status code or a synthetic transport status such as `timeout`, `connection_refused`, `connection_reset`, `tls`, `network`, or `send_error` when no HTTP response was received.
 
 ### 11.5 Runtime Configuration (YAML)
 
@@ -459,8 +459,19 @@ replay:
     file: "./checkpoint.json"
 metrics:
   enabled: true
+  namespace: "replay"
   listen_address: "0.0.0.0:9102"
   path: "/metrics"
+  common_labels:
+    - name: "run_id"
+      value: "unknown"
+      env: "REPLAY_RUN_ID"
+    - name: "worker_id"
+      value: "0"
+      env: "REPLAY_WORKER_ID"
+    - name: "zone"
+      value: "unknown"
+      env: "REPLAY_ZONE"
 env:
   TARGET_ENV: "staging"
   AUTH_MODE: "token-rewrite"

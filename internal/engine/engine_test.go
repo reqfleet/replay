@@ -116,7 +116,7 @@ func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	cfg.Replay.Retry.Backoff = "none"
 	cfg.Replay.Retry.RetryOnStatuses = []int{http.StatusServiceUnavailable}
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -161,7 +161,7 @@ func TestReplayMarksValidationFailedOnStatusMismatch(t *testing.T) {
 	cfg.Replay.Validation.Enabled = true
 	cfg.Replay.Validation.Status = true
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -201,7 +201,7 @@ func TestReplayTreatsConnectionRefusedAsPartialSuccess(t *testing.T) {
 	addr := closedLocalAddress(t)
 
 	cfg := config.Default()
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -271,7 +271,7 @@ func TestReplayEmitsSyntheticStatusForTransportSendErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.Default()
-			reg := metrics.New()
+			reg := metrics.New(cfg.Metrics)
 			authority, cleanup := tt.configure(t, &cfg)
 			defer cleanup()
 
@@ -301,13 +301,7 @@ func TestReplayEmitsSyntheticStatusForTransportSendErrors(t *testing.T) {
 				t.Fatalf("summary.Outcome = %s, want %s", got, want)
 			}
 			counter := reg.StatusCounter.WithLabelValues(
-				cfg.Labels.CollectionID,
-				cfg.Labels.PlanID,
-				cfg.Labels.RunID,
-				cfg.Labels.EngineNo,
-				"/transport",
-				cfg.Labels.Zone,
-				tt.wantStatus,
+				append(cfg.Metrics.CommonLabelValues(), "/transport", tt.wantStatus)...,
 			)
 			if got, want := testutil.ToFloat64(counter), float64(1); got != want {
 				t.Fatalf("status counter for %s = %v, want %v", tt.wantStatus, got, want)
@@ -336,7 +330,7 @@ func TestReplayHeaderValidationIgnoresConfiguredHeaders(t *testing.T) {
 	cfg.Replay.Validation.Headers = true
 	cfg.Replay.Validation.IgnoreHeaders = []string{"x-request-id"}
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -406,7 +400,7 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 	cfg.Replay.Validation.Status = true
 	cfg.Replay.Validation.Body = true
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -449,7 +443,7 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 func TestFinishRequestSuccessDoesNotRetainDetailsWhenValidationDisabled(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Validation.Enabled = false
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
 	req := model.Event{Type: model.EventRequest, ConnectionID: 1, Sequence: 1}
 
@@ -480,7 +474,7 @@ func TestReplaySkipsMutationWithoutIdempotencyHeader(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -529,7 +523,7 @@ func TestReplayAllowsImplicitLifecycleCloseAtEOF(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -597,7 +591,7 @@ func TestReplayRespectsShardAssignment(t *testing.T) {
 		}
 	}
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	summary, err := runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
@@ -627,7 +621,7 @@ func TestRouteEventsSkipsNonShardEventsBeforeLifecycleTracking(t *testing.T) {
 		t.Fatal("setup failed: could not find connection outside shard")
 	}
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := make(chan model.Event, 1)
 	events <- model.Event{
 		Type:         model.EventRequest,
@@ -654,7 +648,7 @@ func TestRouteEventsSkipsNonShardEventsBeforeLifecycleTracking(t *testing.T) {
 func TestRouteEventsSendsCloseToOwningWorker(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.MaxVirtualUsersPerEngine = 2
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 
 	events := make(chan model.Event, 3)
 	events <- model.Event{Type: model.EventConnectionOpen, ConnectionID: 1}
@@ -711,7 +705,7 @@ func TestReplayZeroRampupStartsAllWorkersImmediately(t *testing.T) {
 	cfg.Replay.RampupDuration = 0
 	cfg.Replay.Idempotency.Enabled = false
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	resultCh := runReplayAsync(eng, rampupTestEvents(target, 3))
 
 	waitForRequestStarts(t, startCh, 3, 100*time.Millisecond)
@@ -755,7 +749,7 @@ func TestReplayRampupStagesWorkerActivation(t *testing.T) {
 	cfg.Replay.RampupDuration = 300 * time.Millisecond
 	cfg.Replay.Idempotency.Enabled = false
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	resultCh := runReplayAsync(eng, rampupTestEvents(target, 3))
 
 	waitForRequestStarts(t, startCh, 1, 150*time.Millisecond)
@@ -799,7 +793,7 @@ func TestReplayGroupsSameConnectionIDByNode(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Idempotency.Enabled = false
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, Node: "envoy-a", ConnectionID: 1},
@@ -853,7 +847,7 @@ func TestReplaySkipsAlreadyCheckpointedSequence(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Checkpoint.File = checkpointPath
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -913,7 +907,7 @@ func TestReplayHTTP2SerializedMode(t *testing.T) {
 	cfg.Replay.HTTP2.Mode = "serialized"
 	cfg.Replay.Idempotency.Enabled = false
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -966,7 +960,7 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 	cfg.Replay.TLS.InsecureSkipVerify = true
 	cfg.Replay.Idempotency.Enabled = false
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -1033,7 +1027,7 @@ func TestReplayHTTP2CheckpointWaitsForEarlierInFlightRequest(t *testing.T) {
 	cfg.Replay.Idempotency.Enabled = false
 	cfg.Replay.Checkpoint.File = checkpointPath
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -1120,7 +1114,7 @@ func TestReplayHTTP2PacingUsesConnectionOrderWithUniqueStreamIDs(t *testing.T) {
 	cfg.Replay.Pacing.Enabled = true
 	cfg.Replay.Pacing.MaxSleepDelta = 200 * time.Millisecond
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -1167,7 +1161,7 @@ func TestPerConnectionSocketOwnership(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Idempotency.Enabled = false
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -1211,7 +1205,7 @@ func TestDryRunNoNetwork(t *testing.T) {
 	cfg.Replay.DryRun = true
 	cfg.Replay.Idempotency.Enabled = false
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -1255,7 +1249,7 @@ func TestOverrideHostRewrite(t *testing.T) {
 	cfg.Target.OverrideURL = srv.URL
 	cfg.Replay.Idempotency.Enabled = false
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -1292,7 +1286,7 @@ func TestOverrideURLPreservesQueryString(t *testing.T) {
 	cfg.Target.OverrideURL = srv.URL
 	cfg.Replay.Idempotency.Enabled = false
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -1363,7 +1357,7 @@ func TestNewEngineAbsoluteURLValidation(t *testing.T) {
 			cfg := config.Default()
 			cfg.Target.OverrideURL = tt.overrideURL
 
-			eng := New(cfg, metrics.New())
+			eng := New(cfg, metrics.New(cfg.Metrics))
 			if tt.expectValid {
 				if eng.parsedOverrideURL == nil {
 					t.Errorf("expected parsedOverrideURL to be non-nil for URL %q", tt.overrideURL)
@@ -1417,7 +1411,7 @@ func TestReplayStreamCancelsInFlightRequestOnRouteError(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Timeout.Request = 2 * time.Second
 	cfg.Replay.Idempotency.Enabled = false
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 
 	events := make(chan model.Event)
 	resultCh := make(chan replayResult, 1)
@@ -1493,7 +1487,7 @@ func TestReplayAbortsConnectionAfterSendError(t *testing.T) {
 	cfg.Replay.Idempotency.Enabled = false
 	cfg.Replay.Lifecycle.RequireOpen = false
 
-	eng := New(cfg, metrics.New())
+	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},

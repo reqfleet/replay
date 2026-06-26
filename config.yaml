@@ -36,20 +36,20 @@ replay:
 
 metrics:
   enabled: true
+  namespace: "replay"
   listen_address: "0.0.0.0:9102"
   path: "/metrics"
   max_labels: 20
-
-env:
-  TARGET_ENV: "staging"
-  AUTH_MODE: "token-rewrite"
-
-labels:
-  collection_id_env: "collection_id"
-  plan_id_env: "plan_id"
-  run_id_env: "run_id"
-  engine_no_env: "engine_no"
-  zone_env: "zone"
+  common_labels:
+    - name: "run_id"
+      value: "unknown"
+      env: "REPLAY_RUN_ID"
+    - name: "worker_id"
+      value: "0"
+      env: "REPLAY_WORKER_ID"
+    - name: "zone"
+      value: "unknown"
+      env: "REPLAY_ZONE"
 
 target:
   override_url: ""
