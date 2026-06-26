@@ -28,7 +28,6 @@ type checkpointStore struct {
 	dirReady  bool
 
 	// Batched persistence
-	flushCh       chan struct{}
 	closeCh       chan struct{}
 	wg            sync.WaitGroup
 	flushInterval time.Duration
@@ -82,7 +81,6 @@ func newCheckpointStoreWithInterval(path string, flushInterval time.Duration) *c
 			Version:     1,
 			Connections: map[model.ConnectionKey]int{},
 		},
-		flushCh:       make(chan struct{}, 1),
 		closeCh:       make(chan struct{}),
 		flushInterval: flushInterval,
 	}
@@ -133,11 +131,6 @@ func (c *checkpointStore) markProcessed(connectionKey model.ConnectionKey, seque
 		return c.persist()
 	}
 
-	// signal flusher (non-blocking)
-	select {
-	case c.flushCh <- struct{}{}:
-	default:
-	}
 	return nil
 }
 
@@ -205,9 +198,6 @@ func (c *checkpointStore) flusher() {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-c.flushCh:
-			// Wake-up only. Updates are intentionally coalesced until the next
-			// tick or Close instead of forcing one write+rename per request.
 		case <-ticker.C:
 			if err := c.persist(); err != nil {
 				fmt.Fprintf(os.Stderr, "checkpoint persist failed: %v\n", err)
