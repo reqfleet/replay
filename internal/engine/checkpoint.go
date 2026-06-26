@@ -22,6 +22,11 @@ type checkpointStore struct {
 	mu   sync.Mutex
 	path string
 	data checkpointData
+
+	persistMu sync.Mutex
+	dirty     bool
+	dirReady  bool
+
 	// Batched persistence
 	flushCh       chan struct{}
 	closeCh       chan struct{}
@@ -35,16 +40,7 @@ func newCheckpointStore(path string) (*checkpointStore, error) {
 	if path == "" {
 		return nil, nil
 	}
-	store := &checkpointStore{
-		path: path,
-		data: checkpointData{
-			Version:     1,
-			Connections: map[model.ConnectionKey]int{},
-		},
-		flushCh:       make(chan struct{}, 1),
-		closeCh:       make(chan struct{}),
-		flushInterval: time.Second,
-	}
+	store := newCheckpointStoreWithInterval(path, time.Second)
 
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -74,6 +70,22 @@ func newCheckpointStore(path string) (*checkpointStore, error) {
 	// start background flusher
 	store.wg.Go(store.flusher)
 	return store, nil
+}
+
+func newCheckpointStoreWithInterval(path string, flushInterval time.Duration) *checkpointStore {
+	if flushInterval <= 0 {
+		flushInterval = time.Second
+	}
+	return &checkpointStore{
+		path: path,
+		data: checkpointData{
+			Version:     1,
+			Connections: map[model.ConnectionKey]int{},
+		},
+		flushCh:       make(chan struct{}, 1),
+		closeCh:       make(chan struct{}),
+		flushInterval: flushInterval,
+	}
 }
 
 func (c *checkpointStore) alreadyProcessed(connectionKey model.ConnectionKey, sequence int) bool {
@@ -108,21 +120,18 @@ func (c *checkpointStore) markProcessed(connectionKey model.ConnectionKey, seque
 	}
 	c.data.Connections[connectionKey] = sequence
 	c.data.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	c.mu.Unlock()
-
-	// If we haven't yet persisted anything to disk, do a synchronous
-	// persist on the first update so callers that expect immediate
-	// on-disk checkpoints (tests, short-lived runs) see the file.
-	c.mu.Lock()
-	if !c.persistedOnce {
+	c.dirty = true
+	needsInitialPersist := !c.persistedOnce
+	if needsInitialPersist {
 		c.persistedOnce = true
-		c.mu.Unlock()
-		if err := c.persist(); err != nil {
-			return err
-		}
-		return nil
 	}
 	c.mu.Unlock()
+
+	// Persist the first update synchronously so callers that expect immediate
+	// on-disk checkpoints (tests, short-lived runs) see the file.
+	if needsInitialPersist {
+		return c.persist()
+	}
 
 	// signal flusher (non-blocking)
 	select {
@@ -132,37 +141,62 @@ func (c *checkpointStore) markProcessed(connectionKey model.ConnectionKey, seque
 	return nil
 }
 
-// persist writes the current checkpoint data to disk atomically.
+// persist writes dirty checkpoint data to disk atomically.
 func (c *checkpointStore) persist() error {
 	if c == nil || c.path == "" {
 		return nil
 	}
-	// make a copy of the data while holding the lock to avoid races.
+
+	c.persistMu.Lock()
+	defer c.persistMu.Unlock()
+
 	c.mu.Lock()
+	if !c.dirty {
+		c.mu.Unlock()
+		return nil
+	}
+	c.dirty = false
 	copyData := checkpointData{
 		Version:     c.data.Version,
 		UpdatedAt:   c.data.UpdatedAt,
 		Connections: make(map[model.ConnectionKey]int, len(c.data.Connections)),
 	}
 	maps.Copy(copyData.Connections, c.data.Connections)
+	dirReady := c.dirReady
 	c.mu.Unlock()
 
-	payload, err := json.MarshalIndent(copyData, "", "  ")
+	payload, err := json.Marshal(copyData)
 	if err != nil {
+		c.markPersistencePending()
 		return fmt.Errorf("marshal checkpoint: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
-		return fmt.Errorf("prepare checkpoint dir: %w", err)
+	if !dirReady {
+		if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
+			c.markPersistencePending()
+			return fmt.Errorf("prepare checkpoint dir: %w", err)
+		}
+		c.mu.Lock()
+		c.dirReady = true
+		c.mu.Unlock()
 	}
+
 	tmpPath := c.path + ".tmp"
 	if err := os.WriteFile(tmpPath, payload, 0o644); err != nil {
+		c.markPersistencePending()
 		return fmt.Errorf("write checkpoint tmp: %w", err)
 	}
 	if err := os.Rename(tmpPath, c.path); err != nil {
+		c.markPersistencePending()
 		return fmt.Errorf("replace checkpoint: %w", err)
 	}
 	return nil
+}
+
+func (c *checkpointStore) markPersistencePending() {
+	c.mu.Lock()
+	c.dirty = true
+	c.mu.Unlock()
 }
 
 // flusher runs in background and periodically persists queued updates.
@@ -172,9 +206,8 @@ func (c *checkpointStore) flusher() {
 	for {
 		select {
 		case <-c.flushCh:
-			if err := c.persist(); err != nil {
-				fmt.Fprintf(os.Stderr, "checkpoint persist failed: %v\n", err)
-			}
+			// Wake-up only. Updates are intentionally coalesced until the next
+			// tick or Close instead of forcing one write+rename per request.
 		case <-ticker.C:
 			if err := c.persist(); err != nil {
 				fmt.Fprintf(os.Stderr, "checkpoint persist failed: %v\n", err)
