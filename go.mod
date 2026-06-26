@@ -1,11 +1,12 @@
 module github.com/reqfleet/replay
 
-go 1.25.0
+go 1.25.7
 
 require (
 	github.com/goccy/go-yaml v1.19.2
 	github.com/klauspost/compress v1.18.5
 	github.com/prometheus/client_golang v1.22.0
+	github.com/reqfleet/containerstats v0.0.0-20260417075844-7a6254b7c70b
 )
 
 require (

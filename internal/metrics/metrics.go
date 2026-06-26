@@ -8,6 +8,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/reqfleet/containerstats"
 	"github.com/reqfleet/replay/internal/config"
 )
 
@@ -54,12 +55,12 @@ func New(cfg config.MetricsConfig) *Registry {
 		CPU: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,
 			Name:      "cpu_gauge",
-			Help:      "Logical CPUs available to the process (not CPU utilization)",
+			Help:      "Container CPU usage delta per interval when running in a cgroup; host logical CPU count otherwise",
 		}, commonLabels),
 		Mem: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,
 			Name:      "mem_gauge",
-			Help:      "Memory used by engine",
+			Help:      "Container memory usage when running in a cgroup; Go heap allocation otherwise",
 		}, commonLabels),
 		r:          r,
 		seenLabels: make(map[string]struct{}),
@@ -134,23 +135,24 @@ func (r *Registry) RecordStatus(commonLabelValues []string, label string, status
 }
 
 // StartRuntimeCollection starts a background goroutine that updates runtime
-// metrics (memory and a CPU proxy) for the provided labels at the given
-// interval. It returns a stop function that cancels the collector.
+// metrics for the provided labels at the given interval. It returns a stop
+// function that cancels the collector.
 func (r *Registry) StartRuntimeCollection(commonLabelValues []string, interval time.Duration) func() {
 	if interval <= 0 {
 		interval = time.Second * 5
 	}
+	collector := newRuntimeMetricsCollector(interval)
 	ticker := time.NewTicker(interval)
 	done := make(chan struct{})
 	go func() {
-		var m runtime.MemStats
 		for {
 			select {
 			case <-ticker.C:
-				runtime.ReadMemStats(&m)
-				r.Mem.WithLabelValues(commonLabelValues...).Set(float64(m.Alloc))
-				// CPU: report number of CPUs as a proxy to avoid OS-specific code.
-				r.CPU.WithLabelValues(commonLabelValues...).Set(float64(runtime.NumCPU()))
+				metrics := collector.snapshot()
+				if metrics.setCPU {
+					r.CPU.WithLabelValues(commonLabelValues...).Set(metrics.cpu)
+				}
+				r.Mem.WithLabelValues(commonLabelValues...).Set(metrics.memory)
 			case <-done:
 				ticker.Stop()
 				return
@@ -158,6 +160,78 @@ func (r *Registry) StartRuntimeCollection(commonLabelValues []string, interval t
 		}
 	}()
 	return func() { close(done) }
+}
+
+type runtimeStatReader func() (uint64, error)
+
+type runtimeMetricsCollector struct {
+	readContainerCPU    runtimeStatReader
+	readContainerMemory runtimeStatReader
+	readHostMemory      func() uint64
+	readHostCPU         func() int
+	interval            time.Duration
+	previousCPUUsage    uint64
+}
+
+type runtimeMetrics struct {
+	cpu    float64
+	memory float64
+	setCPU bool
+}
+
+func newRuntimeMetricsCollector(interval time.Duration) *runtimeMetricsCollector {
+	return &runtimeMetricsCollector{
+		readContainerCPU:    containerstats.ReadCPUUsage,
+		readContainerMemory: containerstats.ReadMemoryUsage,
+		readHostMemory:      readHostMemoryAlloc,
+		readHostCPU:         runtime.NumCPU,
+		interval:            interval,
+	}
+}
+
+func (c *runtimeMetricsCollector) snapshot() runtimeMetrics {
+	cpu, setCPU := c.cpuUsage()
+	return runtimeMetrics{
+		cpu:    float64(cpu),
+		memory: float64(c.memoryUsage()),
+		setCPU: setCPU,
+	}
+}
+
+func (c *runtimeMetricsCollector) cpuUsage() (uint64, bool) {
+	cpuUsage, err := c.readContainerCPU()
+	if err != nil {
+		return uint64(c.readHostCPU()), true
+	}
+	if c.previousCPUUsage == 0 || cpuUsage < c.previousCPUUsage {
+		c.previousCPUUsage = cpuUsage
+		return 0, false
+	}
+
+	used := calculateCPUUsage(cpuUsage, c.previousCPUUsage, c.interval)
+	c.previousCPUUsage = cpuUsage
+	return used, true
+}
+
+func (c *runtimeMetricsCollector) memoryUsage() uint64 {
+	memory, err := c.readContainerMemory()
+	if err != nil {
+		return c.readHostMemory()
+	}
+	return memory
+}
+
+func calculateCPUUsage(cpuUsage, previousCPUUsage uint64, interval time.Duration) uint64 {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	return (cpuUsage - previousCPUUsage) * uint64(time.Second) / uint64(interval) / 1000
+}
+
+func readHostMemoryAlloc() uint64 {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.Alloc
 }
 
 func appendLabels(commonLabels []string, names ...string) []string {

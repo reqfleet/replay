@@ -1,10 +1,12 @@
 package metrics
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/reqfleet/replay/internal/config"
 )
@@ -61,5 +63,128 @@ func TestRegistryUsesConfiguredNamespaceAndCommonLabels(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics body missing %q:\n%s", want, body)
 		}
+	}
+}
+
+func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
+	errCgroupUnavailable := errors.New("cgroup unavailable")
+	tests := []struct {
+		name                string
+		containerCPU        []uint64
+		containerCPUErr     []error
+		containerMemory     uint64
+		containerMemoryErr  error
+		hostCPU             int
+		hostMemory          uint64
+		wantCPU             []float64
+		wantSetCPU          []bool
+		wantMemory          float64
+		wantHostCPUCalls    int
+		wantHostMemoryCalls int
+	}{
+		{
+			name:            "container_stats_available",
+			containerCPU:    []uint64{1000, 11_000},
+			containerMemory: 34,
+			hostCPU:         8,
+			hostMemory:      1024,
+			wantCPU:         []float64{0, 10},
+			wantSetCPU:      []bool{false, true},
+			wantMemory:      34,
+		},
+		{
+			name:                "cgroup_unavailable",
+			containerCPUErr:     []error{errCgroupUnavailable},
+			containerMemoryErr:  errCgroupUnavailable,
+			hostCPU:             8,
+			hostMemory:          1024,
+			wantCPU:             []float64{8},
+			wantSetCPU:          []bool{true},
+			wantMemory:          1024,
+			wantHostCPUCalls:    1,
+			wantHostMemoryCalls: 1,
+		},
+		{
+			name:             "cpu_cgroup_unavailable",
+			containerCPUErr:  []error{errCgroupUnavailable},
+			containerMemory:  2048,
+			hostCPU:          6,
+			hostMemory:       1024,
+			wantCPU:          []float64{6},
+			wantSetCPU:       []bool{true},
+			wantMemory:       2048,
+			wantHostCPUCalls: 1,
+		},
+		{
+			name:                "memory_cgroup_unavailable",
+			containerCPU:        []uint64{99},
+			containerMemoryErr:  errCgroupUnavailable,
+			hostCPU:             6,
+			hostMemory:          4096,
+			wantCPU:             []float64{0},
+			wantSetCPU:          []bool{false},
+			wantMemory:          4096,
+			wantHostMemoryCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hostCPUCalls := 0
+			hostMemoryCalls := 0
+			cpuReads := 0
+
+			collector := &runtimeMetricsCollector{
+				readContainerCPU: func() (uint64, error) {
+					defer func() { cpuReads++ }()
+					var value uint64
+					if cpuReads < len(tt.containerCPU) {
+						value = tt.containerCPU[cpuReads]
+					}
+					if cpuReads < len(tt.containerCPUErr) {
+						return value, tt.containerCPUErr[cpuReads]
+					}
+					return value, nil
+				},
+				readContainerMemory: func() (uint64, error) {
+					return tt.containerMemory, tt.containerMemoryErr
+				},
+				readHostMemory: func() uint64 {
+					hostMemoryCalls++
+					return tt.hostMemory
+				},
+				readHostCPU: func() int {
+					hostCPUCalls++
+					return tt.hostCPU
+				},
+				interval: time.Second,
+			}
+
+			for i := range tt.wantCPU {
+				got := collector.snapshot()
+				if got.cpu != tt.wantCPU[i] {
+					t.Errorf("runtimeMetricsCollector.snapshot(%s, tick %d) CPU = %v, want %v", tt.name, i, got.cpu, tt.wantCPU[i])
+				}
+				if got.setCPU != tt.wantSetCPU[i] {
+					t.Errorf("runtimeMetricsCollector.snapshot(%s, tick %d) setCPU = %t, want %t", tt.name, i, got.setCPU, tt.wantSetCPU[i])
+				}
+				if got.memory != tt.wantMemory {
+					t.Errorf("runtimeMetricsCollector.snapshot(%s, tick %d) memory = %v, want %v", tt.name, i, got.memory, tt.wantMemory)
+				}
+			}
+			if hostCPUCalls != tt.wantHostCPUCalls {
+				t.Errorf("runtimeMetricsCollector.snapshot(%s) host CPU calls = %d, want %d", tt.name, hostCPUCalls, tt.wantHostCPUCalls)
+			}
+			if hostMemoryCalls != tt.wantHostMemoryCalls {
+				t.Errorf("runtimeMetricsCollector.snapshot(%s) host memory calls = %d, want %d", tt.name, hostMemoryCalls, tt.wantHostMemoryCalls)
+			}
+		})
+	}
+}
+
+func TestCalculateCPUUsage(t *testing.T) {
+	got := calculateCPUUsage(51_000, 1_000, 5*time.Second)
+	if got != 10 {
+		t.Errorf("calculateCPUUsage(51000, 1000, 5s) = %d, want 10", got)
 	}
 }
