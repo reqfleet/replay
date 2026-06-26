@@ -93,6 +93,16 @@ func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 			wantMemory:      34,
 		},
 		{
+			name:            "initial_zero_cpu_usage",
+			containerCPU:    []uint64{0, 10_000},
+			containerMemory: 34,
+			hostCPU:         8,
+			hostMemory:      1024,
+			wantCPU:         []float64{0, 10},
+			wantSetCPU:      []bool{false, true},
+			wantMemory:      34,
+		},
+		{
 			name:                "cgroup_unavailable",
 			containerCPUErr:     []error{errCgroupUnavailable},
 			containerMemoryErr:  errCgroupUnavailable,

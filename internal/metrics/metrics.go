@@ -171,6 +171,7 @@ type runtimeMetricsCollector struct {
 	readHostCPU         func() int
 	interval            time.Duration
 	previousCPUUsage    uint64
+	cpuInitialized      bool
 }
 
 type runtimeMetrics struct {
@@ -203,8 +204,9 @@ func (c *runtimeMetricsCollector) cpuUsage() (uint64, bool) {
 	if err != nil {
 		return uint64(c.readHostCPU()), true
 	}
-	if c.previousCPUUsage == 0 || cpuUsage < c.previousCPUUsage {
+	if !c.cpuInitialized || cpuUsage < c.previousCPUUsage {
 		c.previousCPUUsage = cpuUsage
+		c.cpuInitialized = true
 		return 0, false
 	}
 
@@ -225,7 +227,7 @@ func calculateCPUUsage(cpuUsage, previousCPUUsage uint64, interval time.Duration
 	if interval <= 0 {
 		interval = time.Second
 	}
-	return (cpuUsage - previousCPUUsage) * uint64(time.Second) / uint64(interval) / 1000
+	return (cpuUsage - previousCPUUsage) * uint64(time.Millisecond) / uint64(interval)
 }
 
 func readHostMemoryAlloc() uint64 {
