@@ -214,6 +214,7 @@ func (c *runtimeMetricsCollector) snapshot() runtimeMetrics {
 func (c *runtimeMetricsCollector) cpuUsage() (float64, bool) {
 	cpuUsage, err := c.readContainerCPU()
 	if err != nil {
+		c.cpuInitialized = false
 		return c.hostCPUUsage()
 	}
 	if !c.cpuInitialized || cpuUsage < c.previousCPUUsage {
@@ -230,6 +231,7 @@ func (c *runtimeMetricsCollector) cpuUsage() (float64, bool) {
 func (c *runtimeMetricsCollector) hostCPUUsage() (float64, bool) {
 	cpuUsage, ok := c.readHostCPU()
 	if !ok {
+		c.hostCPUInitialized = false
 		return 0, false
 	}
 	if !c.hostCPUInitialized || cpuUsage < c.previousHostCPUUsage {
