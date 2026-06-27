@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -58,7 +59,7 @@ func New(cfg config.MetricsConfig) *Registry {
 		CPU: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,
 			Name:      "cpu_gauge",
-			Help:      "Container CPU cores used when running in a cgroup; host logical CPU count otherwise",
+			Help:      "CPU cores used by the container when running in a cgroup; process CPU cores used otherwise",
 		}, commonLabels),
 		Mem: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,
@@ -168,14 +169,16 @@ func (r *Registry) StartRuntimeCollection(commonLabelValues []string, interval t
 type runtimeStatReader func() (uint64, error)
 
 type runtimeMetricsCollector struct {
-	readContainerCPU    runtimeStatReader
-	readContainerMemory runtimeStatReader
-	readHostMemory      func() uint64
-	readHostCPU         func() int
-	interval            time.Duration
-	cpuUsageUnit        time.Duration
-	previousCPUUsage    uint64
-	cpuInitialized      bool
+	readContainerCPU     runtimeStatReader
+	readContainerMemory  runtimeStatReader
+	readHostMemory       func() uint64
+	readHostCPU          func() (time.Duration, error)
+	interval             time.Duration
+	cpuUsageUnit         time.Duration
+	previousCPUUsage     uint64
+	cpuInitialized       bool
+	previousHostCPUUsage time.Duration
+	hostCPUInitialized   bool
 }
 
 type runtimeMetrics struct {
@@ -189,7 +192,7 @@ func newRuntimeMetricsCollector(interval time.Duration) *runtimeMetricsCollector
 		readContainerCPU:    containerstats.ReadCPUUsage,
 		readContainerMemory: containerstats.ReadMemoryUsage,
 		readHostMemory:      readHostMemoryAlloc,
-		readHostCPU:         runtime.NumCPU,
+		readHostCPU:         readHostCPUTime,
 		interval:            interval,
 		cpuUsageUnit:        detectContainerCPUUsageUnit(),
 	}
@@ -207,7 +210,7 @@ func (c *runtimeMetricsCollector) snapshot() runtimeMetrics {
 func (c *runtimeMetricsCollector) cpuUsage() (float64, bool) {
 	cpuUsage, err := c.readContainerCPU()
 	if err != nil {
-		return float64(c.readHostCPU()), true
+		return c.hostCPUUsage()
 	}
 	if !c.cpuInitialized || cpuUsage < c.previousCPUUsage {
 		c.previousCPUUsage = cpuUsage
@@ -217,6 +220,22 @@ func (c *runtimeMetricsCollector) cpuUsage() (float64, bool) {
 
 	used := calculateCPUUsage(cpuUsage, c.previousCPUUsage, c.interval, c.cpuUsageUnit)
 	c.previousCPUUsage = cpuUsage
+	return used, true
+}
+
+func (c *runtimeMetricsCollector) hostCPUUsage() (float64, bool) {
+	cpuUsage, err := c.readHostCPU()
+	if err != nil {
+		return 0, false
+	}
+	if !c.hostCPUInitialized || cpuUsage < c.previousHostCPUUsage {
+		c.previousHostCPUUsage = cpuUsage
+		c.hostCPUInitialized = true
+		return 0, false
+	}
+
+	used := calculateCPUUsageDuration(cpuUsage, c.previousHostCPUUsage, c.interval)
+	c.previousHostCPUUsage = cpuUsage
 	return used, true
 }
 
@@ -235,7 +254,14 @@ func calculateCPUUsage(cpuUsage, previousCPUUsage uint64, interval, usageUnit ti
 	if usageUnit <= 0 {
 		usageUnit = time.Microsecond
 	}
-	return float64(cpuUsage-previousCPUUsage) * float64(usageUnit) / float64(interval)
+	return calculateCPUUsageDuration(time.Duration(cpuUsage-previousCPUUsage)*usageUnit, 0, interval)
+}
+
+func calculateCPUUsageDuration(cpuUsage, previousCPUUsage, interval time.Duration) float64 {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	return float64(cpuUsage-previousCPUUsage) / float64(interval)
 }
 
 func detectContainerCPUUsageUnit() time.Duration {
@@ -249,6 +275,18 @@ func readHostMemoryAlloc() uint64 {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return m.Alloc
+}
+
+func readHostCPUTime() (time.Duration, error) {
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+		return 0, err
+	}
+	return timevalDuration(usage.Utime) + timevalDuration(usage.Stime), nil
+}
+
+func timevalDuration(tv syscall.Timeval) time.Duration {
+	return time.Duration(tv.Sec)*time.Second + time.Duration(tv.Usec)*time.Microsecond
 }
 
 func appendLabels(commonLabels []string, names ...string) []string {
