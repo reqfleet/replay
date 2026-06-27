@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	runtimemetrics "runtime/metrics"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -14,7 +14,11 @@ import (
 	"github.com/reqfleet/replay/internal/config"
 )
 
-const cgroupV2ControllersPath = "/sys/fs/cgroup/cgroup.controllers"
+const (
+	cgroupV2ControllersPath = "/sys/fs/cgroup/cgroup.controllers"
+	hostCPUTotalMetric      = "/cpu/classes/total:cpu-seconds"
+	hostCPUIdleMetric       = "/cpu/classes/idle:cpu-seconds"
+)
 
 type Registry struct {
 	LabelLatencyHistogram *prometheus.HistogramVec
@@ -172,12 +176,12 @@ type runtimeMetricsCollector struct {
 	readContainerCPU     runtimeStatReader
 	readContainerMemory  runtimeStatReader
 	readHostMemory       func() uint64
-	readHostCPU          func() (time.Duration, error)
+	readHostCPU          func() (float64, bool)
 	interval             time.Duration
 	cpuUsageUnit         time.Duration
 	previousCPUUsage     uint64
 	cpuInitialized       bool
-	previousHostCPUUsage time.Duration
+	previousHostCPUUsage float64
 	hostCPUInitialized   bool
 }
 
@@ -192,7 +196,7 @@ func newRuntimeMetricsCollector(interval time.Duration) *runtimeMetricsCollector
 		readContainerCPU:    containerstats.ReadCPUUsage,
 		readContainerMemory: containerstats.ReadMemoryUsage,
 		readHostMemory:      readHostMemoryAlloc,
-		readHostCPU:         readHostCPUTime,
+		readHostCPU:         readHostCPUSeconds,
 		interval:            interval,
 		cpuUsageUnit:        detectContainerCPUUsageUnit(),
 	}
@@ -224,8 +228,8 @@ func (c *runtimeMetricsCollector) cpuUsage() (float64, bool) {
 }
 
 func (c *runtimeMetricsCollector) hostCPUUsage() (float64, bool) {
-	cpuUsage, err := c.readHostCPU()
-	if err != nil {
+	cpuUsage, ok := c.readHostCPU()
+	if !ok {
 		return 0, false
 	}
 	if !c.hostCPUInitialized || cpuUsage < c.previousHostCPUUsage {
@@ -234,7 +238,7 @@ func (c *runtimeMetricsCollector) hostCPUUsage() (float64, bool) {
 		return 0, false
 	}
 
-	used := calculateCPUUsageDuration(cpuUsage, c.previousHostCPUUsage, c.interval)
+	used := calculateCPUUsageSeconds(cpuUsage, c.previousHostCPUUsage, c.interval)
 	c.previousHostCPUUsage = cpuUsage
 	return used, true
 }
@@ -264,6 +268,13 @@ func calculateCPUUsageDuration(cpuUsage, previousCPUUsage, interval time.Duratio
 	return float64(cpuUsage-previousCPUUsage) / float64(interval)
 }
 
+func calculateCPUUsageSeconds(cpuUsage, previousCPUUsage float64, interval time.Duration) float64 {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	return (cpuUsage - previousCPUUsage) / interval.Seconds()
+}
+
 func detectContainerCPUUsageUnit() time.Duration {
 	if _, err := os.Stat(cgroupV2ControllersPath); err == nil {
 		return time.Microsecond
@@ -277,16 +288,29 @@ func readHostMemoryAlloc() uint64 {
 	return m.Alloc
 }
 
-func readHostCPUTime() (time.Duration, error) {
-	var usage syscall.Rusage
-	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
-		return 0, err
+func readHostCPUSeconds() (float64, bool) {
+	samples := []runtimemetrics.Sample{
+		{Name: hostCPUTotalMetric},
+		{Name: hostCPUIdleMetric},
 	}
-	return timevalDuration(usage.Utime) + timevalDuration(usage.Stime), nil
+	runtimemetrics.Read(samples)
+
+	total, ok := runtimeMetricFloat64(samples[0])
+	if !ok {
+		return 0, false
+	}
+	idle, ok := runtimeMetricFloat64(samples[1])
+	if !ok || idle > total {
+		return 0, false
+	}
+	return total - idle, true
 }
 
-func timevalDuration(tv syscall.Timeval) time.Duration {
-	return time.Duration(tv.Sec)*time.Second + time.Duration(tv.Usec)*time.Microsecond
+func runtimeMetricFloat64(sample runtimemetrics.Sample) (float64, bool) {
+	if sample.Value.Kind() != runtimemetrics.KindFloat64 {
+		return 0, false
+	}
+	return sample.Value.Float64(), true
 }
 
 func appendLabels(commonLabels []string, names ...string) []string {

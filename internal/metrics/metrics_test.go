@@ -74,8 +74,8 @@ func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 		containerCPUErr     []error
 		containerMemory     uint64
 		containerMemoryErr  error
-		hostCPU             []time.Duration
-		hostCPUErr          []error
+		hostCPU             []float64
+		hostCPUOK           []bool
 		hostMemory          uint64
 		cpuUsageUnit        time.Duration
 		wantCPU             []float64
@@ -89,7 +89,7 @@ func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 			containerCPU:    []uint64{1000, 3_501_000},
 			containerMemory: 34,
 			cpuUsageUnit:    time.Microsecond,
-			hostCPU:         []time.Duration{8 * time.Second},
+			hostCPU:         []float64{8},
 			hostMemory:      1024,
 			wantCPU:         []float64{0, 3.5},
 			wantSetCPU:      []bool{false, true},
@@ -100,7 +100,7 @@ func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 			containerCPU:    []uint64{0, 3_500_000},
 			containerMemory: 34,
 			cpuUsageUnit:    time.Microsecond,
-			hostCPU:         []time.Duration{8 * time.Second},
+			hostCPU:         []float64{8},
 			hostMemory:      1024,
 			wantCPU:         []float64{0, 3.5},
 			wantSetCPU:      []bool{false, true},
@@ -110,7 +110,7 @@ func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 			name:                "cgroup_unavailable",
 			containerCPUErr:     []error{errCgroupUnavailable, errCgroupUnavailable},
 			containerMemoryErr:  errCgroupUnavailable,
-			hostCPU:             []time.Duration{0, 3500 * time.Millisecond},
+			hostCPU:             []float64{0, 3.5},
 			hostMemory:          1024,
 			wantCPU:             []float64{0, 3.5},
 			wantSetCPU:          []bool{false, true},
@@ -122,7 +122,7 @@ func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 			name:             "cpu_cgroup_unavailable",
 			containerCPUErr:  []error{errCgroupUnavailable, errCgroupUnavailable},
 			containerMemory:  2048,
-			hostCPU:          []time.Duration{time.Second, 4500 * time.Millisecond},
+			hostCPU:          []float64{1, 4.5},
 			hostMemory:       1024,
 			wantCPU:          []float64{0, 3.5},
 			wantSetCPU:       []bool{false, true},
@@ -133,7 +133,7 @@ func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 			name:                "memory_cgroup_unavailable",
 			containerCPU:        []uint64{99},
 			containerMemoryErr:  errCgroupUnavailable,
-			hostCPU:             []time.Duration{6 * time.Second},
+			hostCPU:             []float64{6},
 			hostMemory:          4096,
 			wantCPU:             []float64{0},
 			wantSetCPU:          []bool{false},
@@ -167,16 +167,16 @@ func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 					hostMemoryCalls++
 					return tt.hostMemory
 				},
-				readHostCPU: func() (time.Duration, error) {
+				readHostCPU: func() (float64, bool) {
 					defer func() { hostCPUCalls++ }()
-					var value time.Duration
+					var value float64
 					if hostCPUCalls < len(tt.hostCPU) {
 						value = tt.hostCPU[hostCPUCalls]
 					}
-					if hostCPUCalls < len(tt.hostCPUErr) {
-						return value, tt.hostCPUErr[hostCPUCalls]
+					if hostCPUCalls < len(tt.hostCPUOK) {
+						return value, tt.hostCPUOK[hostCPUCalls]
 					}
-					return value, nil
+					return value, true
 				},
 				interval:     time.Second,
 				cpuUsageUnit: tt.cpuUsageUnit,
@@ -253,5 +253,12 @@ func TestCalculateCPUUsageDuration(t *testing.T) {
 	got := calculateCPUUsageDuration(4500*time.Millisecond, time.Second, time.Second)
 	if got != 3.5 {
 		t.Errorf("calculateCPUUsageDuration(4.5s, 1s, 1s) = %v, want 3.5", got)
+	}
+}
+
+func TestCalculateCPUUsageSeconds(t *testing.T) {
+	got := calculateCPUUsageSeconds(4.5, 1, time.Second)
+	if got != 3.5 {
+		t.Errorf("calculateCPUUsageSeconds(4.5, 1, 1s) = %v, want 3.5", got)
 	}
 }
