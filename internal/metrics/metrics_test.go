@@ -66,6 +66,14 @@ func TestRegistryUsesConfiguredNamespaceAndCommonLabels(t *testing.T) {
 	}
 }
 
+func TestStartRuntimeCollectionStopIsIdempotent(t *testing.T) {
+	r := New(config.Default().Metrics)
+	stop := r.StartRuntimeCollection(nil, time.Hour)
+
+	stop()
+	stop()
+}
+
 func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 	errCgroupUnavailable := errors.New("cgroup unavailable")
 	tests := []struct {
@@ -153,6 +161,19 @@ func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
 			wantSetCPU:       []bool{false, true, false, false},
 			wantMemory:       2048,
 			wantHostCPUCalls: 4,
+		},
+		{
+			name:             "host_cpu_reinitializes_after_container_success",
+			containerCPU:     []uint64{0, 0, 10_000, 0},
+			containerCPUErr:  []error{errCgroupUnavailable, errCgroupUnavailable, nil, errCgroupUnavailable},
+			containerMemory:  2048,
+			cpuUsageUnit:     time.Microsecond,
+			hostCPU:          []float64{0, 3.5, 10.5},
+			hostMemory:       1024,
+			wantCPU:          []float64{0, 3.5, 0, 0},
+			wantSetCPU:       []bool{false, true, false, false},
+			wantMemory:       2048,
+			wantHostCPUCalls: 3,
 		},
 		{
 			name:                "memory_cgroup_unavailable",
@@ -271,13 +292,6 @@ func TestCalculateCPUUsage(t *testing.T) {
 				t.Errorf("calculateCPUUsage(%d, %d, %s, %s) = %v, want %v", tt.cpuUsage, tt.previousCPUUsage, tt.interval, tt.usageUnit, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestCalculateCPUUsageDuration(t *testing.T) {
-	got := calculateCPUUsageDuration(4500*time.Millisecond, time.Second, time.Second)
-	if got != 3.5 {
-		t.Errorf("calculateCPUUsageDuration(4.5s, 1s, 1s) = %v, want 3.5", got)
 	}
 }
 

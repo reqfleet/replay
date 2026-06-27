@@ -167,7 +167,7 @@ func (r *Registry) StartRuntimeCollection(commonLabelValues []string, interval t
 			}
 		}
 	}()
-	return func() { close(done) }
+	return sync.OnceFunc(func() { close(done) })
 }
 
 type runtimeStatReader func() (uint64, error)
@@ -217,6 +217,7 @@ func (c *runtimeMetricsCollector) cpuUsage() (float64, bool) {
 		c.cpuInitialized = false
 		return c.hostCPUUsage()
 	}
+	c.hostCPUInitialized = false
 	if !c.cpuInitialized || cpuUsage < c.previousCPUUsage {
 		c.previousCPUUsage = cpuUsage
 		c.cpuInitialized = true
@@ -260,14 +261,7 @@ func calculateCPUUsage(cpuUsage, previousCPUUsage uint64, interval, usageUnit ti
 	if usageUnit <= 0 {
 		usageUnit = time.Microsecond
 	}
-	return calculateCPUUsageDuration(time.Duration(cpuUsage-previousCPUUsage)*usageUnit, 0, interval)
-}
-
-func calculateCPUUsageDuration(cpuUsage, previousCPUUsage, interval time.Duration) float64 {
-	if interval <= 0 {
-		interval = time.Second
-	}
-	return float64(cpuUsage-previousCPUUsage) / float64(interval)
+	return float64(time.Duration(cpuUsage-previousCPUUsage)*usageUnit) / float64(interval)
 }
 
 func calculateCPUUsageSeconds(cpuUsage, previousCPUUsage float64, interval time.Duration) float64 {
