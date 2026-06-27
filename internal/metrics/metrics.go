@@ -3,7 +3,6 @@ package metrics
 import (
 	"net/http"
 	"os"
-	"runtime"
 	runtimemetrics "runtime/metrics"
 	"sync"
 	"time"
@@ -18,6 +17,7 @@ const (
 	cgroupV2ControllersPath = "/sys/fs/cgroup/cgroup.controllers"
 	hostCPUTotalMetric      = "/cpu/classes/total:cpu-seconds"
 	hostCPUIdleMetric       = "/cpu/classes/idle:cpu-seconds"
+	hostMemoryAllocMetric   = "/memory/classes/heap/objects:bytes"
 )
 
 type Registry struct {
@@ -261,7 +261,10 @@ func calculateCPUUsage(cpuUsage, previousCPUUsage uint64, interval, usageUnit ti
 	if usageUnit <= 0 {
 		usageUnit = time.Microsecond
 	}
-	return float64(time.Duration(cpuUsage-previousCPUUsage)*usageUnit) / float64(interval)
+	if cpuUsage < previousCPUUsage {
+		return 0
+	}
+	return float64(cpuUsage-previousCPUUsage) * float64(usageUnit) / float64(interval)
 }
 
 func calculateCPUUsageSeconds(cpuUsage, previousCPUUsage float64, interval time.Duration) float64 {
@@ -279,9 +282,16 @@ func detectContainerCPUUsageUnit() time.Duration {
 }
 
 func readHostMemoryAlloc() uint64 {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	return m.Alloc
+	samples := []runtimemetrics.Sample{
+		{Name: hostMemoryAllocMetric},
+	}
+	runtimemetrics.Read(samples)
+
+	value, ok := runtimeMetricUint64(samples[0])
+	if !ok {
+		return 0
+	}
+	return value
 }
 
 func readHostCPUSeconds() (float64, bool) {
@@ -307,6 +317,13 @@ func runtimeMetricFloat64(sample runtimemetrics.Sample) (float64, bool) {
 		return 0, false
 	}
 	return sample.Value.Float64(), true
+}
+
+func runtimeMetricUint64(sample runtimemetrics.Sample) (uint64, bool) {
+	if sample.Value.Kind() != runtimemetrics.KindUint64 {
+		return 0, false
+	}
+	return sample.Value.Uint64(), true
 }
 
 func appendLabels(commonLabels []string, names ...string) []string {

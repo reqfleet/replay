@@ -283,6 +283,14 @@ func TestCalculateCPUUsage(t *testing.T) {
 			usageUnit:        time.Microsecond,
 			want:             2,
 		},
+		{
+			name:             "counter_underflow",
+			cpuUsage:         1_000,
+			previousCPUUsage: 3_501_000,
+			interval:         time.Second,
+			usageUnit:        time.Microsecond,
+			want:             0,
+		},
 	}
 
 	for _, tt := range tests {
