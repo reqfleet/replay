@@ -102,6 +102,7 @@ type requestExecution struct {
 	latencyMS   float64
 	statusCode  int
 	egressBytes int64
+	attempted   bool
 	headers     map[string][]string
 	body        []byte
 }
@@ -491,14 +492,11 @@ func (e *Engine) processRequest(ctx context.Context, cs *connState, requestEvent
 
 	exec, err := e.sendRequest(ctx, cs.client, requestEvent)
 	if err != nil {
-		e.finishRequestError(cs, requestEvent, err)
+		e.finishRequestError(cs, requestEvent, err, exec)
 		return true
 	}
 
 	abort = e.finishRequestSuccess(cs, requestEvent, exec, checkpoints.markProcessed(reqKey, requestEvent.Sequence))
-	if !abort {
-		e.recordSuccessMetrics(requestEvent, exec)
-	}
 	return abort
 }
 
@@ -532,7 +530,7 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 		exec, err := e.sendRequest(ctx, cs.client, requestEvent)
 		if err != nil {
 			cs.h2Mu.Lock()
-			e.finishRequestError(cs, requestEvent, err)
+			e.finishRequestError(cs, requestEvent, err, exec)
 			cs.h2Mu.Unlock()
 			return
 		}
@@ -556,7 +554,6 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 				return
 			}
 		}
-		e.recordSuccessMetrics(requestEvent, exec)
 	})
 }
 
@@ -650,10 +647,12 @@ func (cs *connState) completeCheckpointSequence(sequence int) int {
 	return cs.checkpointWatermark
 }
 
-func (e *Engine) finishRequestError(cs *connState, requestEvent model.Event, err error) {
+func (e *Engine) finishRequestError(cs *connState, requestEvent model.Event, err error, exec requestExecution) {
 	cs.sendErrors++
 	cs.aborted = true
-	e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
+	if !exec.attempted {
+		e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
+	}
 }
 
 func (e *Engine) finishRequestSuccess(cs *connState, requestEvent model.Event, exec requestExecution, checkpointErr error) bool {
@@ -701,12 +700,12 @@ func (e *Engine) shouldRetainResponseForValidation() bool {
 	return validation.Enabled && (validation.Status || validation.Headers || validation.Body)
 }
 
-func (e *Engine) recordSuccessMetrics(requestEvent model.Event, exec requestExecution) {
-	if !e.cfg.Metrics.Enabled || e.metrics == nil {
+func (e *Engine) recordAttemptMetrics(requestEvent model.Event, exec requestExecution, status string) {
+	if !e.cfg.Metrics.Enabled || e.metrics == nil || !exec.attempted {
 		return
 	}
 	safeLabel := e.metricLabelForRequest(requestEvent)
-	e.metrics.RecordRequest(e.metricLabelValues, safeLabel, exec.latencyMS, fmt.Sprintf("%d", exec.statusCode), exec.egressBytes)
+	e.metrics.RecordRequest(e.metricLabelValues, safeLabel, exec.latencyMS, status, exec.egressBytes)
 }
 
 func workerActivationDelay(workerIndex, totalWorkers int, rampup time.Duration) time.Duration {
@@ -898,7 +897,9 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			} else {
 				result.Outcome = RunFailed
 			}
-			e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
+			if !exec.attempted {
+				e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
+			}
 			connResult = connectionResultFromSummary(connKey, ConnectionAborted, result)
 			result.ConnectionResults = append(result.ConnectionResults, connResult)
 			return result
@@ -933,7 +934,6 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			}
 		}
 
-		e.recordSuccessMetrics(requestEvent, exec)
 	}
 
 	if result.ConnectionsAborted == 0 {
@@ -1120,6 +1120,9 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 		exec, err := e.executeRequest(ctx, client, requestEvent)
 		if err != nil {
 			lastErr = err
+			if exec.attempted {
+				e.recordAttemptMetrics(requestEvent, exec, metricStatusForSendError(err))
+			}
 			slog.DebugContext(ctx, "Request failed",
 				"conn", requestEvent.ConnectionID,
 				"seq", requestEvent.Sequence,
@@ -1127,7 +1130,7 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 				"error", err,
 			)
 			if attempt == maxAttempts || !e.shouldRetryError(err) {
-				return requestExecution{}, err
+				return exec, err
 			}
 			if sleepErr := e.sleepBackoff(ctx, attempt); sleepErr != nil {
 				return requestExecution{}, sleepErr
@@ -1136,6 +1139,7 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 		}
 
 		lastExec = exec
+		e.recordAttemptMetrics(requestEvent, exec, fmt.Sprintf("%d", exec.statusCode))
 		if attempt < maxAttempts && e.shouldRetryStatus(exec.statusCode) {
 			slog.DebugContext(ctx, "Request retryable status",
 				"conn", requestEvent.ConnectionID,
@@ -1211,15 +1215,24 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return requestExecution{}, err
+		return requestExecution{
+			latencyMS: time.Since(start).Seconds() * 1000,
+			attempted: true,
+		}, err
 	}
 	defer resp.Body.Close()
 	// Limit the amount of response body read to avoid unbounded memory growth.
 	// This prevents OOMs when replaying unexpectedly large responses.
 	lr := io.LimitReader(resp.Body, maxBodyRead)
 	body, err := io.ReadAll(lr)
+	headerBytes := responseHeaderBytes(resp.Header)
 	if err != nil {
-		return requestExecution{}, err
+		return requestExecution{
+			latencyMS:   time.Since(start).Seconds() * 1000,
+			statusCode:  resp.StatusCode,
+			egressBytes: headerBytes,
+			attempted:   true,
+		}, err
 	}
 
 	headers := make(map[string][]string, len(resp.Header))
@@ -1232,7 +1245,8 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	return requestExecution{
 		latencyMS:   time.Since(start).Seconds() * 1000,
 		statusCode:  resp.StatusCode,
-		egressBytes: int64(len(body)) + responseHeaderBytes(resp.Header),
+		egressBytes: int64(len(body)) + headerBytes,
+		attempted:   true,
 		headers:     headers,
 		body:        body,
 	}, nil

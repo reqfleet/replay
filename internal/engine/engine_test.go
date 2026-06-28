@@ -16,7 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/reqfleet/replay/internal/config"
 	"github.com/reqfleet/replay/internal/metrics"
 	"github.com/reqfleet/replay/internal/model"
@@ -112,6 +114,23 @@ func startRawHTTPResponseServer(t *testing.T, response string) string {
 	return ln.Addr().String()
 }
 
+func latencySampleCount(t *testing.T, reg *metrics.Registry, commonLabelValues []string, label string) uint64 {
+	t.Helper()
+	observer, err := reg.LabelLatencyHistogram.GetMetricWithLabelValues(append(commonLabelValues, label)...)
+	if err != nil {
+		t.Fatalf("LabelLatencyHistogram.GetMetricWithLabelValues(%q) error: %v", label, err)
+	}
+	histogram, ok := observer.(prometheus.Metric)
+	if !ok {
+		t.Fatalf("LabelLatencyHistogram.GetMetricWithLabelValues(%q) = %T, want prometheus.Metric", label, observer)
+	}
+	metric := &dto.Metric{}
+	if err := histogram.Write(metric); err != nil {
+		t.Fatalf("histogram.Write(%q) error: %v", label, err)
+	}
+	return metric.GetHistogram().GetSampleCount()
+}
+
 func TestResponseHeaderBytes(t *testing.T) {
 	headers := http.Header{
 		"X-Multi": {"one", "two"},
@@ -174,7 +193,8 @@ func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	cfg.Replay.Retry.Backoff = "none"
 	cfg.Replay.Retry.RetryOnStatuses = []int{http.StatusServiceUnavailable}
 
-	eng := New(cfg, metrics.New(cfg.Metrics))
+	reg := metrics.New(cfg.Metrics)
+	eng := New(cfg, reg)
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -201,6 +221,18 @@ func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	}
 	if atomic.LoadInt64(&attempts) != 2 {
 		t.Fatalf("attempt count = %d, want 2", attempts)
+	}
+	commonLabelValues := cfg.Metrics.CommonLabelValues()
+	status503 := reg.StatusCounter.WithLabelValues(append(commonLabelValues, "/", "503")...)
+	if got, want := testutil.ToFloat64(status503), float64(1); got != want {
+		t.Fatalf("503 status counter = %v, want %v", got, want)
+	}
+	status200 := reg.StatusCounter.WithLabelValues(append(commonLabelValues, "/", "200")...)
+	if got, want := testutil.ToFloat64(status200), float64(1); got != want {
+		t.Fatalf("200 status counter = %v, want %v", got, want)
+	}
+	if got, want := latencySampleCount(t, reg, commonLabelValues, "/"), uint64(2); got != want {
+		t.Fatalf("latency sample count = %d, want %d", got, want)
 	}
 }
 
@@ -363,6 +395,9 @@ func TestReplayEmitsSyntheticStatusForTransportSendErrors(t *testing.T) {
 			)
 			if got, want := testutil.ToFloat64(counter), float64(1); got != want {
 				t.Fatalf("status counter for %s = %v, want %v", tt.wantStatus, got, want)
+			}
+			if got, want := latencySampleCount(t, reg, cfg.Metrics.CommonLabelValues(), "/transport"), uint64(1); got != want {
+				t.Fatalf("latency sample count for %s = %d, want %d", tt.wantStatus, got, want)
 			}
 		})
 	}
