@@ -156,7 +156,7 @@ func main() {
 	var stopMetrics func()
 	if cfg.Metrics.Enabled {
 		// start runtime collectors (memory/CPU)
-		stopMetrics = registry.StartRuntimeCollection(metricLabelValues, 5*time.Second)
+		stopMetrics = registry.StartRuntimeCollection(metricLabelValues, 2*time.Second)
 		if stopMetrics != nil {
 			defer stopMetrics()
 		}

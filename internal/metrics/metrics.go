@@ -2,13 +2,22 @@ package metrics
 
 import (
 	"net/http"
-	"runtime"
+	"os"
+	runtimemetrics "runtime/metrics"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/reqfleet/containerstats"
 	"github.com/reqfleet/replay/internal/config"
+)
+
+const (
+	cgroupV2ControllersPath = "/sys/fs/cgroup/cgroup.controllers"
+	hostCPUTotalMetric      = "/cpu/classes/total:cpu-seconds"
+	hostCPUIdleMetric       = "/cpu/classes/idle:cpu-seconds"
+	hostMemoryAllocMetric   = "/memory/classes/heap/objects:bytes"
 )
 
 type Registry struct {
@@ -54,12 +63,12 @@ func New(cfg config.MetricsConfig) *Registry {
 		CPU: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,
 			Name:      "cpu_gauge",
-			Help:      "Logical CPUs available to the process (not CPU utilization)",
+			Help:      "CPU cores used by the container when running in a cgroup; process CPU cores used otherwise",
 		}, commonLabels),
 		Mem: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,
 			Name:      "mem_gauge",
-			Help:      "Memory used by engine",
+			Help:      "Container memory usage when running in a cgroup; Go heap allocation otherwise",
 		}, commonLabels),
 		r:          r,
 		seenLabels: make(map[string]struct{}),
@@ -134,30 +143,187 @@ func (r *Registry) RecordStatus(commonLabelValues []string, label string, status
 }
 
 // StartRuntimeCollection starts a background goroutine that updates runtime
-// metrics (memory and a CPU proxy) for the provided labels at the given
-// interval. It returns a stop function that cancels the collector.
+// metrics for the provided labels at the given interval. It returns a stop
+// function that cancels the collector.
 func (r *Registry) StartRuntimeCollection(commonLabelValues []string, interval time.Duration) func() {
 	if interval <= 0 {
-		interval = time.Second * 5
+		interval = time.Second * 2
 	}
+	collector := newRuntimeMetricsCollector(interval)
 	ticker := time.NewTicker(interval)
 	done := make(chan struct{})
 	go func() {
-		var m runtime.MemStats
 		for {
 			select {
 			case <-ticker.C:
-				runtime.ReadMemStats(&m)
-				r.Mem.WithLabelValues(commonLabelValues...).Set(float64(m.Alloc))
-				// CPU: report number of CPUs as a proxy to avoid OS-specific code.
-				r.CPU.WithLabelValues(commonLabelValues...).Set(float64(runtime.NumCPU()))
+				metrics := collector.snapshot()
+				if metrics.setCPU {
+					r.CPU.WithLabelValues(commonLabelValues...).Set(metrics.cpu)
+				}
+				r.Mem.WithLabelValues(commonLabelValues...).Set(metrics.memory)
 			case <-done:
 				ticker.Stop()
 				return
 			}
 		}
 	}()
-	return func() { close(done) }
+	return sync.OnceFunc(func() { close(done) })
+}
+
+type runtimeStatReader func() (uint64, error)
+
+type runtimeMetricsCollector struct {
+	readContainerCPU     runtimeStatReader
+	readContainerMemory  runtimeStatReader
+	readHostMemory       func() uint64
+	readHostCPU          func() (float64, bool)
+	interval             time.Duration
+	cpuUsageUnit         time.Duration
+	previousCPUUsage     uint64
+	cpuInitialized       bool
+	previousHostCPUUsage float64
+	hostCPUInitialized   bool
+}
+
+type runtimeMetrics struct {
+	cpu    float64
+	memory float64
+	setCPU bool
+}
+
+func newRuntimeMetricsCollector(interval time.Duration) *runtimeMetricsCollector {
+	return &runtimeMetricsCollector{
+		readContainerCPU:    containerstats.ReadCPUUsage,
+		readContainerMemory: containerstats.ReadMemoryUsage,
+		readHostMemory:      readHostMemoryAlloc,
+		readHostCPU:         readHostCPUSeconds,
+		interval:            interval,
+		cpuUsageUnit:        detectContainerCPUUsageUnit(),
+	}
+}
+
+func (c *runtimeMetricsCollector) snapshot() runtimeMetrics {
+	cpu, setCPU := c.cpuUsage()
+	return runtimeMetrics{
+		cpu:    cpu,
+		memory: float64(c.memoryUsage()),
+		setCPU: setCPU,
+	}
+}
+
+func (c *runtimeMetricsCollector) cpuUsage() (float64, bool) {
+	cpuUsage, err := c.readContainerCPU()
+	if err != nil {
+		c.cpuInitialized = false
+		return c.hostCPUUsage()
+	}
+	c.hostCPUInitialized = false
+	if !c.cpuInitialized || cpuUsage < c.previousCPUUsage {
+		c.previousCPUUsage = cpuUsage
+		c.cpuInitialized = true
+		return 0, false
+	}
+
+	used := calculateCPUUsage(cpuUsage, c.previousCPUUsage, c.interval, c.cpuUsageUnit)
+	c.previousCPUUsage = cpuUsage
+	return used, true
+}
+
+func (c *runtimeMetricsCollector) hostCPUUsage() (float64, bool) {
+	cpuUsage, ok := c.readHostCPU()
+	if !ok {
+		c.hostCPUInitialized = false
+		return 0, false
+	}
+	if !c.hostCPUInitialized || cpuUsage < c.previousHostCPUUsage {
+		c.previousHostCPUUsage = cpuUsage
+		c.hostCPUInitialized = true
+		return 0, false
+	}
+
+	used := calculateCPUUsageSeconds(cpuUsage, c.previousHostCPUUsage, c.interval)
+	c.previousHostCPUUsage = cpuUsage
+	return used, true
+}
+
+func (c *runtimeMetricsCollector) memoryUsage() uint64 {
+	memory, err := c.readContainerMemory()
+	if err != nil {
+		return c.readHostMemory()
+	}
+	return memory
+}
+
+func calculateCPUUsage(cpuUsage, previousCPUUsage uint64, interval, usageUnit time.Duration) float64 {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	if usageUnit <= 0 {
+		usageUnit = time.Microsecond
+	}
+	if cpuUsage < previousCPUUsage {
+		return 0
+	}
+	return float64(cpuUsage-previousCPUUsage) * float64(usageUnit) / float64(interval)
+}
+
+func calculateCPUUsageSeconds(cpuUsage, previousCPUUsage float64, interval time.Duration) float64 {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	return (cpuUsage - previousCPUUsage) / interval.Seconds()
+}
+
+func detectContainerCPUUsageUnit() time.Duration {
+	if _, err := os.Stat(cgroupV2ControllersPath); err == nil {
+		return time.Microsecond
+	}
+	return time.Nanosecond
+}
+
+func readHostMemoryAlloc() uint64 {
+	samples := []runtimemetrics.Sample{
+		{Name: hostMemoryAllocMetric},
+	}
+	runtimemetrics.Read(samples)
+
+	value, ok := runtimeMetricUint64(samples[0])
+	if !ok {
+		return 0
+	}
+	return value
+}
+
+func readHostCPUSeconds() (float64, bool) {
+	samples := []runtimemetrics.Sample{
+		{Name: hostCPUTotalMetric},
+		{Name: hostCPUIdleMetric},
+	}
+	runtimemetrics.Read(samples)
+
+	total, ok := runtimeMetricFloat64(samples[0])
+	if !ok {
+		return 0, false
+	}
+	idle, ok := runtimeMetricFloat64(samples[1])
+	if !ok || idle > total {
+		return 0, false
+	}
+	return total - idle, true
+}
+
+func runtimeMetricFloat64(sample runtimemetrics.Sample) (float64, bool) {
+	if sample.Value.Kind() != runtimemetrics.KindFloat64 {
+		return 0, false
+	}
+	return sample.Value.Float64(), true
+}
+
+func runtimeMetricUint64(sample runtimemetrics.Sample) (uint64, bool) {
+	if sample.Value.Kind() != runtimemetrics.KindUint64 {
+		return 0, false
+	}
+	return sample.Value.Uint64(), true
 }
 
 func appendLabels(commonLabels []string, names ...string) []string {
