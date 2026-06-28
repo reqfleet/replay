@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -108,6 +109,22 @@ func startRawHTTPResponseServer(t *testing.T, response string) string {
 			return
 		}
 		defer conn.Close()
+
+		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Errorf("conn.SetReadDeadline(%v) error: %v", ln.Addr(), err)
+			return
+		}
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			t.Errorf("http.ReadRequest(%v) error: %v", ln.Addr(), err)
+			return
+		}
+		_ = req.Body.Close()
+		if err := conn.SetReadDeadline(time.Time{}); err != nil {
+			t.Errorf("conn.SetReadDeadline(%v, zero) error: %v", ln.Addr(), err)
+			return
+		}
+
 		_, _ = conn.Write([]byte(response))
 	}()
 
