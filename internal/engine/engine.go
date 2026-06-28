@@ -1215,6 +1215,9 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
 		return requestExecution{
 			latencyMS: time.Since(start).Seconds() * 1000,
 			attempted: true,
