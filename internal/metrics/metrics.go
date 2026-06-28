@@ -53,7 +53,7 @@ func New(cfg config.MetricsConfig) *Registry {
 		EgressCounter: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: cfg.Namespace,
 			Name:      "egress_bytes_counter",
-			Help:      "Total egress bytes used by engine",
+			Help:      "Total response body and header bytes read by the engine",
 		}, appendLabels(commonLabels, "label")),
 		ThreadsGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,
@@ -146,21 +146,23 @@ func (r *Registry) RecordStatus(commonLabelValues []string, label string, status
 // metrics for the provided labels at the given interval. It returns a stop
 // function that cancels the collector.
 func (r *Registry) StartRuntimeCollection(commonLabelValues []string, interval time.Duration) func() {
+	return r.startRuntimeCollection(commonLabelValues, interval, newRuntimeMetricsCollector(interval))
+}
+
+func (r *Registry) startRuntimeCollection(commonLabelValues []string, interval time.Duration, collector *runtimeMetricsCollector) func() {
 	if interval <= 0 {
 		interval = time.Second * 2
 	}
-	collector := newRuntimeMetricsCollector(interval)
+	collector.interval = interval
+	r.recordRuntimeMetrics(commonLabelValues, collector.snapshot())
+
 	ticker := time.NewTicker(interval)
 	done := make(chan struct{})
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
-				metrics := collector.snapshot()
-				if metrics.setCPU {
-					r.CPU.WithLabelValues(commonLabelValues...).Set(metrics.cpu)
-				}
-				r.Mem.WithLabelValues(commonLabelValues...).Set(metrics.memory)
+				r.recordRuntimeMetrics(commonLabelValues, collector.snapshot())
 			case <-done:
 				ticker.Stop()
 				return
@@ -168,6 +170,13 @@ func (r *Registry) StartRuntimeCollection(commonLabelValues []string, interval t
 		}
 	}()
 	return sync.OnceFunc(func() { close(done) })
+}
+
+func (r *Registry) recordRuntimeMetrics(commonLabelValues []string, metrics runtimeMetrics) {
+	if metrics.setCPU {
+		r.CPU.WithLabelValues(commonLabelValues...).Set(metrics.cpu)
+	}
+	r.Mem.WithLabelValues(commonLabelValues...).Set(metrics.memory)
 }
 
 type runtimeStatReader func() (uint64, error)

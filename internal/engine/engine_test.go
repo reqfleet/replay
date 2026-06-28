@@ -1,22 +1,28 @@
 package engine
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/reqfleet/replay/internal/config"
 	"github.com/reqfleet/replay/internal/metrics"
 	"github.com/reqfleet/replay/internal/model"
@@ -45,6 +51,12 @@ func runReplay(eng *Engine, events []model.Event) (Summary, error) {
 type replayResult struct {
 	summary Summary
 	err     error
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func runReplayAsync(eng *Engine, events []model.Event) <-chan replayResult {
@@ -92,6 +104,123 @@ func rampupTestEvents(target *url.URL, connections int) []model.Event {
 	return events
 }
 
+func startRawHTTPResponseServer(t *testing.T, response string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen(tcp, 127.0.0.1:0) error: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Errorf("conn.SetReadDeadline(%v) error: %v", ln.Addr(), err)
+			return
+		}
+		req, err := http.ReadRequest(bufio.NewReader(conn))
+		if err != nil {
+			t.Errorf("http.ReadRequest(%v) error: %v", ln.Addr(), err)
+			return
+		}
+		_ = req.Body.Close()
+		if err := conn.SetReadDeadline(time.Time{}); err != nil {
+			t.Errorf("conn.SetReadDeadline(%v, zero) error: %v", ln.Addr(), err)
+			return
+		}
+
+		_, _ = conn.Write([]byte(response))
+	}()
+
+	return ln.Addr().String()
+}
+
+func latencySampleCount(t *testing.T, reg *metrics.Registry, commonLabelValues []string, label string) uint64 {
+	t.Helper()
+	observer, err := reg.LabelLatencyHistogram.GetMetricWithLabelValues(append(commonLabelValues, label)...)
+	if err != nil {
+		t.Fatalf("LabelLatencyHistogram.GetMetricWithLabelValues(%q) error: %v", label, err)
+	}
+	histogram, ok := observer.(prometheus.Metric)
+	if !ok {
+		t.Fatalf("LabelLatencyHistogram.GetMetricWithLabelValues(%q) = %T, want prometheus.Metric", label, observer)
+	}
+	metric := &dto.Metric{}
+	if err := histogram.Write(metric); err != nil {
+		t.Fatalf("histogram.Write(%q) error: %v", label, err)
+	}
+	return metric.GetHistogram().GetSampleCount()
+}
+
+func TestResponseHeaderBytes(t *testing.T) {
+	headers := http.Header{
+		"X-Multi": {"one", "two"},
+		"X-Test":  {"abc"},
+	}
+	want := int64(len("X-Multi: one\r\n") + len("X-Multi: two\r\n") + len("X-Test: abc\r\n") + len("\r\n"))
+
+	if got := responseHeaderBytes(headers); got != want {
+		t.Errorf("responseHeaderBytes(%v) = %d, want %d", headers, got, want)
+	}
+}
+
+func TestExecuteRequestIncludesResponseHeadersInEgressBytes(t *testing.T) {
+	const response = "HTTP/1.1 200 OK\r\nX-Multi: one\r\nX-Multi: two\r\nX-Test: abc\r\n\r\nok"
+	authority := startRawHTTPResponseServer(t, response)
+	cfg := config.Default()
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	client, transport := eng.makePerConnectionClient(false)
+	defer transport.CloseIdleConnections()
+
+	exec, err := eng.executeRequest(context.Background(), client, model.Event{
+		HTTP: model.HTTPRequestMeta{
+			Method:    http.MethodGet,
+			Scheme:    "http",
+			Authority: authority,
+			Path:      "/",
+		},
+	})
+	if err != nil {
+		t.Fatalf("executeRequest(raw response) error: %v", err)
+	}
+
+	want := int64(len("ok") + len("X-Multi: one\r\n") + len("X-Multi: two\r\n") + len("X-Test: abc\r\n") + len("\r\n"))
+	if exec.egressBytes != want {
+		t.Errorf("executeRequest(raw response).egressBytes = %d, want %d", exec.egressBytes, want)
+	}
+}
+
+func TestExecuteRequestIncludesPartialBodyInEgressBytesOnReadError(t *testing.T) {
+	const response = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Test: abc\r\n\r\nabc"
+	authority := startRawHTTPResponseServer(t, response)
+	cfg := config.Default()
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	client, transport := eng.makePerConnectionClient(false)
+	defer transport.CloseIdleConnections()
+
+	exec, err := eng.executeRequest(context.Background(), client, model.Event{
+		HTTP: model.HTTPRequestMeta{
+			Method:    http.MethodGet,
+			Scheme:    "http",
+			Authority: authority,
+			Path:      "/",
+		},
+	})
+	if err == nil {
+		t.Fatal("executeRequest(partial body response) error = nil, want read error")
+	}
+
+	want := int64(len("abc") + len("Content-Length: 5\r\n") + len("X-Test: abc\r\n") + len("\r\n"))
+	if exec.egressBytes != want {
+		t.Errorf("executeRequest(partial body response).egressBytes = %d, want %d", exec.egressBytes, want)
+	}
+}
+
 func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	var attempts int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -116,7 +245,8 @@ func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	cfg.Replay.Retry.Backoff = "none"
 	cfg.Replay.Retry.RetryOnStatuses = []int{http.StatusServiceUnavailable}
 
-	eng := New(cfg, metrics.New(cfg.Metrics))
+	reg := metrics.New(cfg.Metrics)
+	eng := New(cfg, reg)
 	events := []model.Event{
 		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
@@ -143,6 +273,58 @@ func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	}
 	if atomic.LoadInt64(&attempts) != 2 {
 		t.Fatalf("attempt count = %d, want 2", attempts)
+	}
+	commonLabelValues := cfg.Metrics.CommonLabelValues()
+	status503 := reg.StatusCounter.WithLabelValues(append(commonLabelValues, "/", "503")...)
+	if got, want := testutil.ToFloat64(status503), float64(1); got != want {
+		t.Fatalf("503 status counter = %v, want %v", got, want)
+	}
+	status200 := reg.StatusCounter.WithLabelValues(append(commonLabelValues, "/", "200")...)
+	if got, want := testutil.ToFloat64(status200), float64(1); got != want {
+		t.Fatalf("200 status counter = %v, want %v", got, want)
+	}
+	if got, want := latencySampleCount(t, reg, commonLabelValues, "/"), uint64(2); got != want {
+		t.Fatalf("latency sample count = %d, want %d", got, want)
+	}
+}
+
+func TestSendRequestReturnsAttemptedExecutionWhenRetryBackoffCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := config.Default()
+	cfg.Replay.Retry.MaxAttempts = 2
+	cfg.Replay.Retry.Backoff = "fixed"
+	cfg.Replay.Retry.RetryOnStatuses = []int{http.StatusServiceUnavailable}
+
+	reg := metrics.New(cfg.Metrics)
+	eng := New(cfg, reg)
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			cancel()
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("retry")),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	exec, err := eng.sendRequest(ctx, client, model.Event{
+		HTTP: model.HTTPRequestMeta{
+			Method:    http.MethodGet,
+			Scheme:    "http",
+			Authority: "example.test",
+			Path:      "/",
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("sendRequest(canceled retry backoff) error = %v, want %v", err, context.Canceled)
+	}
+	if !exec.attempted {
+		t.Fatal("sendRequest(canceled retry backoff).attempted = false, want true")
+	}
+	if got, want := exec.statusCode, http.StatusServiceUnavailable; got != want {
+		t.Errorf("sendRequest(canceled retry backoff).statusCode = %d, want %d", got, want)
 	}
 }
 
@@ -305,6 +487,9 @@ func TestReplayEmitsSyntheticStatusForTransportSendErrors(t *testing.T) {
 			)
 			if got, want := testutil.ToFloat64(counter), float64(1); got != want {
 				t.Fatalf("status counter for %s = %v, want %v", tt.wantStatus, got, want)
+			}
+			if got, want := latencySampleCount(t, reg, cfg.Metrics.CommonLabelValues(), "/transport"), uint64(1); got != want {
+				t.Fatalf("latency sample count for %s = %d, want %d", tt.wantStatus, got, want)
 			}
 		})
 	}

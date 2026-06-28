@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/reqfleet/replay/internal/config"
 )
 
@@ -67,11 +68,57 @@ func TestRegistryUsesConfiguredNamespaceAndCommonLabels(t *testing.T) {
 }
 
 func TestStartRuntimeCollectionStopIsIdempotent(t *testing.T) {
-	r := New(config.Default().Metrics)
-	stop := r.StartRuntimeCollection(nil, time.Hour)
+	cfg := config.Default().Metrics
+	r := New(cfg)
+	stop := r.StartRuntimeCollection(cfg.CommonLabelValues(), time.Hour)
 
 	stop()
 	stop()
+}
+
+func TestStartRuntimeCollectionRecordsInitialSnapshot(t *testing.T) {
+	cfg := config.Default().Metrics
+	r := New(cfg)
+	commonLabelValues := cfg.CommonLabelValues()
+	cpuReads := 0
+	collector := &runtimeMetricsCollector{
+		readContainerCPU: func() (uint64, error) {
+			defer func() { cpuReads++ }()
+			if cpuReads == 0 {
+				return 1_000, nil
+			}
+			return 36_000, nil
+		},
+		readContainerMemory: func() (uint64, error) {
+			return 2048, nil
+		},
+		readHostMemory: func() uint64 {
+			return 1024
+		},
+		readHostCPU: func() (float64, bool) {
+			return 0, true
+		},
+		cpuUsageUnit: time.Microsecond,
+	}
+
+	stop := r.startRuntimeCollection(commonLabelValues, 10*time.Millisecond, collector)
+	defer stop()
+
+	if got, want := testutil.ToFloat64(r.Mem.WithLabelValues(commonLabelValues...)), float64(2048); got != want {
+		t.Fatalf("Mem after StartRuntimeCollection() = %v, want %v", got, want)
+	}
+
+	deadline := time.After(time.Second)
+	for {
+		if got := testutil.ToFloat64(r.CPU.WithLabelValues(commonLabelValues...)); got == 3.5 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("CPU after first StartRuntimeCollection() tick = %v, want 3.5", testutil.ToFloat64(r.CPU.WithLabelValues(commonLabelValues...)))
+		case <-time.After(time.Millisecond):
+		}
+	}
 }
 
 func TestRuntimeMetricsCollectorSnapshot(t *testing.T) {
