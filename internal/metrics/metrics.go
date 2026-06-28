@@ -147,7 +147,7 @@ func (r *Registry) RecordStatus(commonLabelValues []string, label string, status
 // function that cancels the collector.
 func (r *Registry) StartRuntimeCollection(commonLabelValues []string, interval time.Duration) func() {
 	if interval <= 0 {
-		interval = time.Second * 5
+		interval = time.Second * 2
 	}
 	collector := newRuntimeMetricsCollector(interval)
 	ticker := time.NewTicker(interval)
