@@ -92,6 +92,64 @@ func rampupTestEvents(target *url.URL, connections int) []model.Event {
 	return events
 }
 
+func startRawHTTPResponseServer(t *testing.T, response string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen(tcp, 127.0.0.1:0) error: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = conn.Write([]byte(response))
+	}()
+
+	return ln.Addr().String()
+}
+
+func TestResponseHeaderBytes(t *testing.T) {
+	headers := http.Header{
+		"X-Multi": {"one", "two"},
+		"X-Test":  {"abc"},
+	}
+	want := int64(len("X-Multi: one\r\n") + len("X-Multi: two\r\n") + len("X-Test: abc\r\n") + len("\r\n"))
+
+	if got := responseHeaderBytes(headers); got != want {
+		t.Errorf("responseHeaderBytes(%v) = %d, want %d", headers, got, want)
+	}
+}
+
+func TestExecuteRequestIncludesResponseHeadersInEgressBytes(t *testing.T) {
+	const response = "HTTP/1.1 200 OK\r\nX-Multi: one\r\nX-Multi: two\r\nX-Test: abc\r\n\r\nok"
+	authority := startRawHTTPResponseServer(t, response)
+	cfg := config.Default()
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	client, transport := eng.makePerConnectionClient(false)
+	defer transport.CloseIdleConnections()
+
+	exec, err := eng.executeRequest(context.Background(), client, model.Event{
+		HTTP: model.HTTPRequestMeta{
+			Method:    http.MethodGet,
+			Scheme:    "http",
+			Authority: authority,
+			Path:      "/",
+		},
+	})
+	if err != nil {
+		t.Fatalf("executeRequest(raw response) error: %v", err)
+	}
+
+	want := int64(len("ok") + len("X-Multi: one\r\n") + len("X-Multi: two\r\n") + len("X-Test: abc\r\n") + len("\r\n"))
+	if exec.egressBytes != want {
+		t.Errorf("executeRequest(raw response).egressBytes = %d, want %d", exec.egressBytes, want)
+	}
+}
+
 func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	var attempts int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

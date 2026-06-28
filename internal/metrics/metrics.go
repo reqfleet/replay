@@ -53,7 +53,7 @@ func New(cfg config.MetricsConfig) *Registry {
 		EgressCounter: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: cfg.Namespace,
 			Name:      "egress_bytes_counter",
-			Help:      "Total egress bytes used by engine",
+			Help:      "Total response body and header bytes read by the engine",
 		}, appendLabels(commonLabels, "label")),
 		ThreadsGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,

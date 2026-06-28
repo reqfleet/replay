@@ -106,6 +106,16 @@ type requestExecution struct {
 	body        []byte
 }
 
+func responseHeaderBytes(headers http.Header) int64 {
+	var n int64 = 2 // final CRLF terminating the header block
+	for key, values := range headers {
+		for _, value := range values {
+			n += int64(len(key) + len(": ") + len(value) + len("\r\n"))
+		}
+	}
+	return n
+}
+
 func New(cfg config.Config, registry *metrics.Registry) *Engine {
 	var parsedOverride *url.URL
 	if cfg.Target.OverrideURL != "" {
@@ -1222,7 +1232,7 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	return requestExecution{
 		latencyMS:   time.Since(start).Seconds() * 1000,
 		statusCode:  resp.StatusCode,
-		egressBytes: int64(len(body)),
+		egressBytes: int64(len(body)) + responseHeaderBytes(resp.Header),
 		headers:     headers,
 		body:        body,
 	}, nil
