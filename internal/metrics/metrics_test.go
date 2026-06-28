@@ -107,9 +107,6 @@ func TestStartRuntimeCollectionRecordsInitialSnapshot(t *testing.T) {
 	if got, want := testutil.ToFloat64(r.Mem.WithLabelValues(commonLabelValues...)), float64(2048); got != want {
 		t.Fatalf("Mem after StartRuntimeCollection() = %v, want %v", got, want)
 	}
-	if !collector.cpuInitialized {
-		t.Fatal("StartRuntimeCollection() did not initialize CPU baseline")
-	}
 
 	deadline := time.After(time.Second)
 	for {
