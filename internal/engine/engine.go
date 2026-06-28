@@ -1133,7 +1133,7 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 				return exec, err
 			}
 			if sleepErr := e.sleepBackoff(ctx, attempt); sleepErr != nil {
-				return requestExecution{}, sleepErr
+				return exec, sleepErr
 			}
 			continue
 		}
@@ -1148,7 +1148,7 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 				"status", exec.statusCode,
 			)
 			if sleepErr := e.sleepBackoff(ctx, attempt); sleepErr != nil {
-				return requestExecution{}, sleepErr
+				return exec, sleepErr
 			}
 			continue
 		}
@@ -1233,7 +1233,7 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 		return requestExecution{
 			latencyMS:   time.Since(start).Seconds() * 1000,
 			statusCode:  resp.StatusCode,
-			egressBytes: headerBytes,
+			egressBytes: headerBytes + int64(len(body)),
 			attempted:   true,
 		}, err
 	}

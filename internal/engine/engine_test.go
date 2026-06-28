@@ -5,13 +5,16 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -48,6 +51,12 @@ func runReplay(eng *Engine, events []model.Event) (Summary, error) {
 type replayResult struct {
 	summary Summary
 	err     error
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func runReplayAsync(eng *Engine, events []model.Event) <-chan replayResult {
@@ -186,6 +195,32 @@ func TestExecuteRequestIncludesResponseHeadersInEgressBytes(t *testing.T) {
 	}
 }
 
+func TestExecuteRequestIncludesPartialBodyInEgressBytesOnReadError(t *testing.T) {
+	const response = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nX-Test: abc\r\n\r\nabc"
+	authority := startRawHTTPResponseServer(t, response)
+	cfg := config.Default()
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	client, transport := eng.makePerConnectionClient(false)
+	defer transport.CloseIdleConnections()
+
+	exec, err := eng.executeRequest(context.Background(), client, model.Event{
+		HTTP: model.HTTPRequestMeta{
+			Method:    http.MethodGet,
+			Scheme:    "http",
+			Authority: authority,
+			Path:      "/",
+		},
+	})
+	if err == nil {
+		t.Fatal("executeRequest(partial body response) error = nil, want read error")
+	}
+
+	want := int64(len("abc") + len("Content-Length: 5\r\n") + len("X-Test: abc\r\n") + len("\r\n"))
+	if exec.egressBytes != want {
+		t.Errorf("executeRequest(partial body response).egressBytes = %d, want %d", exec.egressBytes, want)
+	}
+}
+
 func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	var attempts int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -250,6 +285,46 @@ func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	}
 	if got, want := latencySampleCount(t, reg, commonLabelValues, "/"), uint64(2); got != want {
 		t.Fatalf("latency sample count = %d, want %d", got, want)
+	}
+}
+
+func TestSendRequestReturnsAttemptedExecutionWhenRetryBackoffCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := config.Default()
+	cfg.Replay.Retry.MaxAttempts = 2
+	cfg.Replay.Retry.Backoff = "fixed"
+	cfg.Replay.Retry.RetryOnStatuses = []int{http.StatusServiceUnavailable}
+
+	reg := metrics.New(cfg.Metrics)
+	eng := New(cfg, reg)
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			cancel()
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("retry")),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	exec, err := eng.sendRequest(ctx, client, model.Event{
+		HTTP: model.HTTPRequestMeta{
+			Method:    http.MethodGet,
+			Scheme:    "http",
+			Authority: "example.test",
+			Path:      "/",
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("sendRequest(canceled retry backoff) error = %v, want %v", err, context.Canceled)
+	}
+	if !exec.attempted {
+		t.Fatal("sendRequest(canceled retry backoff).attempted = false, want true")
+	}
+	if got, want := exec.statusCode, http.StatusServiceUnavailable; got != want {
+		t.Errorf("sendRequest(canceled retry backoff).statusCode = %d, want %d", got, want)
 	}
 }
 
