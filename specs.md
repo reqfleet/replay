@@ -152,6 +152,14 @@ for response validation. Envoy completion access logs MUST set
 `type: "DownstreamEnd"` exactly and MAY include `status`; replay maps that exact
 Envoy type to an internal response event for response validation.
 
+Replay also accepts Envoy's common single completion access-log shape when it is
+emitted as structured JSON with flat fields such as `start_time`, `method`,
+`path`, `protocol`, `authority`, `response_code`, and `duration_ms`. That shape
+is mapped to an internal request event with `log_type: "DownstreamEnd"` so the
+request can be replayed and the response code can be validated inline. If the
+flat log omits `connection_id`, replay assigns a synthetic per-record connection
+identifier.
+
 ### Headers
 
 * Stored as `map[string][]string`

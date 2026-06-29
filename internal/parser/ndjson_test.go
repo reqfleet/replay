@@ -108,6 +108,58 @@ func TestParseDownstreamEndAccessLogAsResponse(t *testing.T) {
 	}
 }
 
+func TestParseFlatEnvoyAccessLogAsInlineValidatedRequest(t *testing.T) {
+	input := strings.NewReader("{" +
+		`"start_time":"2026-02-27T03:10:22.101Z",` +
+		`"method":"GET",` +
+		`"path":"/start",` +
+		`"protocol":"HTTP/1.1",` +
+		`"authority":"example.com",` +
+		`"request_id":"req-1",` +
+		`"response_code":503,` +
+		`"response_flags":"-",` +
+		`"duration_ms":16,` +
+		`"bytes_received":0,` +
+		`"bytes_sent":5,` +
+		`"downstream_remote_address":"10.1.2.15:53210",` +
+		`"upstream_host":"10.2.3.4:8080",` +
+		`"user_agent":"curl/8.0.0"` +
+		"}\n")
+
+	events := make([]model.Event, 0)
+	if err := ParseStream(input, func(e model.Event) error {
+		events = append(events, e)
+		return nil
+	}); err != nil {
+		t.Fatalf("ParseStream(flat Envoy access log) error: %v", err)
+	}
+	if got, want := len(events), 1; got != want {
+		t.Fatalf("len(events) = %d, want %d", got, want)
+	}
+	got := events[0]
+	if got.Type != model.EventRequest {
+		t.Fatalf("events[0].Type = %q, want %q", got.Type, model.EventRequest)
+	}
+	if got.AccessLogType != model.AccessLogTypeDownstreamEnd {
+		t.Fatalf("events[0].AccessLogType = %q, want %q", got.AccessLogType, model.AccessLogTypeDownstreamEnd)
+	}
+	if got.ConnectionID == 0 {
+		t.Fatal("events[0].ConnectionID = 0, want synthetic non-zero connection ID")
+	}
+	if got.Sequence != 1 {
+		t.Fatalf("events[0].Sequence = %d, want 1", got.Sequence)
+	}
+	if got.Status != 503 {
+		t.Fatalf("events[0].Status = %d, want 503", got.Status)
+	}
+	if got.HTTP.Method != "GET" || got.HTTP.Authority != "example.com" || got.HTTP.Path != "/start" {
+		t.Fatalf("events[0].HTTP = %+v, want method GET authority example.com path /start", got.HTTP)
+	}
+	if got.Headers["user-agent"][0] != "curl/8.0.0" {
+		t.Fatalf("events[0].Headers[user-agent] = %v, want curl/8.0.0", got.Headers["user-agent"])
+	}
+}
+
 func TestParseRejectsNonCanonicalDownstreamAccessLogType(t *testing.T) {
 	input := strings.NewReader("{" +
 		`"type":"downstream-start","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z","http":{"method":"GET","authority":"example.com","path":"/start"}` +
