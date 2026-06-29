@@ -79,35 +79,6 @@ func TestParseSkipsMalformedDownstreamStartAccessLog(t *testing.T) {
 	}
 }
 
-func TestParseDownstreamEndAccessLogAsResponse(t *testing.T) {
-	input := strings.NewReader("{" +
-		`"type":"request","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z","http":{"method":"GET","authority":"example.com","path":"/start"}` +
-		"}\n" +
-		"{" +
-		`"type":"DownstreamEnd","connection_id":1,"timestamp":"2026-02-27T03:10:22.101Z","status":503` +
-		"}\n")
-
-	events := make([]model.Event, 0)
-	if err := ParseStream(input, func(e model.Event) error {
-		events = append(events, e)
-		return nil
-	}); err != nil {
-		t.Fatalf("ParseStream(DownstreamEnd) error: %v", err)
-	}
-	if got, want := len(events), 2; got != want {
-		t.Fatalf("len(events) = %d, want %d", got, want)
-	}
-	if got, want := events[1].Type, model.EventResponse; got != want {
-		t.Fatalf("events[1].Type = %q, want %q", got, want)
-	}
-	if got, want := events[1].AccessLogType, model.AccessLogTypeDownstreamEnd; got != want {
-		t.Fatalf("events[1].AccessLogType = %q, want %q", got, want)
-	}
-	if got, want := events[1].Sequence, 1; got != want {
-		t.Fatalf("events[1].Sequence = %d, want %d", got, want)
-	}
-}
-
 func TestParseFlatEnvoyAccessLogAsInlineValidatedRequest(t *testing.T) {
 	input := strings.NewReader("{" +
 		`"connection_id":7,` +
@@ -175,6 +146,17 @@ func TestParseFlatEnvoyAccessLogRequiresConnectionID(t *testing.T) {
 	err := ParseStream(input, func(e model.Event) error { return nil })
 	if err == nil {
 		t.Fatal("ParseStream(flat Envoy access log without connection_id) error = nil, want error")
+	}
+}
+
+func TestParseRejectsCanonicalDownstreamEndAccessLogType(t *testing.T) {
+	input := strings.NewReader("{" +
+		`"type":"DownstreamEnd","connection_id":1,"timestamp":"2026-02-27T03:10:22.101Z","status":503` +
+		"}\n")
+
+	err := ParseStream(input, func(e model.Event) error { return nil })
+	if err == nil {
+		t.Fatal("ParseStream(DownstreamEnd) error = nil, want error")
 	}
 }
 

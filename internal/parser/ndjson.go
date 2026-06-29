@@ -188,9 +188,6 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		case model.EventType(model.AccessLogTypeDownstreamStart):
 			event.Type = model.EventRequest
 			event.AccessLogType = model.AccessLogTypeDownstreamStart
-		case model.EventType(model.AccessLogTypeDownstreamEnd):
-			event.Type = model.EventResponse
-			event.AccessLogType = model.AccessLogTypeDownstreamEnd
 		}
 
 		// Optional meta event validation
