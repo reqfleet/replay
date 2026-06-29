@@ -2,12 +2,14 @@ package engine
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -376,6 +378,238 @@ func TestReplayMarksValidationFailedOnStatusMismatch(t *testing.T) {
 	}
 	if summary.Outcome != RunPartialSuccess {
 		t.Fatalf("summary.Outcome = %s, want %s", summary.Outcome, RunPartialSuccess)
+	}
+}
+
+func TestDownstreamStartRequestSkipsInlineResponseValidation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("boom"))
+	}))
+	defer srv.Close()
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Status = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:          model.EventRequest,
+			AccessLogType: model.AccessLogTypeDownstreamStart,
+			ConnectionID:  1,
+			Sequence:      1,
+			Status:        http.StatusOK,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    target.Scheme,
+				Authority: target.Host,
+				Path:      "/",
+			},
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if got, want := summary.ValidationFailed, int64(0); got != want {
+		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
+	}
+	if got, want := summary.Outcome, RunSuccess; got != want {
+		t.Fatalf("summary.Outcome = %s, want %s", got, want)
+	}
+}
+
+func TestDownstreamEndRequestValidatesInlineResponseStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("boom"))
+	}))
+	defer srv.Close()
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Status = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:          model.EventRequest,
+			AccessLogType: model.AccessLogTypeDownstreamEnd,
+			ConnectionID:  1,
+			Sequence:      1,
+			Status:        http.StatusOK,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    target.Scheme,
+				Authority: target.Host,
+				Path:      "/",
+			},
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if got, want := summary.ValidationFailed, int64(1); got != want {
+		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
+	}
+	if got, want := summary.Outcome, RunPartialSuccess; got != want {
+		t.Fatalf("summary.Outcome = %s, want %s", got, want)
+	}
+}
+
+func TestDownstreamEndRequestPreservesLaterResponseValidation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Status = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:          model.EventRequest,
+			AccessLogType: model.AccessLogTypeDownstreamEnd,
+			ConnectionID:  1,
+			Sequence:      1,
+			Status:        http.StatusOK,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    target.Scheme,
+				Authority: target.Host,
+				Path:      "/",
+			},
+		},
+		{
+			Type:         model.EventResponse,
+			ConnectionID: 1,
+			Sequence:     1,
+			Status:       http.StatusInternalServerError,
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if got, want := summary.ValidationFailed, int64(1); got != want {
+		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
+	}
+	if got, want := summary.Outcome, RunPartialSuccess; got != want {
+		t.Fatalf("summary.Outcome = %s, want %s", got, want)
+	}
+}
+
+func TestReplayMarksUnmatchedExpectedResponseAsValidationFailed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Status = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: 1,
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    target.Scheme,
+				Authority: target.Host,
+				Path:      "/",
+			},
+		},
+		{
+			Type:         model.EventResponse,
+			ConnectionID: 1,
+			Sequence:     2,
+			Status:       http.StatusOK,
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if got, want := summary.ValidationFailed, int64(1); got != want {
+		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
+	}
+}
+
+func TestReplaySkipsValidationForSkippedRequestResponse(t *testing.T) {
+	cfg := config.Default()
+	cfg.Replay.DryRun = true
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Status = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: 1,
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    "http",
+				Authority: "example.invalid",
+				Path:      "/",
+			},
+		},
+		{
+			Type:         model.EventResponse,
+			ConnectionID: 1,
+			Sequence:     1,
+			Status:       http.StatusOK,
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if got, want := summary.Skipped, int64(1); got != want {
+		t.Fatalf("summary.Skipped = %d, want %d", got, want)
+	}
+	if got, want := summary.ValidationFailed, int64(0); got != want {
+		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
 	}
 }
 
@@ -1323,6 +1557,54 @@ func TestReplayHTTP2PacingUsesConnectionOrderWithUniqueStreamIDs(t *testing.T) {
 	}
 	if delta := second.at.Sub(first.at); delta < 80*time.Millisecond {
 		t.Fatalf("request start delta = %s, want at least 80ms", delta)
+	}
+}
+
+func TestPacingClockDoesNotRewindForNonIncreasingTimestamps(t *testing.T) {
+	base := time.Date(2026, 2, 27, 3, 10, 21, 0, time.UTC)
+	cfg := config.Default()
+	cfg.Replay.Pacing.Enabled = true
+	cfg.Replay.Pacing.MaxSleepDelta = 500 * time.Millisecond
+
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
+
+	start := time.Now()
+	for _, ts := range []time.Time{
+		base,
+		base.Add(100 * time.Millisecond),
+		base.Add(50 * time.Millisecond),
+		base.Add(150 * time.Millisecond),
+	} {
+		if err := eng.paceRequest(context.Background(), cs, model.Event{Timestamp: ts.Format(time.RFC3339Nano)}); err != nil {
+			t.Fatalf("paceRequest(%s) error: %v", ts.Format(time.RFC3339Nano), err)
+		}
+	}
+	elapsed := time.Since(start)
+	if elapsed < 125*time.Millisecond {
+		t.Fatalf("paceRequest(non-increasing timestamps) elapsed = %s, want at least 125ms", elapsed)
+	}
+}
+
+func TestPacingSleepDoesNotLogByDefault(t *testing.T) {
+	var buf bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() {
+		slog.SetDefault(previousLogger)
+	})
+
+	base := time.Date(2026, 2, 27, 3, 10, 21, 0, time.UTC)
+	cfg := config.Default()
+	cfg.Replay.Pacing.Enabled = true
+	cfg.Replay.Pacing.MaxSleepDelta = time.Millisecond
+
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	if err := eng.sleepForPacing(context.Background(), base, true, base.Add(100*time.Millisecond).Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("sleepForPacing() error: %v", err)
+	}
+	if got := buf.String(); got != "" {
+		t.Fatalf("sleepForPacing() log output = %q, want empty", got)
 	}
 }
 

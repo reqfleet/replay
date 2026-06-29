@@ -144,6 +144,20 @@ Replay derives a strictly increasing per-connection sequence internally from
 record order when the recorder does not emit one. If a recorder or converter
 does provide `sequence`, replay preserves it as long as it remains monotonic.
 
+Envoy request-start access logs MAY set `type: "DownstreamStart"` exactly.
+Replay maps that exact Envoy type to an internal request event without
+case-folding or spelling normalization. These events do not contain response
+data, so replay MUST NOT use inline `status`, headers, or body fields from them
+for response validation.
+
+Replay accepts Envoy's common single completion access-log shape when it is
+emitted as structured JSON with flat fields such as `connection_id`,
+`start_time`, `method`, `path`, `protocol`, `authority`, `response_code`, and
+`duration_ms`. That shape is mapped to an internal request event so the request
+can be replayed and the response code can be validated inline. The flat log MUST
+include `connection_id`; replay uses the same per-connection sequence derivation
+as canonical request/response logs.
+
 ### Headers
 
 * Stored as `map[string][]string`
@@ -237,7 +251,8 @@ Replay engine MUST:
 5. Replay requests in observed connection order for HTTP/1.1 and serialized HTTP/2.
 6. In multiplexed HTTP/2 mode, dispatch request sends concurrently as request events arrive.
 7. Optionally sleep based on timestamp deltas in observed connection order.
-8. Close connection state when `connection_close` is encountered, or at EOF if the recorder did not emit one.
+8. When pacing timestamps move backward or stay equal, keep the existing pacing clock and do not sleep.
+9. Close connection state when `connection_close` is encountered, or at EOF if the recorder did not emit one.
 
 ### HTTP/1.1
 

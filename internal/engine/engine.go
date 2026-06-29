@@ -216,16 +216,18 @@ type connState struct {
 	semAcquired bool
 
 	// Per-connection event processing state
-	previousTimestamp    time.Time
-	previousTimestampSet bool
-	pendingActual        map[int]requestExecution
-	pendingExpected      map[int]model.Event
-	sent                 int64
-	responsesReceived    int64
-	sendErrors           int64
-	validationFailed     int64
-	skipped              int64
-	aborted              bool
+	previousTimestamp     time.Time
+	previousTimestampSet  bool
+	pendingActual         map[int]requestExecution
+	pendingExpected       map[int]model.Event
+	pendingInlineExpected map[int]model.Event
+	skippedValidation     map[int]struct{}
+	sent                  int64
+	responsesReceived     int64
+	sendErrors            int64
+	validationFailed      int64
+	skipped               int64
+	aborted               bool
 
 	// Concurrent H/2 checkpointing advances the persisted watermark only after
 	// every earlier observed request has reached a terminal checkpointable state.
@@ -241,10 +243,35 @@ type connState struct {
 
 func (e *Engine) newConnState(connKey model.ConnectionKey) *connState {
 	return &connState{
-		connKey:         connKey,
-		pendingActual:   make(map[int]requestExecution),
-		pendingExpected: make(map[int]model.Event),
+		connKey:               connKey,
+		pendingActual:         make(map[int]requestExecution),
+		pendingExpected:       make(map[int]model.Event),
+		pendingInlineExpected: make(map[int]model.Event),
 	}
+}
+
+func (cs *connState) skipValidationForSequence(sequence int) {
+	if sequence <= 0 {
+		return
+	}
+	if cs.skippedValidation == nil {
+		cs.skippedValidation = make(map[int]struct{})
+	}
+	cs.skippedValidation[sequence] = struct{}{}
+	delete(cs.pendingExpected, sequence)
+	delete(cs.pendingInlineExpected, sequence)
+	delete(cs.pendingActual, sequence)
+}
+
+func (cs *connState) consumeSkippedValidation(sequence int) bool {
+	if len(cs.skippedValidation) == 0 {
+		return false
+	}
+	if _, ok := cs.skippedValidation[sequence]; !ok {
+		return false
+	}
+	delete(cs.skippedValidation, sequence)
+	return true
 }
 
 func (e *Engine) detectHTTP2ForConn(cs *connState, firstRequest model.Event) {
@@ -418,6 +445,8 @@ func (e *Engine) finalizeConn(cs *connState, connSem chan struct{}, result *Summ
 	if cs.multiplexed {
 		cs.h2WG.Wait()
 	}
+	e.validatePendingInlineResponses(cs)
+	e.finalizePendingValidation(cs)
 	e.collectConnResults(cs, result)
 	e.closeConnResources(cs, connSem)
 }
@@ -561,10 +590,11 @@ func (e *Engine) paceRequest(ctx context.Context, cs *connState, requestEvent mo
 	if err := e.sleepForPacing(ctx, cs.previousTimestamp, cs.previousTimestampSet, requestEvent.Timestamp); err != nil {
 		return err
 	}
-	if parsedTimestamp, ok := model.ParseTimestamp(requestEvent.Timestamp); ok {
-		cs.previousTimestamp = parsedTimestamp
-		cs.previousTimestampSet = true
-	}
+	cs.previousTimestamp, cs.previousTimestampSet = advancePacingClock(
+		cs.previousTimestamp,
+		cs.previousTimestampSet,
+		requestEvent.Timestamp,
+	)
 	return nil
 }
 
@@ -573,11 +603,13 @@ func (e *Engine) prepareRequest(cs *connState, requestEvent model.Event, checkpo
 
 	if checkpoints.alreadyProcessed(reqKey, requestEvent.Sequence) {
 		cs.skipped++
+		cs.skipValidationForSequence(requestEvent.Sequence)
 		return reqKey, true, false
 	}
 
 	if e.shouldSkipByIdempotencyPolicy(requestEvent) {
 		cs.skipped++
+		cs.skipValidationForSequence(requestEvent.Sequence)
 		if err := checkpoints.markProcessed(reqKey, requestEvent.Sequence); err != nil {
 			cs.aborted = true
 			return reqKey, true, true
@@ -587,6 +619,7 @@ func (e *Engine) prepareRequest(cs *connState, requestEvent model.Event, checkpo
 
 	if e.cfg.Replay.DryRun {
 		cs.skipped++
+		cs.skipValidationForSequence(requestEvent.Sequence)
 		return reqKey, true, false
 	}
 
@@ -598,17 +631,20 @@ func (e *Engine) prepareConcurrentRequest(cs *connState, requestEvent model.Even
 
 	if checkpoints.alreadyProcessed(reqKey, requestEvent.Sequence) {
 		cs.skipped++
+		cs.skipValidationForSequence(requestEvent.Sequence)
 		return reqKey, true, 0
 	}
 
 	if e.shouldSkipByIdempotencyPolicy(requestEvent) {
 		cs.skipped++
+		cs.skipValidationForSequence(requestEvent.Sequence)
 		cs.trackCheckpointSequence(requestEvent.Sequence)
 		return reqKey, true, cs.completeCheckpointSequence(requestEvent.Sequence)
 	}
 
 	if e.cfg.Replay.DryRun {
 		cs.skipped++
+		cs.skipValidationForSequence(requestEvent.Sequence)
 		return reqKey, true, 0
 	}
 
@@ -674,8 +710,50 @@ func (e *Engine) finishRequestSuccess(cs *connState, requestEvent model.Event, e
 		delete(cs.pendingExpected, requestEvent.Sequence)
 	} else {
 		cs.pendingActual[requestEvent.Sequence] = exec
+		if expected, ok := e.expectedResponseFromRequestEvent(requestEvent); ok {
+			cs.pendingInlineExpected[requestEvent.Sequence] = expected
+		}
 	}
 	return false
+}
+
+func (e *Engine) validatePendingInlineResponses(cs *connState) {
+	for sequence, expected := range cs.pendingInlineExpected {
+		actual, ok := cs.pendingActual[sequence]
+		if !ok {
+			continue
+		}
+		if e.responseValidationFailed(expected, actual) {
+			cs.validationFailed++
+		}
+		delete(cs.pendingInlineExpected, sequence)
+		delete(cs.pendingActual, sequence)
+	}
+}
+
+func (e *Engine) finalizePendingValidation(cs *connState) {
+	if !e.shouldRetainResponseForValidation() {
+		return
+	}
+	cs.validationFailed += int64(len(cs.pendingExpected))
+	cs.validationFailed += int64(len(cs.pendingInlineExpected))
+	clear(cs.pendingExpected)
+	clear(cs.pendingInlineExpected)
+	clear(cs.pendingActual)
+}
+
+func (e *Engine) expectedResponseFromRequestEvent(requestEvent model.Event) (model.Event, bool) {
+	if !e.shouldRetainResponseForValidation() || requestEvent.AccessLogType == model.AccessLogTypeDownstreamStart || requestEvent.Status == 0 {
+		return model.Event{}, false
+	}
+	return model.Event{
+		Type:         model.EventResponse,
+		Node:         requestEvent.Node,
+		ConnectionID: requestEvent.ConnectionID,
+		StreamID:     requestEvent.StreamID,
+		Sequence:     requestEvent.Sequence,
+		Status:       requestEvent.Status,
+	}, true
 }
 
 // handleResponseEvent processes a response event for validation rendezvous.
@@ -685,11 +763,15 @@ func (e *Engine) handleResponseEvent(cs *connState, ev model.Event) {
 	if !e.shouldRetainResponseForValidation() {
 		return
 	}
+	if cs.consumeSkippedValidation(ev.Sequence) {
+		return
+	}
 	if actual, ok := cs.pendingActual[ev.Sequence]; ok {
 		if e.responseValidationFailed(ev, actual) {
 			cs.validationFailed++
 		}
 		delete(cs.pendingActual, ev.Sequence)
+		delete(cs.pendingInlineExpected, ev.Sequence)
 	} else {
 		cs.pendingExpected[ev.Sequence] = ev
 	}
@@ -832,7 +914,19 @@ func (e *Engine) detectHTTP2(requests []model.Event) (http2 bool, multiplexed bo
 	return http2, multiplexed
 }
 
+func cloneResponsesBySequence(responses map[int]model.Event) map[int]model.Event {
+	if len(responses) == 0 {
+		return nil
+	}
+	cloned := make(map[int]model.Event, len(responses))
+	for sequence, response := range responses {
+		cloned[sequence] = response
+	}
+	return cloned
+}
+
 func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Client, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
+	pendingResponses := cloneResponsesBySequence(responsesBySequence)
 	result := Summary{}
 	if len(requests) == 0 {
 		return result
@@ -859,20 +953,23 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.Outcome = RunFailed
 			return result
 		}
-		if parsedTimestamp, ok := model.ParseTimestamp(requestEvent.Timestamp); ok {
-			previousTimestamp = parsedTimestamp
-			previousTimestampSet = true
-		}
+		previousTimestamp, previousTimestampSet = advancePacingClock(
+			previousTimestamp,
+			previousTimestampSet,
+			requestEvent.Timestamp,
+		)
 
 		requestKey := model.ConnectionKey{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID}
 
 		if checkpoints.alreadyProcessed(requestKey, requestEvent.Sequence) {
 			result.Skipped++
+			delete(pendingResponses, requestEvent.Sequence)
 			continue
 		}
 
 		if e.shouldSkipByIdempotencyPolicy(requestEvent) {
 			result.Skipped++
+			delete(pendingResponses, requestEvent.Sequence)
 			if err := checkpoints.markProcessed(requestKey, requestEvent.Sequence); err != nil {
 				result.ConnectionsAborted++
 				result.Outcome = RunFailed
@@ -883,6 +980,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 
 		// Dry-run: do not send network requests; count as skipped (do not persist checkpoint)
 		if e.cfg.Replay.DryRun {
+			delete(pendingResponses, requestEvent.Sequence)
 			result.Skipped++
 			continue
 		}
@@ -913,7 +1011,8 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.Outcome = RunFailed
 			return result
 		}
-		if expected, ok := responsesBySequence[requestEvent.Sequence]; ok {
+		if expected, ok := pendingResponses[requestEvent.Sequence]; ok {
+			delete(pendingResponses, requestEvent.Sequence)
 			if e.responseValidationFailed(expected, exec) {
 				if slog.Default().Enabled(ctx, slog.LevelDebug) {
 					slog.DebugContext(ctx, "Validation failed",
@@ -932,8 +1031,22 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 					result.Outcome = RunPartialSuccess
 				}
 			}
+		} else if expected, ok := e.expectedResponseFromRequestEvent(requestEvent); ok {
+			if e.responseValidationFailed(expected, exec) {
+				result.ValidationFailed++
+				if result.Outcome == "" {
+					result.Outcome = RunPartialSuccess
+				}
+			}
 		}
 
+	}
+
+	if e.shouldRetainResponseForValidation() && len(pendingResponses) > 0 {
+		result.ValidationFailed += int64(len(pendingResponses))
+		if result.Outcome == "" {
+			result.Outcome = RunPartialSuccess
+		}
 	}
 
 	if result.ConnectionsAborted == 0 {
@@ -964,13 +1077,14 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 	results := make(chan Summary, len(streams))
 	var wg sync.WaitGroup
 
-	for _, streamRequests := range streams {
+	responseStreams := groupResponsesByStream(responsesBySequence)
+	for streamID, streamRequests := range streams {
 		wg.Go(func() {
 			if ctx.Err() != nil {
 				results <- Summary{ConnectionsAborted: 1, Outcome: RunFailed}
 				return
 			}
-			results <- e.replayConnectionSerialized(ctx, client, streamRequests, responsesBySequence, checkpoints)
+			results <- e.replayConnectionSerialized(ctx, client, streamRequests, responseStreams[streamID], checkpoints)
 		})
 	}
 
@@ -1024,6 +1138,23 @@ func groupRequestsByStream(requests []model.Event) map[int][]model.Event {
 	return grouped
 }
 
+func groupResponsesByStream(responses map[int]model.Event) map[int]map[int]model.Event {
+	grouped := make(map[int]map[int]model.Event)
+	for sequence, response := range responses {
+		streamID := response.StreamID
+		if streamID == 0 {
+			streamID = 1
+		}
+		streamResponses := grouped[streamID]
+		if streamResponses == nil {
+			streamResponses = make(map[int]model.Event)
+			grouped[streamID] = streamResponses
+		}
+		streamResponses[sequence] = response
+	}
+	return grouped
+}
+
 func connectionBelongsToShard(connectionKey model.ConnectionKey, shardIndex, shardCount int) bool {
 	if shardCount <= 1 {
 		return true
@@ -1035,6 +1166,14 @@ func connectionBelongsToShard(connectionKey model.ConnectionKey, shardIndex, sha
 	binary.LittleEndian.PutUint64(buf[:], uint64(connectionKey.ConnectionID))
 	_, _ = hasher.Write(buf[:])
 	return int(hasher.Sum32()%uint32(shardCount)) == shardIndex
+}
+
+func advancePacingClock(previous time.Time, previousSet bool, currentRaw string) (time.Time, bool) {
+	current, ok := model.ParseTimestamp(currentRaw)
+	if !ok || (previousSet && !current.After(previous)) {
+		return previous, previousSet
+	}
+	return current, true
 }
 
 func (e *Engine) sleepForPacing(ctx context.Context, previous time.Time, previousSet bool, currentRaw string) error {
@@ -1050,7 +1189,6 @@ func (e *Engine) sleepForPacing(ctx context.Context, previous time.Time, previou
 	if max := e.cfg.Replay.Pacing.MaxSleepDelta; max > 0 && delta > max {
 		delta = max
 	}
-
 	timer := time.NewTimer(delta)
 	defer timer.Stop()
 	select {

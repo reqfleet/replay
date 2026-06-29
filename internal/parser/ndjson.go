@@ -118,7 +118,21 @@ func ParseFileStream(path string, format string, handler func(model.Event) error
 
 type rawEvent struct {
 	model.Event
-	ConnectionID *int `json:"connection_id"`
+	ConnectionID            *int    `json:"connection_id"`
+	StartTime               string  `json:"start_time"`
+	Method                  string  `json:"method"`
+	Path                    string  `json:"path"`
+	Protocol                string  `json:"protocol"`
+	Authority               string  `json:"authority"`
+	ResponseCode            int     `json:"response_code"`
+	DurationMillis          float64 `json:"duration_ms"`
+	DownstreamRemoteAddress string  `json:"downstream_remote_address"`
+	UserAgent               string  `json:"user_agent"`
+}
+
+func isMalformedDownstreamStartRequest(event model.Event) bool {
+	return event.AccessLogType == model.AccessLogTypeDownstreamStart &&
+		(event.HTTP.Authority == "" || event.HTTP.Path == "")
 }
 
 // ParseStream reads NDJSON events from r and invokes handler for each parsed event.
@@ -155,6 +169,26 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			event.ConnectionID = *ev.ConnectionID
 		}
 		hasConnectionID := ev.ConnectionID != nil
+		if event.Type == "" && ev.StartTime != "" && ev.Method != "" && ev.Path != "" {
+			event.Type = model.EventRequest
+			event.AccessLogType = model.AccessLogTypeDownstreamEnd
+			event.Timestamp = ev.StartTime
+			event.Status = ev.ResponseCode
+			event.DurationMS = ev.DurationMillis
+			event.DownstreamRemoteAddress = ev.DownstreamRemoteAddress
+			event.HTTP.Version = ev.Protocol
+			event.HTTP.Method = ev.Method
+			event.HTTP.Authority = ev.Authority
+			event.HTTP.Path = ev.Path
+			if ev.UserAgent != "" && ev.UserAgent != "-" {
+				event.Headers = map[string][]string{"user-agent": {ev.UserAgent}}
+			}
+		}
+		switch event.Type {
+		case model.EventType(model.AccessLogTypeDownstreamStart):
+			event.Type = model.EventRequest
+			event.AccessLogType = model.AccessLogTypeDownstreamStart
+		}
 
 		// Optional meta event validation
 		if event.Type == model.EventMeta {
@@ -188,6 +222,9 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		case model.EventRequest:
 			if !hasConnectionID {
 				return fmt.Errorf("line %d: request missing connection_id", line)
+			}
+			if isMalformedDownstreamStartRequest(event) {
+				continue
 			}
 			connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
 			sequence, err := stateForConnection(connectionKey).recordRequest(event.StreamID, event.Sequence)
