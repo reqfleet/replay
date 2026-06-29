@@ -421,6 +421,7 @@ func (e *Engine) finalizeConn(cs *connState, connSem chan struct{}, result *Summ
 		cs.h2WG.Wait()
 	}
 	e.validatePendingInlineResponses(cs)
+	e.finalizePendingValidation(cs)
 	e.collectConnResults(cs, result)
 	e.closeConnResources(cs, connSem)
 }
@@ -697,6 +698,17 @@ func (e *Engine) validatePendingInlineResponses(cs *connState) {
 		delete(cs.pendingInlineExpected, sequence)
 		delete(cs.pendingActual, sequence)
 	}
+}
+
+func (e *Engine) finalizePendingValidation(cs *connState) {
+	if !e.shouldRetainResponseForValidation() {
+		return
+	}
+	cs.validationFailed += int64(len(cs.pendingExpected))
+	cs.validationFailed += int64(len(cs.pendingInlineExpected))
+	clear(cs.pendingExpected)
+	clear(cs.pendingInlineExpected)
+	clear(cs.pendingActual)
 }
 
 func (e *Engine) expectedResponseFromRequestEvent(requestEvent model.Event) (model.Event, bool) {

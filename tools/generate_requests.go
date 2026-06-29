@@ -116,10 +116,12 @@ func emitGeneratedEvents(logType model.AccessLogType, reqs, conns int, now time.
 
 func generatedEvents(logType model.AccessLogType, reqs, conns int, now time.Time, authority, scheme, port, apiKey, requestPath string, status int, durationMS float64) []model.Event {
 	events := []model.Event{}
-	_ = emitGeneratedEvents(logType, reqs, conns, now, authority, scheme, port, apiKey, requestPath, status, durationMS, func(event model.Event) error {
+	if err := emitGeneratedEvents(logType, reqs, conns, now, authority, scheme, port, apiKey, requestPath, status, durationMS, func(event model.Event) error {
 		events = append(events, event)
 		return nil
-	})
+	}); err != nil {
+		panic(fmt.Sprintf("unexpected error generating events: %v", err))
+	}
 	return events
 }
 

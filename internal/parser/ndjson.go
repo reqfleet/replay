@@ -122,25 +122,29 @@ type rawEvent struct {
 	AccessLogType model.AccessLogType `json:"access_log_type"`
 }
 
-func normalizeAccessLogEvent(event model.Event, rawLogType model.AccessLogType) (model.Event, error) {
-	if event.AccessLogType == "" {
-		event.AccessLogType = rawLogType
-	}
-	switch strings.ToLower(string(event.AccessLogType)) {
-	case "downstreamstart", "downstream_start", "downstream-start":
-		event.AccessLogType = model.AccessLogTypeDownstreamStart
-	case "downstreamend", "downstream_end", "downstream-end":
-		event.AccessLogType = model.AccessLogTypeDownstreamEnd
-	}
+func normalizeAccessLogEvent(event model.Event, rawLogType model.AccessLogType) model.Event {
 	switch strings.ToLower(string(event.Type)) {
 	case "downstreamstart", "downstream_start", "downstream-start":
 		event.Type = model.EventRequest
 		event.AccessLogType = model.AccessLogTypeDownstreamStart
+		return event
 	case "downstreamend", "downstream_end", "downstream-end":
 		event.Type = model.EventResponse
 		event.AccessLogType = model.AccessLogTypeDownstreamEnd
+		return event
 	}
-	return event, nil
+
+	logType := event.AccessLogType
+	if logType == "" {
+		logType = rawLogType
+	}
+	switch strings.ToLower(string(logType)) {
+	case "downstreamstart", "downstream_start", "downstream-start":
+		event.AccessLogType = model.AccessLogTypeDownstreamStart
+	case "downstreamend", "downstream_end", "downstream-end":
+		event.AccessLogType = model.AccessLogTypeDownstreamEnd
+	}
+	return event
 }
 
 // ParseStream reads NDJSON events from r and invokes handler for each parsed event.
@@ -172,10 +176,7 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return fmt.Errorf("line %d: invalid json: %w", line, err)
 		}
-		event, err := normalizeAccessLogEvent(ev.Event, ev.AccessLogType)
-		if err != nil {
-			return fmt.Errorf("line %d: %w", line, err)
-		}
+		event := normalizeAccessLogEvent(ev.Event, ev.AccessLogType)
 		if ev.ConnectionID != nil {
 			event.ConnectionID = *ev.ConnectionID
 		}

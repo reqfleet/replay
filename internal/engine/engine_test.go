@@ -525,6 +525,53 @@ func TestDownstreamEndRequestPreservesLaterResponseValidation(t *testing.T) {
 	}
 }
 
+func TestReplayMarksUnmatchedExpectedResponseAsValidationFailed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Status = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: 1,
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    target.Scheme,
+				Authority: target.Host,
+				Path:      "/",
+			},
+		},
+		{
+			Type:         model.EventResponse,
+			ConnectionID: 1,
+			Sequence:     2,
+			Status:       http.StatusOK,
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if got, want := summary.ValidationFailed, int64(1); got != want {
+		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
+	}
+}
+
 func TestReplayTreatsConnectionRefusedAsPartialSuccess(t *testing.T) {
 	addr := closedLocalAddress(t)
 
