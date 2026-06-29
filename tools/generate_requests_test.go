@@ -50,6 +50,9 @@ func TestGeneratedDownstreamStartRequestOmitsResponseFields(t *testing.T) {
 	if got, want := req.DurationMS, float64(0); got != want {
 		t.Fatalf("req.DurationMS = %v, want %v", got, want)
 	}
+	if got, want := req.HTTP.Scheme, "http"; got != want {
+		t.Fatalf("req.HTTP.Scheme = %q, want %q", got, want)
+	}
 }
 
 func TestGeneratedDownstreamEndRequestIncludesResponseFields(t *testing.T) {
@@ -63,6 +66,14 @@ func TestGeneratedDownstreamEndRequestIncludesResponseFields(t *testing.T) {
 	}
 	if got, want := req.DurationMS, float64(16); got != want {
 		t.Fatalf("req.DurationMS = %v, want %v", got, want)
+	}
+}
+
+func TestGeneratedRequestUsesBaseScheme(t *testing.T) {
+	req := generatedRequestEvent(model.AccessLogTypeDownstreamStart, 7, time.Unix(100, 0).UTC(), "example.com", "https", "443", "key", "/resource", 503, 16)
+
+	if got, want := req.HTTP.Scheme, "https"; got != want {
+		t.Fatalf("req.HTTP.Scheme = %q, want %q", got, want)
 	}
 }
 

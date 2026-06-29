@@ -53,6 +53,7 @@ func generatedRequestEvent(logType model.AccessLogType, connID int, ts time.Time
 		},
 		HTTP: model.HTTPRequestMeta{
 			Version:   "HTTP/1.1",
+			Scheme:    scheme,
 			Authority: authority,
 			Method:    "GET",
 			Path:      requestPath,
@@ -66,19 +67,23 @@ func generatedRequestEvent(logType model.AccessLogType, connID int, ts time.Time
 	return req
 }
 
-func generatedEvents(logType model.AccessLogType, reqs, conns int, now time.Time, authority, scheme, port, apiKey, requestPath string, status int, durationMS float64) []model.Event {
-	events := []model.Event{{
+func emitGeneratedEvents(logType model.AccessLogType, reqs, conns int, now time.Time, authority, scheme, port, apiKey, requestPath string, status int, durationMS float64, emit func(model.Event) error) error {
+	if err := emit(model.Event{
 		Type:          model.EventMeta,
 		FormatVersion: "1.0",
-	}}
+	}); err != nil {
+		return err
+	}
 
 	for c := 1; c <= conns; c++ {
-		events = append(events, model.Event{
+		if err := emit(model.Event{
 			Type:                    model.EventConnectionOpen,
 			ConnectionID:            c,
 			Timestamp:               now.Format(time.RFC3339Nano),
 			DownstreamRemoteAddress: "172.18.0.1:45398",
-		})
+		}); err != nil {
+			return err
+		}
 	}
 
 	for r := 1; r <= reqs; r++ {
@@ -88,20 +93,33 @@ func generatedEvents(logType model.AccessLogType, reqs, conns int, now time.Time
 		}
 		ts := now.Add(time.Duration(r) * 100 * time.Millisecond)
 		for c := 1; c <= conns; c++ {
-			events = append(events, generatedRequestEvent(logType, c, ts, authority, scheme, port, apiKey, p, status, durationMS))
+			if err := emit(generatedRequestEvent(logType, c, ts, authority, scheme, port, apiKey, p, status, durationMS)); err != nil {
+				return err
+			}
 		}
 	}
 
 	closeTimestamp := now.Add(time.Duration(reqs+1) * 100 * time.Millisecond).Format(time.RFC3339Nano)
 	for c := 1; c <= conns; c++ {
-		events = append(events, model.Event{
+		if err := emit(model.Event{
 			Type:         model.EventConnectionClose,
 			ConnectionID: c,
 			Timestamp:    closeTimestamp,
 			Reason:       "remote_close",
-		})
+		}); err != nil {
+			return err
+		}
 	}
 
+	return nil
+}
+
+func generatedEvents(logType model.AccessLogType, reqs, conns int, now time.Time, authority, scheme, port, apiKey, requestPath string, status int, durationMS float64) []model.Event {
+	events := []model.Event{}
+	_ = emitGeneratedEvents(logType, reqs, conns, now, authority, scheme, port, apiKey, requestPath, status, durationMS, func(event model.Event) error {
+		events = append(events, event)
+		return nil
+	})
 	return events
 }
 
@@ -153,11 +171,11 @@ func main() {
 
 	now := time.Now().UTC()
 
-	for _, event := range generatedEvents(logType, *reqs, *conns, now, authority, scheme, port, *apiKey, *requestPath, *status, *dur) {
-		if err := writeJSONLine(f, event); err != nil {
-			fmt.Fprintf(os.Stderr, "write event: %v\n", err)
-			os.Exit(2)
-		}
+	if err := emitGeneratedEvents(logType, *reqs, *conns, now, authority, scheme, port, *apiKey, *requestPath, *status, *dur, func(event model.Event) error {
+		return writeJSONLine(f, event)
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "write event: %v\n", err)
+		os.Exit(2)
 	}
 
 	fmt.Printf("Generated %d connections with %d requests each to %s\n", *conns, *reqs, *out)

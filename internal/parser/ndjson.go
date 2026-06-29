@@ -137,7 +137,7 @@ func normalizeAccessLogEvent(event model.Event, rawLogType model.AccessLogType) 
 		event.Type = model.EventRequest
 		event.AccessLogType = model.AccessLogTypeDownstreamStart
 	case "downstreamend", "downstream_end":
-		event.Type = model.EventRequest
+		event.Type = model.EventResponse
 		event.AccessLogType = model.AccessLogTypeDownstreamEnd
 	}
 	return event, nil

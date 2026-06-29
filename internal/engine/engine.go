@@ -216,16 +216,17 @@ type connState struct {
 	semAcquired bool
 
 	// Per-connection event processing state
-	previousTimestamp    time.Time
-	previousTimestampSet bool
-	pendingActual        map[int]requestExecution
-	pendingExpected      map[int]model.Event
-	sent                 int64
-	responsesReceived    int64
-	sendErrors           int64
-	validationFailed     int64
-	skipped              int64
-	aborted              bool
+	previousTimestamp     time.Time
+	previousTimestampSet  bool
+	pendingActual         map[int]requestExecution
+	pendingExpected       map[int]model.Event
+	pendingInlineExpected map[int]model.Event
+	sent                  int64
+	responsesReceived     int64
+	sendErrors            int64
+	validationFailed      int64
+	skipped               int64
+	aborted               bool
 
 	// Concurrent H/2 checkpointing advances the persisted watermark only after
 	// every earlier observed request has reached a terminal checkpointable state.
@@ -241,9 +242,10 @@ type connState struct {
 
 func (e *Engine) newConnState(connKey model.ConnectionKey) *connState {
 	return &connState{
-		connKey:         connKey,
-		pendingActual:   make(map[int]requestExecution),
-		pendingExpected: make(map[int]model.Event),
+		connKey:               connKey,
+		pendingActual:         make(map[int]requestExecution),
+		pendingExpected:       make(map[int]model.Event),
+		pendingInlineExpected: make(map[int]model.Event),
 	}
 }
 
@@ -418,6 +420,7 @@ func (e *Engine) finalizeConn(cs *connState, connSem chan struct{}, result *Summ
 	if cs.multiplexed {
 		cs.h2WG.Wait()
 	}
+	e.validatePendingInlineResponses(cs)
 	e.collectConnResults(cs, result)
 	e.closeConnResources(cs, connSem)
 }
@@ -673,14 +676,27 @@ func (e *Engine) finishRequestSuccess(cs *connState, requestEvent model.Event, e
 			cs.validationFailed++
 		}
 		delete(cs.pendingExpected, requestEvent.Sequence)
-	} else if expected, ok := e.expectedResponseFromRequestEvent(requestEvent); ok {
-		if e.responseValidationFailed(expected, exec) {
-			cs.validationFailed++
-		}
 	} else {
 		cs.pendingActual[requestEvent.Sequence] = exec
+		if expected, ok := e.expectedResponseFromRequestEvent(requestEvent); ok {
+			cs.pendingInlineExpected[requestEvent.Sequence] = expected
+		}
 	}
 	return false
+}
+
+func (e *Engine) validatePendingInlineResponses(cs *connState) {
+	for sequence, expected := range cs.pendingInlineExpected {
+		actual, ok := cs.pendingActual[sequence]
+		if !ok {
+			continue
+		}
+		if e.responseValidationFailed(expected, actual) {
+			cs.validationFailed++
+		}
+		delete(cs.pendingInlineExpected, sequence)
+		delete(cs.pendingActual, sequence)
+	}
 }
 
 func (e *Engine) expectedResponseFromRequestEvent(requestEvent model.Event) (model.Event, bool) {
@@ -709,6 +725,7 @@ func (e *Engine) handleResponseEvent(cs *connState, ev model.Event) {
 			cs.validationFailed++
 		}
 		delete(cs.pendingActual, ev.Sequence)
+		delete(cs.pendingInlineExpected, ev.Sequence)
 	} else {
 		cs.pendingExpected[ev.Sequence] = ev
 	}

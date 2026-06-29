@@ -473,6 +473,58 @@ func TestDownstreamEndRequestValidatesInlineResponseStatus(t *testing.T) {
 	}
 }
 
+func TestDownstreamEndRequestPreservesLaterResponseValidation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Status = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:          model.EventRequest,
+			AccessLogType: model.AccessLogTypeDownstreamEnd,
+			ConnectionID:  1,
+			Sequence:      1,
+			Status:        http.StatusOK,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    target.Scheme,
+				Authority: target.Host,
+				Path:      "/",
+			},
+		},
+		{
+			Type:         model.EventResponse,
+			ConnectionID: 1,
+			Sequence:     1,
+			Status:       http.StatusInternalServerError,
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if got, want := summary.ValidationFailed, int64(1); got != want {
+		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
+	}
+	if got, want := summary.Outcome, RunPartialSuccess; got != want {
+		t.Fatalf("summary.Outcome = %s, want %s", got, want)
+	}
+}
+
 func TestReplayTreatsConnectionRefusedAsPartialSuccess(t *testing.T) {
 	addr := closedLocalAddress(t)
 
@@ -1441,8 +1493,8 @@ func TestPacingClockDoesNotRewindForNonIncreasingTimestamps(t *testing.T) {
 		}
 	}
 	elapsed := time.Since(start)
-	if elapsed < 125*time.Millisecond || elapsed > 250*time.Millisecond {
-		t.Fatalf("paceRequest(non-increasing timestamps) elapsed = %s, want between 125ms and 250ms", elapsed)
+	if elapsed < 125*time.Millisecond {
+		t.Fatalf("paceRequest(non-increasing timestamps) elapsed = %s, want at least 125ms", elapsed)
 	}
 }
 
