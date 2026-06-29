@@ -186,53 +186,94 @@ func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
 	}
 }
 
-func TestWorkerClientCreationUpdatesThreadsGauge(t *testing.T) {
+func TestActiveVirtualUserGaugeTracksConnectionLifecycle(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.MaxVirtualUsersPerEngine = 3
 	reg := metrics.New(cfg.Metrics)
 	metricLabelValues := cfg.Metrics.CommonLabelValues()
 	reg.SeedEngineLabels(metricLabelValues)
 
-	eng := New(cfg, reg)
-	ctx := t.Context()
-
-	vus := cfg.Replay.MaxVirtualUsersPerEngine
-	workerChs := make([]chan model.Event, vus)
-	for i := range workerChs {
-		workerChs[i] = make(chan model.Event, 1)
-	}
-	connSem := make(chan struct{}, cfg.Replay.MaxActiveConnectionsPerEngine)
-	results := make(chan Summary, vus)
-	var wg sync.WaitGroup
-	for i := range workerChs {
-		ch := workerChs[i]
-		wg.Go(func() {
-			results <- eng.runEventWorker(ctx, ch, 0, nil, connSem)
+	requestStarted := make(chan struct{})
+	releaseResponse := make(chan struct{})
+	var requestStartedOnce sync.Once
+	var releaseResponseOnce sync.Once
+	release := func() {
+		releaseResponseOnce.Do(func() {
+			close(releaseResponse)
 		})
 	}
+	t.Cleanup(release)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestStartedOnce.Do(func() { close(requestStarted) })
+		<-releaseResponse
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
 
-	want := float64(cfg.Replay.MaxVirtualUsersPerEngine)
+	eng := New(cfg, reg)
+	host := srv.URL[len("http://"):]
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: 1,
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    "http",
+				Authority: host,
+				Path:      "/",
+			},
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	resultCh := runReplayAsync(eng, events)
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("ReplayStream(active VU gauge test) did not start request")
+	}
+	waitForThreadsGauge(t, reg, metricLabelValues, 1)
+
+	release()
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			t.Fatalf("ReplayStream(active VU gauge test) error: %v", result.err)
+		}
+		if got, want := result.summary.ConnectionsDone, int64(1); got != want {
+			t.Errorf("ReplayStream(active VU gauge test).ConnectionsDone = %d, want %d", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReplayStream(active VU gauge test) did not finish")
+	}
+	waitForThreadsGauge(t, reg, metricLabelValues, 0)
+}
+
+func waitForThreadsGauge(t *testing.T, reg *metrics.Registry, commonLabelValues []string, want float64) {
+	t.Helper()
+
 	deadline := time.After(time.Second)
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
+	var got float64
 	for {
-		g := reg.ThreadsGauge.WithLabelValues(metricLabelValues...)
-		if v := testutil.ToFloat64(g); v == want {
-			break
+		g := reg.ThreadsGauge.WithLabelValues(commonLabelValues...)
+		got = testutil.ToFloat64(g)
+		if got == want {
+			return
 		}
 
 		select {
 		case <-deadline:
-			t.Fatalf("threads gauge did not reach %v", want)
+			t.Fatalf("threads gauge = %v, want %v", got, want)
 		case <-ticker.C:
 		}
 	}
-
-	for _, ch := range workerChs {
-		close(ch)
-	}
-	wg.Wait()
 }
 
 // startOKServer returns an httptest server that returns 200 OK on any request.

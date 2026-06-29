@@ -33,8 +33,8 @@ Metric names with the default `replay` namespace:
 - `replay_cpu_gauge`
 - `replay_mem_gauge`
 
-`replay_threads_gauge` reflects the number of replay clients created for the
-engine, not the live number of Go goroutines.
+`replay_threads_gauge` reflects active virtual users. It increments when a replay
+connection starts work and decrements when that connection closes or aborts.
 
 ## Outcome model
 
