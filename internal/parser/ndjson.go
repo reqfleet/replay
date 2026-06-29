@@ -172,9 +172,6 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		if event.Type == "" && ev.StartTime != "" && ev.Method != "" && ev.Path != "" {
 			event.Type = model.EventRequest
 			event.AccessLogType = model.AccessLogTypeDownstreamEnd
-			if !hasConnectionID {
-				event.ConnectionID = -line
-			}
 			event.Timestamp = ev.StartTime
 			event.Status = ev.ResponseCode
 			event.DurationMS = ev.DurationMillis
@@ -186,7 +183,6 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			if ev.UserAgent != "" && ev.UserAgent != "-" {
 				event.Headers = map[string][]string{"user-agent": {ev.UserAgent}}
 			}
-			hasConnectionID = true
 		}
 		switch event.Type {
 		case model.EventType(model.AccessLogTypeDownstreamStart):

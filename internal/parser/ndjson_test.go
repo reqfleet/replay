@@ -110,6 +110,7 @@ func TestParseDownstreamEndAccessLogAsResponse(t *testing.T) {
 
 func TestParseFlatEnvoyAccessLogAsInlineValidatedRequest(t *testing.T) {
 	input := strings.NewReader("{" +
+		`"connection_id":7,` +
 		`"start_time":"2026-02-27T03:10:22.101Z",` +
 		`"method":"GET",` +
 		`"path":"/start",` +
@@ -143,8 +144,8 @@ func TestParseFlatEnvoyAccessLogAsInlineValidatedRequest(t *testing.T) {
 	if got.AccessLogType != model.AccessLogTypeDownstreamEnd {
 		t.Fatalf("events[0].AccessLogType = %q, want %q", got.AccessLogType, model.AccessLogTypeDownstreamEnd)
 	}
-	if got.ConnectionID == 0 {
-		t.Fatal("events[0].ConnectionID = 0, want synthetic non-zero connection ID")
+	if got, want := got.ConnectionID, 7; got != want {
+		t.Fatalf("events[0].ConnectionID = %d, want %d", got, want)
 	}
 	if got.Sequence != 1 {
 		t.Fatalf("events[0].Sequence = %d, want 1", got.Sequence)
@@ -157,6 +158,23 @@ func TestParseFlatEnvoyAccessLogAsInlineValidatedRequest(t *testing.T) {
 	}
 	if got.Headers["user-agent"][0] != "curl/8.0.0" {
 		t.Fatalf("events[0].Headers[user-agent] = %v, want curl/8.0.0", got.Headers["user-agent"])
+	}
+}
+
+func TestParseFlatEnvoyAccessLogRequiresConnectionID(t *testing.T) {
+	input := strings.NewReader("{" +
+		`"start_time":"2026-02-27T03:10:22.101Z",` +
+		`"method":"GET",` +
+		`"path":"/start",` +
+		`"protocol":"HTTP/1.1",` +
+		`"authority":"example.com",` +
+		`"response_code":503,` +
+		`"duration_ms":16` +
+		"}\n")
+
+	err := ParseStream(input, func(e model.Event) error { return nil })
+	if err == nil {
+		t.Fatal("ParseStream(flat Envoy access log without connection_id) error = nil, want error")
 	}
 }
 

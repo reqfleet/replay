@@ -153,12 +153,12 @@ for response validation. Envoy completion access logs MUST set
 Envoy type to an internal response event for response validation.
 
 Replay also accepts Envoy's common single completion access-log shape when it is
-emitted as structured JSON with flat fields such as `start_time`, `method`,
-`path`, `protocol`, `authority`, `response_code`, and `duration_ms`. That shape
-is mapped to an internal request event with `log_type: "DownstreamEnd"` so the
-request can be replayed and the response code can be validated inline. If the
-flat log omits `connection_id`, replay assigns a synthetic per-record connection
-identifier.
+emitted as structured JSON with flat fields such as `connection_id`,
+`start_time`, `method`, `path`, `protocol`, `authority`, `response_code`, and
+`duration_ms`. That shape is mapped to an internal request event with
+`log_type: "DownstreamEnd"` so the request can be replayed and the response code
+can be validated inline. The flat log MUST include `connection_id`; replay uses
+the same per-connection sequence derivation as canonical `DownstreamEnd` logs.
 
 ### Headers
 
