@@ -561,10 +561,11 @@ func (e *Engine) paceRequest(ctx context.Context, cs *connState, requestEvent mo
 	if err := e.sleepForPacing(ctx, cs.previousTimestamp, cs.previousTimestampSet, requestEvent.Timestamp); err != nil {
 		return err
 	}
-	if parsedTimestamp, ok := model.ParseTimestamp(requestEvent.Timestamp); ok {
-		cs.previousTimestamp = parsedTimestamp
-		cs.previousTimestampSet = true
-	}
+	cs.previousTimestamp, cs.previousTimestampSet = advancePacingClock(
+		cs.previousTimestamp,
+		cs.previousTimestampSet,
+		requestEvent.Timestamp,
+	)
 	return nil
 }
 
@@ -672,10 +673,28 @@ func (e *Engine) finishRequestSuccess(cs *connState, requestEvent model.Event, e
 			cs.validationFailed++
 		}
 		delete(cs.pendingExpected, requestEvent.Sequence)
+	} else if expected, ok := e.expectedResponseFromRequestEvent(requestEvent); ok {
+		if e.responseValidationFailed(expected, exec) {
+			cs.validationFailed++
+		}
 	} else {
 		cs.pendingActual[requestEvent.Sequence] = exec
 	}
 	return false
+}
+
+func (e *Engine) expectedResponseFromRequestEvent(requestEvent model.Event) (model.Event, bool) {
+	if !e.shouldRetainResponseForValidation() || requestEvent.AccessLogType == model.AccessLogTypeDownstreamStart || requestEvent.Status == 0 {
+		return model.Event{}, false
+	}
+	return model.Event{
+		Type:         model.EventResponse,
+		Node:         requestEvent.Node,
+		ConnectionID: requestEvent.ConnectionID,
+		StreamID:     requestEvent.StreamID,
+		Sequence:     requestEvent.Sequence,
+		Status:       requestEvent.Status,
+	}, true
 }
 
 // handleResponseEvent processes a response event for validation rendezvous.
@@ -859,10 +878,11 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.Outcome = RunFailed
 			return result
 		}
-		if parsedTimestamp, ok := model.ParseTimestamp(requestEvent.Timestamp); ok {
-			previousTimestamp = parsedTimestamp
-			previousTimestampSet = true
-		}
+		previousTimestamp, previousTimestampSet = advancePacingClock(
+			previousTimestamp,
+			previousTimestampSet,
+			requestEvent.Timestamp,
+		)
 
 		requestKey := model.ConnectionKey{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID}
 
@@ -927,6 +947,13 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 						slog.DebugContext(ctx, "Validation failed body", "body", string(exec.body))
 					}
 				}
+				result.ValidationFailed++
+				if result.Outcome == "" {
+					result.Outcome = RunPartialSuccess
+				}
+			}
+		} else if expected, ok := e.expectedResponseFromRequestEvent(requestEvent); ok {
+			if e.responseValidationFailed(expected, exec) {
 				result.ValidationFailed++
 				if result.Outcome == "" {
 					result.Outcome = RunPartialSuccess
@@ -1037,6 +1064,14 @@ func connectionBelongsToShard(connectionKey model.ConnectionKey, shardIndex, sha
 	return int(hasher.Sum32()%uint32(shardCount)) == shardIndex
 }
 
+func advancePacingClock(previous time.Time, previousSet bool, currentRaw string) (time.Time, bool) {
+	current, ok := model.ParseTimestamp(currentRaw)
+	if !ok || (previousSet && !current.After(previous)) {
+		return previous, previousSet
+	}
+	return current, true
+}
+
 func (e *Engine) sleepForPacing(ctx context.Context, previous time.Time, previousSet bool, currentRaw string) error {
 	if !e.cfg.Replay.Pacing.Enabled || !previousSet {
 		return nil
@@ -1050,7 +1085,6 @@ func (e *Engine) sleepForPacing(ctx context.Context, previous time.Time, previou
 	if max := e.cfg.Replay.Pacing.MaxSleepDelta; max > 0 && delta > max {
 		delta = max
 	}
-
 	timer := time.NewTimer(delta)
 	defer timer.Stop()
 	select {

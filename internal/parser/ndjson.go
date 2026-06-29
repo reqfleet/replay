@@ -118,7 +118,29 @@ func ParseFileStream(path string, format string, handler func(model.Event) error
 
 type rawEvent struct {
 	model.Event
-	ConnectionID *int `json:"connection_id"`
+	ConnectionID  *int                `json:"connection_id"`
+	AccessLogType model.AccessLogType `json:"access_log_type"`
+}
+
+func normalizeAccessLogEvent(event model.Event, rawLogType model.AccessLogType) (model.Event, error) {
+	if event.AccessLogType == "" {
+		event.AccessLogType = rawLogType
+	}
+	switch strings.ToLower(strings.ReplaceAll(string(event.AccessLogType), "-", "_")) {
+	case "downstreamstart", "downstream_start":
+		event.AccessLogType = model.AccessLogTypeDownstreamStart
+	case "downstreamend", "downstream_end":
+		event.AccessLogType = model.AccessLogTypeDownstreamEnd
+	}
+	switch strings.ToLower(strings.ReplaceAll(string(event.Type), "-", "_")) {
+	case "downstreamstart", "downstream_start":
+		event.Type = model.EventRequest
+		event.AccessLogType = model.AccessLogTypeDownstreamStart
+	case "downstreamend", "downstream_end":
+		event.Type = model.EventRequest
+		event.AccessLogType = model.AccessLogTypeDownstreamEnd
+	}
+	return event, nil
 }
 
 // ParseStream reads NDJSON events from r and invokes handler for each parsed event.
@@ -150,7 +172,10 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return fmt.Errorf("line %d: invalid json: %w", line, err)
 		}
-		event := ev.Event
+		event, err := normalizeAccessLogEvent(ev.Event, ev.AccessLogType)
+		if err != nil {
+			return fmt.Errorf("line %d: %w", line, err)
+		}
 		if ev.ConnectionID != nil {
 			event.ConnectionID = *ev.ConnectionID
 		}

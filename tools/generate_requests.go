@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/reqfleet/replay/internal/model"
@@ -26,20 +27,106 @@ func writeJSONLine(f *os.File, v any) error {
 	return nil
 }
 
+func generatedAccessLogType(raw string) (model.AccessLogType, error) {
+	switch strings.ToLower(strings.ReplaceAll(raw, "-", "_")) {
+	case "downstream_start", "downstreamstart":
+		return model.AccessLogTypeDownstreamStart, nil
+	case "downstream_end", "downstreamend":
+		return model.AccessLogTypeDownstreamEnd, nil
+	default:
+		return "", fmt.Errorf("unsupported access log type %q", raw)
+	}
+}
+
+func generatedRequestEvent(logType model.AccessLogType, connID int, ts time.Time, authority, scheme, port, apiKey, requestPath string, status int, durationMS float64) model.Event {
+	req := model.Event{
+		Type:          model.EventRequest,
+		AccessLogType: logType,
+		ConnectionID:  connID,
+		Headers: map[string][]string{
+			"x-api-key":          {apiKey},
+			"x-forwarded-proto":  {scheme},
+			"x-forwarded-scheme": {scheme},
+			"x-real-ip":          {"172.18.0.1"},
+			"x-forwarded-host":   {authority},
+			"x-forwarded-port":   {port},
+		},
+		HTTP: model.HTTPRequestMeta{
+			Version:   "HTTP/1.1",
+			Authority: authority,
+			Method:    "GET",
+			Path:      requestPath,
+		},
+		Timestamp: ts.Format(time.RFC3339Nano),
+	}
+	if logType == model.AccessLogTypeDownstreamEnd {
+		req.Status = status
+		req.DurationMS = durationMS
+	}
+	return req
+}
+
+func generatedEvents(logType model.AccessLogType, reqs, conns int, now time.Time, authority, scheme, port, apiKey, requestPath string, status int, durationMS float64) []model.Event {
+	events := []model.Event{{
+		Type:          model.EventMeta,
+		FormatVersion: "1.0",
+	}}
+
+	for c := 1; c <= conns; c++ {
+		events = append(events, model.Event{
+			Type:                    model.EventConnectionOpen,
+			ConnectionID:            c,
+			Timestamp:               now.Format(time.RFC3339Nano),
+			DownstreamRemoteAddress: "172.18.0.1:45398",
+		})
+	}
+
+	for r := 1; r <= reqs; r++ {
+		p := path.Join("/", requestPath)
+		if r > 1 {
+			p = path.Join(p, fmt.Sprintf("%d", r))
+		}
+		ts := now.Add(time.Duration(r) * 100 * time.Millisecond)
+		for c := 1; c <= conns; c++ {
+			events = append(events, generatedRequestEvent(logType, c, ts, authority, scheme, port, apiKey, p, status, durationMS))
+		}
+	}
+
+	closeTimestamp := now.Add(time.Duration(reqs+1) * 100 * time.Millisecond).Format(time.RFC3339Nano)
+	for c := 1; c <= conns; c++ {
+		events = append(events, model.Event{
+			Type:         model.EventConnectionClose,
+			ConnectionID: c,
+			Timestamp:    closeTimestamp,
+			Reason:       "remote_close",
+		})
+	}
+
+	return events
+}
+
 func main() {
 	var (
-		baseURL     = flag.String("base", "http://localhost:8080", "Base URL to generate requests for")
-		requestPath = flag.String("subpath", "api/v1/resource", "Subpath for generated requests")
-		reqs        = flag.Int("reqs", 5, "Number of requests per connection")
-		conns       = flag.Int("conns", 1, "Number of simulated connections")
-		out         = flag.String("out", "requests.ndjson", "Output file path")
-		status      = flag.Int("status", 200, "HTTP response status code to simulate")
-		dur         = flag.Float64("duration", 16.0, "Request duration in milliseconds")
-		apiKey      = flag.String("apikey", "rqt_api_dummy-apikey-local", "API key header value")
+		baseURL       = flag.String("base", "http://localhost:8080", "Base URL to generate requests for")
+		requestPath   = flag.String("subpath", "api/v1/resource", "Subpath for generated requests")
+		reqs          = flag.Int("reqs", 5, "Number of requests per connection")
+		conns         = flag.Int("conns", 1, "Number of simulated connections")
+		out           = flag.String("out", "requests.ndjson", "Output file path")
+		status        = flag.Int("status", 200, "HTTP response status code to simulate")
+		dur           = flag.Float64("duration", 16.0, "Request duration in milliseconds")
+		apiKey        = flag.String("apikey", "rqt_api_dummy-apikey-local", "API key header value")
+		accessLogType = flag.String("access-log-type", "downstream-end", "Envoy access log type to simulate: downstream-start or downstream-end")
 	)
 	flag.StringVar(baseURL, "url", *baseURL, "Alias for -base")
 	flag.StringVar(requestPath, "path", *requestPath, "Alias for -subpath")
+	flag.StringVar(accessLogType, "log-type", *accessLogType, "Alias for -access-log-type")
 	flag.Parse()
+
+	logType, err := generatedAccessLogType(*accessLogType)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	u, err := url.Parse(*baseURL)
 	if err != nil {
@@ -66,72 +153,9 @@ func main() {
 
 	now := time.Now().UTC()
 
-	meta := model.Event{
-		Type:          model.EventMeta,
-		FormatVersion: "1.0",
-	}
-	if err := writeJSONLine(f, meta); err != nil {
-		fmt.Fprintf(os.Stderr, "write meta: %v\n", err)
-		os.Exit(2)
-	}
-
-	for c := 1; c <= *conns; c++ {
-		connID := c
-		connStart := now.Add(time.Duration(c-1) * 50 * time.Millisecond)
-
-		openEvt := model.Event{
-			Type:                    model.EventConnectionOpen,
-			ConnectionID:            connID,
-			Timestamp:               connStart.Format(time.RFC3339Nano),
-			DownstreamRemoteAddress: "172.18.0.1:45398",
-		}
-		if err := writeJSONLine(f, openEvt); err != nil {
-			fmt.Fprintf(os.Stderr, "write open: %v\n", err)
-			os.Exit(2)
-		}
-
-		for r := 1; r <= *reqs; r++ {
-			p := path.Join("/", *requestPath)
-			if r > 1 {
-				p = path.Join(p, fmt.Sprintf("%d", r))
-			}
-			ts := connStart.Add(time.Duration(r) * 100 * time.Millisecond)
-
-			req := model.Event{
-				Type:         model.EventRequest,
-				Status:       *status,
-				ConnectionID: connID,
-				Headers: map[string][]string{
-					"x-api-key":          {*apiKey},
-					"x-forwarded-proto":  {scheme},
-					"x-forwarded-scheme": {scheme},
-					"x-real-ip":          {"172.18.0.1"},
-					"x-forwarded-host":   {authority},
-					"x-forwarded-port":   {port},
-				},
-				HTTP: model.HTTPRequestMeta{
-					Version:   "HTTP/1.1",
-					Authority: authority,
-					Method:    "GET",
-					Path:      p,
-				},
-				DurationMS: *dur,
-				Timestamp:  ts.Format(time.RFC3339Nano),
-			}
-			if err := writeJSONLine(f, req); err != nil {
-				fmt.Fprintf(os.Stderr, "write req: %v\n", err)
-				os.Exit(2)
-			}
-		}
-
-		closeEvt := model.Event{
-			Type:         model.EventConnectionClose,
-			ConnectionID: connID,
-			Timestamp:    connStart.Add(time.Duration(*reqs+1) * time.Second).Format(time.RFC3339Nano),
-			Reason:       "remote_close",
-		}
-		if err := writeJSONLine(f, closeEvt); err != nil {
-			fmt.Fprintf(os.Stderr, "write close: %v\n", err)
+	for _, event := range generatedEvents(logType, *reqs, *conns, now, authority, scheme, port, *apiKey, *requestPath, *status, *dur) {
+		if err := writeJSONLine(f, event); err != nil {
+			fmt.Fprintf(os.Stderr, "write event: %v\n", err)
 			os.Exit(2)
 		}
 	}

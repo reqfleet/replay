@@ -30,6 +30,55 @@ func TestParseSuccess(t *testing.T) {
 	}
 }
 
+func TestParseDownstreamStartAccessLogAsRequest(t *testing.T) {
+	input := strings.NewReader("{" +
+		`"type":"downstream-start","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z","http":{"method":"GET","authority":"example.com","path":"/start"}` +
+		"}\n")
+
+	events := make([]model.Event, 0)
+	if err := ParseStream(input, func(e model.Event) error {
+		events = append(events, e)
+		return nil
+	}); err != nil {
+		t.Fatalf("ParseStream(downstream-start) error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("len(events) = %d, want 1", len(events))
+	}
+	if got, want := events[0].Type, model.EventRequest; got != want {
+		t.Fatalf("events[0].Type = %q, want %q", got, want)
+	}
+	if got, want := events[0].AccessLogType, model.AccessLogTypeDownstreamStart; got != want {
+		t.Fatalf("events[0].AccessLogType = %q, want %q", got, want)
+	}
+	if got, want := events[0].Sequence, 1; got != want {
+		t.Fatalf("events[0].Sequence = %d, want %d", got, want)
+	}
+}
+
+func TestParseLogTypeField(t *testing.T) {
+	input := strings.NewReader("{" +
+		`"type":"request","log_type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z","http":{"method":"GET","authority":"example.com","path":"/start"}` +
+		"}\n" +
+		"{" +
+		`"type":"request","access_log_type":"DownstreamEnd","connection_id":1,"timestamp":"2026-02-27T03:10:22.101Z","http":{"method":"GET","authority":"example.com","path":"/end"}` +
+		"}\n")
+
+	events := make([]model.Event, 0)
+	if err := ParseStream(input, func(e model.Event) error {
+		events = append(events, e)
+		return nil
+	}); err != nil {
+		t.Fatalf("ParseStream(log_type fields) error: %v", err)
+	}
+	if got, want := events[0].AccessLogType, model.AccessLogTypeDownstreamStart; got != want {
+		t.Fatalf("events[0].AccessLogType = %q, want %q", got, want)
+	}
+	if got, want := events[1].AccessLogType, model.AccessLogTypeDownstreamEnd; got != want {
+		t.Fatalf("events[1].AccessLogType = %q, want %q", got, want)
+	}
+}
+
 func TestParseDefaultsHTTP11StreamID(t *testing.T) {
 	input := strings.NewReader("{" +
 		`"type":"meta","format_version":"1.0"` +

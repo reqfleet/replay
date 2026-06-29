@@ -10,17 +10,25 @@ const (
 	EventConnectionClose EventType = "connection_close"
 )
 
+type AccessLogType string
+
+const (
+	AccessLogTypeDownstreamStart AccessLogType = "DownstreamStart"
+	AccessLogTypeDownstreamEnd   AccessLogType = "DownstreamEnd"
+)
+
 type Event struct {
-	Type          EventType `json:"type"`
-	FormatVersion string    `json:"format_version,omitempty"`
-	Node          string    `json:"node,omitempty"`
-	ConnectionID  int       `json:"connection_id"`
-	StreamID      int       `json:"stream_id,omitempty"`
-	Sequence      int       `json:"sequence,omitempty"`
-	Timestamp     string    `json:"timestamp,omitempty"`
-	Status        int       `json:"status,omitempty"`
-	DurationMS    float64   `json:"duration_ms,omitempty"`
-	Reason        string    `json:"reason,omitempty"`
+	Type          EventType     `json:"type"`
+	FormatVersion string        `json:"format_version,omitempty"`
+	Node          string        `json:"node,omitempty"`
+	ConnectionID  int           `json:"connection_id"`
+	StreamID      int           `json:"stream_id,omitempty"`
+	Sequence      int           `json:"sequence,omitempty"`
+	Timestamp     string        `json:"timestamp,omitempty"`
+	Status        int           `json:"status,omitempty"`
+	DurationMS    float64       `json:"duration_ms,omitempty"`
+	Reason        string        `json:"reason,omitempty"`
+	AccessLogType AccessLogType `json:"log_type,omitempty"`
 	// Connection open metadata
 	DownstreamRemoteAddress string              `json:"downstream_remote_address,omitempty"`
 	DownstreamLocalAddress  string              `json:"downstream_local_address,omitempty"`
