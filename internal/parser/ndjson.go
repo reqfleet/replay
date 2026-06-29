@@ -147,6 +147,11 @@ func normalizeAccessLogEvent(event model.Event, rawLogType model.AccessLogType) 
 	return event
 }
 
+func isMalformedDownstreamStartRequest(event model.Event) bool {
+	return event.AccessLogType == model.AccessLogTypeDownstreamStart &&
+		(event.HTTP.Authority == "" || event.HTTP.Path == "")
+}
+
 // ParseStream reads NDJSON events from r and invokes handler for each parsed event.
 // The handler may return an error to stop processing early.
 func ParseStream(r io.Reader, handler func(model.Event) error) error {
@@ -214,6 +219,9 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		case model.EventRequest:
 			if !hasConnectionID {
 				return fmt.Errorf("line %d: request missing connection_id", line)
+			}
+			if isMalformedDownstreamStartRequest(event) {
+				continue
 			}
 			connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
 			sequence, err := stateForConnection(connectionKey).recordRequest(event.StreamID, event.Sequence)

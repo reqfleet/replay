@@ -572,6 +572,47 @@ func TestReplayMarksUnmatchedExpectedResponseAsValidationFailed(t *testing.T) {
 	}
 }
 
+func TestReplaySkipsValidationForSkippedRequestResponse(t *testing.T) {
+	cfg := config.Default()
+	cfg.Replay.DryRun = true
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Status = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: 1,
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    "http",
+				Authority: "example.invalid",
+				Path:      "/",
+			},
+		},
+		{
+			Type:         model.EventResponse,
+			ConnectionID: 1,
+			Sequence:     1,
+			Status:       http.StatusOK,
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if got, want := summary.Skipped, int64(1); got != want {
+		t.Fatalf("summary.Skipped = %d, want %d", got, want)
+	}
+	if got, want := summary.ValidationFailed, int64(0); got != want {
+		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
+	}
+}
+
 func TestReplayTreatsConnectionRefusedAsPartialSuccess(t *testing.T) {
 	addr := closedLocalAddress(t)
 

@@ -113,6 +113,82 @@ func TestOutcomeAggregation_ValidationFailure(t *testing.T) {
 	}
 }
 
+func TestOutcomeAggregation_UnmatchedResponseSerialized(t *testing.T) {
+	cfg := config.Default()
+	cfg.Replay.Lifecycle.RequireOpen = false
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Status = true
+
+	reg := metrics.New(cfg.Metrics)
+	e := New(cfg, reg)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+
+	requests := []model.Event{
+		{
+			Type:         model.EventRequest,
+			ConnectionID: 1,
+			Sequence:     1,
+			HTTP:         model.HTTPRequestMeta{Scheme: "http", Authority: u.Host, Path: "/"},
+		},
+	}
+	expected := map[int]model.Event{
+		2: {Type: model.EventResponse, ConnectionID: 1, Sequence: 2, Status: http.StatusOK},
+	}
+
+	client, transport := e.makePerConnectionClient(false)
+	defer transport.CloseIdleConnections()
+	summary := e.replayConnectionSerialized(context.Background(), client, requests, expected, nil)
+
+	if got, want := summary.ValidationFailed, int64(1); got != want {
+		t.Errorf("summary.ValidationFailed = %v, want %v", got, want)
+	}
+	if got, want := summary.Outcome, RunPartialSuccess; got != want {
+		t.Errorf("summary.Outcome = %v, want %v", got, want)
+	}
+	if got, want := summary.ConnectionResults[0].ValidationFailed, int64(1); got != want {
+		t.Errorf("ConnectionResults[0].ValidationFailed = %v, want %v", got, want)
+	}
+}
+
+func TestOutcomeAggregation_SkippedSerializedResponseValidation(t *testing.T) {
+	cfg := config.Default()
+	cfg.Replay.DryRun = true
+	cfg.Replay.Lifecycle.RequireOpen = false
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Status = true
+
+	reg := metrics.New(cfg.Metrics)
+	e := New(cfg, reg)
+
+	requests := []model.Event{
+		{
+			Type:         model.EventRequest,
+			ConnectionID: 1,
+			Sequence:     1,
+			HTTP:         model.HTTPRequestMeta{Scheme: "http", Authority: "example.invalid", Path: "/"},
+		},
+	}
+	expected := map[int]model.Event{
+		1: {Type: model.EventResponse, ConnectionID: 1, Sequence: 1, Status: http.StatusOK},
+	}
+
+	client, transport := e.makePerConnectionClient(false)
+	defer transport.CloseIdleConnections()
+	summary := e.replayConnectionSerialized(context.Background(), client, requests, expected, nil)
+
+	if got, want := summary.Skipped, int64(1); got != want {
+		t.Errorf("summary.Skipped = %v, want %v", got, want)
+	}
+	if got, want := summary.ValidationFailed, int64(0); got != want {
+		t.Errorf("summary.ValidationFailed = %v, want %v", got, want)
+	}
+}
+
 func TestOutcomeAggregation_SendError(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Lifecycle.RequireOpen = false

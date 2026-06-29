@@ -221,6 +221,7 @@ type connState struct {
 	pendingActual         map[int]requestExecution
 	pendingExpected       map[int]model.Event
 	pendingInlineExpected map[int]model.Event
+	skippedValidation     map[int]struct{}
 	sent                  int64
 	responsesReceived     int64
 	sendErrors            int64
@@ -247,6 +248,30 @@ func (e *Engine) newConnState(connKey model.ConnectionKey) *connState {
 		pendingExpected:       make(map[int]model.Event),
 		pendingInlineExpected: make(map[int]model.Event),
 	}
+}
+
+func (cs *connState) skipValidationForSequence(sequence int) {
+	if sequence <= 0 {
+		return
+	}
+	if cs.skippedValidation == nil {
+		cs.skippedValidation = make(map[int]struct{})
+	}
+	cs.skippedValidation[sequence] = struct{}{}
+	delete(cs.pendingExpected, sequence)
+	delete(cs.pendingInlineExpected, sequence)
+	delete(cs.pendingActual, sequence)
+}
+
+func (cs *connState) consumeSkippedValidation(sequence int) bool {
+	if len(cs.skippedValidation) == 0 {
+		return false
+	}
+	if _, ok := cs.skippedValidation[sequence]; !ok {
+		return false
+	}
+	delete(cs.skippedValidation, sequence)
+	return true
 }
 
 func (e *Engine) detectHTTP2ForConn(cs *connState, firstRequest model.Event) {
@@ -578,11 +603,13 @@ func (e *Engine) prepareRequest(cs *connState, requestEvent model.Event, checkpo
 
 	if checkpoints.alreadyProcessed(reqKey, requestEvent.Sequence) {
 		cs.skipped++
+		cs.skipValidationForSequence(requestEvent.Sequence)
 		return reqKey, true, false
 	}
 
 	if e.shouldSkipByIdempotencyPolicy(requestEvent) {
 		cs.skipped++
+		cs.skipValidationForSequence(requestEvent.Sequence)
 		if err := checkpoints.markProcessed(reqKey, requestEvent.Sequence); err != nil {
 			cs.aborted = true
 			return reqKey, true, true
@@ -592,6 +619,7 @@ func (e *Engine) prepareRequest(cs *connState, requestEvent model.Event, checkpo
 
 	if e.cfg.Replay.DryRun {
 		cs.skipped++
+		cs.skipValidationForSequence(requestEvent.Sequence)
 		return reqKey, true, false
 	}
 
@@ -603,17 +631,20 @@ func (e *Engine) prepareConcurrentRequest(cs *connState, requestEvent model.Even
 
 	if checkpoints.alreadyProcessed(reqKey, requestEvent.Sequence) {
 		cs.skipped++
+		cs.skipValidationForSequence(requestEvent.Sequence)
 		return reqKey, true, 0
 	}
 
 	if e.shouldSkipByIdempotencyPolicy(requestEvent) {
 		cs.skipped++
+		cs.skipValidationForSequence(requestEvent.Sequence)
 		cs.trackCheckpointSequence(requestEvent.Sequence)
 		return reqKey, true, cs.completeCheckpointSequence(requestEvent.Sequence)
 	}
 
 	if e.cfg.Replay.DryRun {
 		cs.skipped++
+		cs.skipValidationForSequence(requestEvent.Sequence)
 		return reqKey, true, 0
 	}
 
@@ -730,6 +761,9 @@ func (e *Engine) expectedResponseFromRequestEvent(requestEvent model.Event) (mod
 // runs immediately. Otherwise, the expected response is stored for later.
 func (e *Engine) handleResponseEvent(cs *connState, ev model.Event) {
 	if !e.shouldRetainResponseForValidation() {
+		return
+	}
+	if cs.consumeSkippedValidation(ev.Sequence) {
 		return
 	}
 	if actual, ok := cs.pendingActual[ev.Sequence]; ok {
@@ -880,7 +914,19 @@ func (e *Engine) detectHTTP2(requests []model.Event) (http2 bool, multiplexed bo
 	return http2, multiplexed
 }
 
+func cloneResponsesBySequence(responses map[int]model.Event) map[int]model.Event {
+	if len(responses) == 0 {
+		return nil
+	}
+	cloned := make(map[int]model.Event, len(responses))
+	for sequence, response := range responses {
+		cloned[sequence] = response
+	}
+	return cloned
+}
+
 func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Client, requests []model.Event, responsesBySequence map[int]model.Event, checkpoints *checkpointStore) Summary {
+	pendingResponses := cloneResponsesBySequence(responsesBySequence)
 	result := Summary{}
 	if len(requests) == 0 {
 		return result
@@ -917,11 +963,13 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 
 		if checkpoints.alreadyProcessed(requestKey, requestEvent.Sequence) {
 			result.Skipped++
+			delete(pendingResponses, requestEvent.Sequence)
 			continue
 		}
 
 		if e.shouldSkipByIdempotencyPolicy(requestEvent) {
 			result.Skipped++
+			delete(pendingResponses, requestEvent.Sequence)
 			if err := checkpoints.markProcessed(requestKey, requestEvent.Sequence); err != nil {
 				result.ConnectionsAborted++
 				result.Outcome = RunFailed
@@ -932,6 +980,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 
 		// Dry-run: do not send network requests; count as skipped (do not persist checkpoint)
 		if e.cfg.Replay.DryRun {
+			delete(pendingResponses, requestEvent.Sequence)
 			result.Skipped++
 			continue
 		}
@@ -962,7 +1011,8 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			result.Outcome = RunFailed
 			return result
 		}
-		if expected, ok := responsesBySequence[requestEvent.Sequence]; ok {
+		if expected, ok := pendingResponses[requestEvent.Sequence]; ok {
+			delete(pendingResponses, requestEvent.Sequence)
 			if e.responseValidationFailed(expected, exec) {
 				if slog.Default().Enabled(ctx, slog.LevelDebug) {
 					slog.DebugContext(ctx, "Validation failed",
@@ -990,6 +1040,13 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			}
 		}
 
+	}
+
+	if e.shouldRetainResponseForValidation() && len(pendingResponses) > 0 {
+		result.ValidationFailed += int64(len(pendingResponses))
+		if result.Outcome == "" {
+			result.Outcome = RunPartialSuccess
+		}
 	}
 
 	if result.ConnectionsAborted == 0 {
@@ -1020,13 +1077,14 @@ func (e *Engine) replayConnectionHTTP2Multiplexed(ctx context.Context, client *h
 	results := make(chan Summary, len(streams))
 	var wg sync.WaitGroup
 
-	for _, streamRequests := range streams {
+	responseStreams := groupResponsesByStream(responsesBySequence)
+	for streamID, streamRequests := range streams {
 		wg.Go(func() {
 			if ctx.Err() != nil {
 				results <- Summary{ConnectionsAborted: 1, Outcome: RunFailed}
 				return
 			}
-			results <- e.replayConnectionSerialized(ctx, client, streamRequests, responsesBySequence, checkpoints)
+			results <- e.replayConnectionSerialized(ctx, client, streamRequests, responseStreams[streamID], checkpoints)
 		})
 	}
 
@@ -1076,6 +1134,23 @@ func groupRequestsByStream(requests []model.Event) map[int][]model.Event {
 			streamID = 1
 		}
 		grouped[streamID] = append(grouped[streamID], req)
+	}
+	return grouped
+}
+
+func groupResponsesByStream(responses map[int]model.Event) map[int]map[int]model.Event {
+	grouped := make(map[int]map[int]model.Event)
+	for sequence, response := range responses {
+		streamID := response.StreamID
+		if streamID == 0 {
+			streamID = 1
+		}
+		streamResponses := grouped[streamID]
+		if streamResponses == nil {
+			streamResponses = make(map[int]model.Event)
+			grouped[streamID] = streamResponses
+		}
+		streamResponses[sequence] = response
 	}
 	return grouped
 }

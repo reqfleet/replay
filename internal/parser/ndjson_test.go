@@ -56,6 +56,29 @@ func TestParseDownstreamStartAccessLogAsRequest(t *testing.T) {
 	}
 }
 
+func TestParseSkipsMalformedDownstreamStartAccessLog(t *testing.T) {
+	input := strings.NewReader("{" +
+		`"type":"downstream-start","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z"` +
+		"}\n" +
+		"{" +
+		`"type":"downstream-start","connection_id":1,"timestamp":"2026-02-27T03:10:22.002Z","http":{"method":"GET","authority":"example.com","path":"/ok"}` +
+		"}\n")
+
+	events := make([]model.Event, 0)
+	if err := ParseStream(input, func(e model.Event) error {
+		events = append(events, e)
+		return nil
+	}); err != nil {
+		t.Fatalf("ParseStream(malformed downstream-start) error: %v", err)
+	}
+	if got, want := len(events), 1; got != want {
+		t.Fatalf("len(events) = %d, want %d", got, want)
+	}
+	if got, want := events[0].Sequence, 1; got != want {
+		t.Fatalf("events[0].Sequence = %d, want %d", got, want)
+	}
+}
+
 func TestParseDownstreamEndAccessLogAsResponse(t *testing.T) {
 	input := strings.NewReader("{" +
 		`"type":"request","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z","http":{"method":"GET","authority":"example.com","path":"/start"}` +
