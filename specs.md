@@ -144,12 +144,13 @@ Replay derives a strictly increasing per-connection sequence internally from
 record order when the recorder does not emit one. If a recorder or converter
 does provide `sequence`, replay preserves it as long as it remains monotonic.
 
-Envoy request-start access logs SHOULD set `log_type: "DownstreamStart"` on
-request events. These events do not contain response data, so replay MUST NOT
-use inline `status`, headers, or body fields from them for response validation.
-Envoy completion access logs MAY set `log_type: "DownstreamEnd"` and include
-`status` on the request event; replay MAY use that inline status as the expected
-response status.
+Envoy request-start access logs MUST set `type: "DownstreamStart"` exactly.
+Replay maps that exact Envoy type to an internal request event without
+case-folding or spelling normalization. These events do not contain response
+data, so replay MUST NOT use inline `status`, headers, or body fields from them
+for response validation. Envoy completion access logs MUST set
+`type: "DownstreamEnd"` exactly and MAY include `status`; replay maps that exact
+Envoy type to an internal response event for response validation.
 
 ### Headers
 

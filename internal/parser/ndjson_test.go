@@ -32,7 +32,7 @@ func TestParseSuccess(t *testing.T) {
 
 func TestParseDownstreamStartAccessLogAsRequest(t *testing.T) {
 	input := strings.NewReader("{" +
-		`"type":"downstream-start","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z","http":{"method":"GET","authority":"example.com","path":"/start"}` +
+		`"type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z","http":{"method":"GET","authority":"example.com","path":"/start"}` +
 		"}\n")
 
 	events := make([]model.Event, 0)
@@ -40,7 +40,7 @@ func TestParseDownstreamStartAccessLogAsRequest(t *testing.T) {
 		events = append(events, e)
 		return nil
 	}); err != nil {
-		t.Fatalf("ParseStream(downstream-start) error: %v", err)
+		t.Fatalf("ParseStream(DownstreamStart) error: %v", err)
 	}
 	if len(events) != 1 {
 		t.Fatalf("len(events) = %d, want 1", len(events))
@@ -58,10 +58,10 @@ func TestParseDownstreamStartAccessLogAsRequest(t *testing.T) {
 
 func TestParseSkipsMalformedDownstreamStartAccessLog(t *testing.T) {
 	input := strings.NewReader("{" +
-		`"type":"downstream-start","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z"` +
+		`"type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z"` +
 		"}\n" +
 		"{" +
-		`"type":"downstream-start","connection_id":1,"timestamp":"2026-02-27T03:10:22.002Z","http":{"method":"GET","authority":"example.com","path":"/ok"}` +
+		`"type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22.002Z","http":{"method":"GET","authority":"example.com","path":"/ok"}` +
 		"}\n")
 
 	events := make([]model.Event, 0)
@@ -69,7 +69,7 @@ func TestParseSkipsMalformedDownstreamStartAccessLog(t *testing.T) {
 		events = append(events, e)
 		return nil
 	}); err != nil {
-		t.Fatalf("ParseStream(malformed downstream-start) error: %v", err)
+		t.Fatalf("ParseStream(malformed DownstreamStart) error: %v", err)
 	}
 	if got, want := len(events), 1; got != want {
 		t.Fatalf("len(events) = %d, want %d", got, want)
@@ -84,7 +84,7 @@ func TestParseDownstreamEndAccessLogAsResponse(t *testing.T) {
 		`"type":"request","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z","http":{"method":"GET","authority":"example.com","path":"/start"}` +
 		"}\n" +
 		"{" +
-		`"type":"downstream-end","connection_id":1,"timestamp":"2026-02-27T03:10:22.101Z","status":503` +
+		`"type":"DownstreamEnd","connection_id":1,"timestamp":"2026-02-27T03:10:22.101Z","status":503` +
 		"}\n")
 
 	events := make([]model.Event, 0)
@@ -92,7 +92,7 @@ func TestParseDownstreamEndAccessLogAsResponse(t *testing.T) {
 		events = append(events, e)
 		return nil
 	}); err != nil {
-		t.Fatalf("ParseStream(downstream-end) error: %v", err)
+		t.Fatalf("ParseStream(DownstreamEnd) error: %v", err)
 	}
 	if got, want := len(events), 2; got != want {
 		t.Fatalf("len(events) = %d, want %d", got, want)
@@ -108,26 +108,14 @@ func TestParseDownstreamEndAccessLogAsResponse(t *testing.T) {
 	}
 }
 
-func TestParseLogTypeField(t *testing.T) {
+func TestParseRejectsNonCanonicalDownstreamAccessLogType(t *testing.T) {
 	input := strings.NewReader("{" +
-		`"type":"request","log_type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z","http":{"method":"GET","authority":"example.com","path":"/start"}` +
-		"}\n" +
-		"{" +
-		`"type":"request","access_log_type":"downstream-end","connection_id":1,"timestamp":"2026-02-27T03:10:22.101Z","http":{"method":"GET","authority":"example.com","path":"/end"}` +
+		`"type":"downstream-start","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z","http":{"method":"GET","authority":"example.com","path":"/start"}` +
 		"}\n")
 
-	events := make([]model.Event, 0)
-	if err := ParseStream(input, func(e model.Event) error {
-		events = append(events, e)
-		return nil
-	}); err != nil {
-		t.Fatalf("ParseStream(log_type fields) error: %v", err)
-	}
-	if got, want := events[0].AccessLogType, model.AccessLogTypeDownstreamStart; got != want {
-		t.Fatalf("events[0].AccessLogType = %q, want %q", got, want)
-	}
-	if got, want := events[1].AccessLogType, model.AccessLogTypeDownstreamEnd; got != want {
-		t.Fatalf("events[1].AccessLogType = %q, want %q", got, want)
+	err := ParseStream(input, func(e model.Event) error { return nil })
+	if err == nil {
+		t.Fatal("ParseStream(non-canonical downstream-start) error = nil, want error")
 	}
 }
 

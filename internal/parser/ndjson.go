@@ -118,33 +118,7 @@ func ParseFileStream(path string, format string, handler func(model.Event) error
 
 type rawEvent struct {
 	model.Event
-	ConnectionID  *int                `json:"connection_id"`
-	AccessLogType model.AccessLogType `json:"access_log_type"`
-}
-
-func normalizeAccessLogEvent(event model.Event, rawLogType model.AccessLogType) model.Event {
-	switch strings.ToLower(string(event.Type)) {
-	case "downstreamstart", "downstream_start", "downstream-start":
-		event.Type = model.EventRequest
-		event.AccessLogType = model.AccessLogTypeDownstreamStart
-		return event
-	case "downstreamend", "downstream_end", "downstream-end":
-		event.Type = model.EventResponse
-		event.AccessLogType = model.AccessLogTypeDownstreamEnd
-		return event
-	}
-
-	logType := event.AccessLogType
-	if logType == "" {
-		logType = rawLogType
-	}
-	switch strings.ToLower(string(logType)) {
-	case "downstreamstart", "downstream_start", "downstream-start":
-		event.AccessLogType = model.AccessLogTypeDownstreamStart
-	case "downstreamend", "downstream_end", "downstream-end":
-		event.AccessLogType = model.AccessLogTypeDownstreamEnd
-	}
-	return event
+	ConnectionID *int `json:"connection_id"`
 }
 
 func isMalformedDownstreamStartRequest(event model.Event) bool {
@@ -181,9 +155,17 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return fmt.Errorf("line %d: invalid json: %w", line, err)
 		}
-		event := normalizeAccessLogEvent(ev.Event, ev.AccessLogType)
+		event := ev.Event
 		if ev.ConnectionID != nil {
 			event.ConnectionID = *ev.ConnectionID
+		}
+		switch event.Type {
+		case model.EventType(model.AccessLogTypeDownstreamStart):
+			event.Type = model.EventRequest
+			event.AccessLogType = model.AccessLogTypeDownstreamStart
+		case model.EventType(model.AccessLogTypeDownstreamEnd):
+			event.Type = model.EventResponse
+			event.AccessLogType = model.AccessLogTypeDownstreamEnd
 		}
 		hasConnectionID := ev.ConnectionID != nil
 
