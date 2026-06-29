@@ -90,7 +90,7 @@ func TestParseLogTypeField(t *testing.T) {
 		`"type":"request","log_type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z","http":{"method":"GET","authority":"example.com","path":"/start"}` +
 		"}\n" +
 		"{" +
-		`"type":"request","access_log_type":"DownstreamEnd","connection_id":1,"timestamp":"2026-02-27T03:10:22.101Z","http":{"method":"GET","authority":"example.com","path":"/end"}` +
+		`"type":"request","access_log_type":"downstream-end","connection_id":1,"timestamp":"2026-02-27T03:10:22.101Z","http":{"method":"GET","authority":"example.com","path":"/end"}` +
 		"}\n")
 
 	events := make([]model.Event, 0)

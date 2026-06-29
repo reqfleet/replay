@@ -126,17 +126,17 @@ func normalizeAccessLogEvent(event model.Event, rawLogType model.AccessLogType) 
 	if event.AccessLogType == "" {
 		event.AccessLogType = rawLogType
 	}
-	switch strings.ToLower(strings.ReplaceAll(string(event.AccessLogType), "-", "_")) {
-	case "downstreamstart", "downstream_start":
+	switch strings.ToLower(string(event.AccessLogType)) {
+	case "downstreamstart", "downstream_start", "downstream-start":
 		event.AccessLogType = model.AccessLogTypeDownstreamStart
-	case "downstreamend", "downstream_end":
+	case "downstreamend", "downstream_end", "downstream-end":
 		event.AccessLogType = model.AccessLogTypeDownstreamEnd
 	}
-	switch strings.ToLower(strings.ReplaceAll(string(event.Type), "-", "_")) {
-	case "downstreamstart", "downstream_start":
+	switch strings.ToLower(string(event.Type)) {
+	case "downstreamstart", "downstream_start", "downstream-start":
 		event.Type = model.EventRequest
 		event.AccessLogType = model.AccessLogTypeDownstreamStart
-	case "downstreamend", "downstream_end":
+	case "downstreamend", "downstream_end", "downstream-end":
 		event.Type = model.EventResponse
 		event.AccessLogType = model.AccessLogTypeDownstreamEnd
 	}

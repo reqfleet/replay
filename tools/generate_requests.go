@@ -28,10 +28,10 @@ func writeJSONLine(f *os.File, v any) error {
 }
 
 func generatedAccessLogType(raw string) (model.AccessLogType, error) {
-	switch strings.ToLower(strings.ReplaceAll(raw, "-", "_")) {
-	case "downstream_start", "downstreamstart":
+	switch strings.ToLower(raw) {
+	case "downstream_start", "downstreamstart", "downstream-start":
 		return model.AccessLogTypeDownstreamStart, nil
-	case "downstream_end", "downstreamend":
+	case "downstream_end", "downstreamend", "downstream-end":
 		return model.AccessLogTypeDownstreamEnd, nil
 	default:
 		return "", fmt.Errorf("unsupported access log type %q", raw)

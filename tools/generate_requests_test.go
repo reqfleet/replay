@@ -16,6 +16,7 @@ func TestGeneratedAccessLogType(t *testing.T) {
 		{input: "downstream_start", want: model.AccessLogTypeDownstreamStart},
 		{input: "DownstreamStart", want: model.AccessLogTypeDownstreamStart},
 		{input: "downstream-end", want: model.AccessLogTypeDownstreamEnd},
+		{input: "downstream_end", want: model.AccessLogTypeDownstreamEnd},
 		{input: "DownstreamEnd", want: model.AccessLogTypeDownstreamEnd},
 	}
 
