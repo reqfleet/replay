@@ -58,7 +58,7 @@ func New(cfg config.MetricsConfig) *Registry {
 		ThreadsGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,
 			Name:      "threads_gauge",
-			Help:      "Number of replay clients created for the engine",
+			Help:      "Number of active virtual users replaying connections for the engine",
 		}, commonLabels),
 		CPU: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,
@@ -128,8 +128,12 @@ func (r *Registry) SeedEngineLabels(commonLabelValues []string) {
 	r.Mem.WithLabelValues(commonLabelValues...).Set(0)
 }
 
-func (r *Registry) RecordClientCreated(commonLabelValues []string) {
+func (r *Registry) RecordActiveVirtualUserStarted(commonLabelValues []string) {
 	r.ThreadsGauge.WithLabelValues(commonLabelValues...).Inc()
+}
+
+func (r *Registry) RecordActiveVirtualUserFinished(commonLabelValues []string) {
+	r.ThreadsGauge.WithLabelValues(commonLabelValues...).Dec()
 }
 
 func (r *Registry) RecordRequest(commonLabelValues []string, label string, latencyMS float64, status string, egressBytes int64) {
