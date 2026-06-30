@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -186,16 +187,15 @@ func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
 	}
 }
 
-func TestActiveVirtualUserGaugeTracksConnectionLifecycle(t *testing.T) {
+func TestActiveVirtualUserGaugeTracksWorkerLifecycle(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.MaxVirtualUsersPerEngine = 3
 	reg := metrics.New(cfg.Metrics)
 	metricLabelValues := cfg.Metrics.CommonLabelValues()
 	reg.SeedEngineLabels(metricLabelValues)
 
-	requestStarted := make(chan struct{})
+	requestStarted := make(chan struct{}, 3)
 	releaseResponse := make(chan struct{})
-	var requestStartedOnce sync.Once
 	var releaseResponseOnce sync.Once
 	release := func() {
 		releaseResponseOnce.Do(func() {
@@ -203,7 +203,7 @@ func TestActiveVirtualUserGaugeTracksConnectionLifecycle(t *testing.T) {
 		})
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestStartedOnce.Do(func() { close(requestStarted) })
+		requestStarted <- struct{}{}
 		<-releaseResponse
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -213,32 +213,15 @@ func TestActiveVirtualUserGaugeTracksConnectionLifecycle(t *testing.T) {
 		srv.Close()
 	}()
 
-	eng := New(cfg, reg)
-	host := srv.URL[len("http://"):]
-	events := []model.Event{
-		{Type: model.EventMeta},
-		{Type: model.EventConnectionOpen, ConnectionID: 1},
-		{
-			Type:         model.EventRequest,
-			ConnectionID: 1,
-			Sequence:     1,
-			HTTP: model.HTTPRequestMeta{
-				Method:    http.MethodGet,
-				Scheme:    "http",
-				Authority: host,
-				Path:      "/",
-			},
-		},
-		{Type: model.EventConnectionClose, ConnectionID: 1},
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
 	}
 
-	resultCh := runReplayAsync(eng, events)
-	select {
-	case <-requestStarted:
-	case <-time.After(time.Second):
-		t.Fatal("ReplayStream(active VU gauge test) did not start request")
-	}
-	waitForThreadsGauge(t, reg, metricLabelValues, 1)
+	eng := New(cfg, reg)
+	resultCh := runReplayAsync(eng, rampupTestEvents(target, 3))
+	waitForRequestStarts(t, requestStarted, 3, time.Second)
+	waitForThreadsGauge(t, reg, metricLabelValues, 3)
 
 	release()
 	select {
@@ -246,7 +229,7 @@ func TestActiveVirtualUserGaugeTracksConnectionLifecycle(t *testing.T) {
 		if result.err != nil {
 			t.Fatalf("ReplayStream(active VU gauge test) error: %v", result.err)
 		}
-		if got, want := result.summary.ConnectionsDone, int64(1); got != want {
+		if got, want := result.summary.ConnectionsDone, int64(3); got != want {
 			t.Errorf("ReplayStream(active VU gauge test).ConnectionsDone = %d, want %d", got, want)
 		}
 	case <-time.After(time.Second):

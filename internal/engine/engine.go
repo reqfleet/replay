@@ -345,6 +345,10 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 	if err := waitForWorkerActivation(ctx, activationDelay); err != nil {
 		return Summary{}
 	}
+	if e.metrics != nil {
+		e.metrics.RecordActiveVirtualUserStarted(e.metricLabelValues)
+		defer e.metrics.RecordActiveVirtualUserFinished(e.metricLabelValues)
+	}
 
 	conns := make(map[model.ConnectionKey]*connState)
 	result := Summary{}
@@ -384,9 +388,6 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 					continue
 				case connSem <- struct{}{}:
 					cs.semAcquired = true
-					if e.metrics != nil {
-						e.metrics.RecordActiveVirtualUserStarted(e.metricLabelValues)
-					}
 				}
 			}
 
@@ -459,9 +460,6 @@ func (e *Engine) closeConnResources(cs *connState, connSem chan struct{}) {
 	if cs.semAcquired {
 		<-connSem
 		cs.semAcquired = false
-		if e.metrics != nil {
-			e.metrics.RecordActiveVirtualUserFinished(e.metricLabelValues)
-		}
 	}
 }
 

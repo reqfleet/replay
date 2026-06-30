@@ -58,7 +58,7 @@ func New(cfg config.MetricsConfig) *Registry {
 		ThreadsGauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,
 			Name:      "threads_gauge",
-			Help:      "Number of active virtual users replaying connections for the engine",
+			Help:      "Number of active replay workers for the engine",
 		}, commonLabels),
 		CPU: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cfg.Namespace,

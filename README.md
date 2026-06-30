@@ -34,7 +34,7 @@ Metric names with the default `replay` namespace:
 - `replay_mem_gauge`
 
 `replay_threads_gauge` reflects active virtual users. It increments when a replay
-connection starts work and decrements when that connection closes or aborts.
+worker starts and decrements when that worker finishes.
 
 ## Outcome model
 
