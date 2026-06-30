@@ -202,14 +202,16 @@ func TestActiveVirtualUserGaugeTracksConnectionLifecycle(t *testing.T) {
 			close(releaseResponse)
 		})
 	}
-	t.Cleanup(release)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestStartedOnce.Do(func() { close(requestStarted) })
 		<-releaseResponse
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	}))
-	defer srv.Close()
+	defer func() {
+		release()
+		srv.Close()
+	}()
 
 	eng := New(cfg, reg)
 	host := srv.URL[len("http://"):]
