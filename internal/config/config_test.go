@@ -28,6 +28,16 @@ func TestDefaultRampupDuration(t *testing.T) {
 	}
 }
 
+func TestDefaultMaxActiveConnectionsIsUnlimited(t *testing.T) {
+	cfg := Default()
+	if got, want := cfg.Replay.MaxActiveConnectionsPerEngine, 0; got != want {
+		t.Fatalf("Default().Replay.MaxActiveConnectionsPerEngine = %d, want %d", got, want)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with unlimited active connections error: %v", err)
+	}
+}
+
 func TestValidateRejectsZeroLimits(t *testing.T) {
 	cfg := Default()
 	cfg.Replay.MaxVirtualUsersPerEngine = 0
@@ -209,6 +219,24 @@ func TestLoadParsesRampupDuration(t *testing.T) {
 	}
 	if got, want := cfg.Replay.RampupDuration, 3*time.Second; got != want {
 		t.Fatalf("cfg.Replay.RampupDuration = %v, want %v", got, want)
+	}
+}
+
+func TestLoadParsesMaxActiveConnectionsPerEngine(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/cfg.yaml"
+	content := "replay:\n" +
+		"  max_active_connections_per_engine: 1000\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%q) error: %v", path, err)
+	}
+	if got, want := cfg.Replay.MaxActiveConnectionsPerEngine, 1000; got != want {
+		t.Fatalf("cfg.Replay.MaxActiveConnectionsPerEngine = %d, want %d", got, want)
 	}
 }
 

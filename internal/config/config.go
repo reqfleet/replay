@@ -34,7 +34,8 @@ type ReplayConfig struct {
 	Sharding   ShardingConfig   `yaml:"sharding"`
 	Validation ValidationConfig `yaml:"validation"`
 
-	MaxVirtualUsersPerEngine      int           `yaml:"max_virtual_users_per_engine"`
+	MaxVirtualUsersPerEngine int `yaml:"max_virtual_users_per_engine"`
+	// MaxActiveConnectionsPerEngine is reserved for connection admission; 0 means unlimited.
 	MaxActiveConnectionsPerEngine int           `yaml:"max_active_connections_per_engine"`
 	RampupDuration                time.Duration `yaml:"rampup_duration"`
 
@@ -129,7 +130,7 @@ func Default() Config {
 	return Config{
 		Replay: ReplayConfig{
 			MaxVirtualUsersPerEngine:      20,
-			MaxActiveConnectionsPerEngine: 200,
+			MaxActiveConnectionsPerEngine: 0,
 			RampupDuration:                0,
 			HTTP2: HTTP2Config{
 				Mode: "serialized",
@@ -212,9 +213,6 @@ func Load(path string) (Config, error) {
 func (c Config) Validate() error {
 	if c.Replay.MaxVirtualUsersPerEngine <= 0 {
 		return errors.New("replay.max_virtual_users_per_engine must be > 0")
-	}
-	if c.Replay.MaxActiveConnectionsPerEngine <= 0 {
-		return errors.New("replay.max_active_connections_per_engine must be > 0")
 	}
 	if c.Replay.RampupDuration < 0 {
 		return errors.New("replay.rampup_duration must be >= 0")

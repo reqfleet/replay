@@ -145,6 +145,7 @@ When the target is unreachable or times out, the request is recorded as `send_er
 
 When idempotency safeguards are enabled, mutation methods are skipped unless one of the allow headers is present.
 Lifecycle checks require `connection_open` before each replayed connection. `connection_close` is optional; EOF finalizes any still-open connections.
+Round-robin workers may drive multiple recorded connections. Each recorded connection owns its HTTP transport until `connection_close` or EOF, preserving keep-alive reuse and socket isolation; `max_virtual_users_per_engine` bounds the worker count.
 
 Sharding routes connections by `node` + `connection_id` hash (`shard_index` / `shard_count`) and only replays the local shard.
 If `checkpoint.file` is set, completed sequences are persisted and skipped on the next run using the same `node` + `connection_id` identity.
