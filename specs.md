@@ -313,6 +313,8 @@ Replay engine SHOULD support:
 * Authorization token replacement
 * Idempotency safeguards
 
+When idempotency safeguards are enabled, mutation methods MUST be skipped unless at least one configured allow header has a non-empty value in the final outbound header set after all rewriting, including automatic target `Host` rewriting.
+
 ### 11.1 Target Override Semantics
 
 To avoid replaying captured production traffic back into production, replay tooling SHOULD support explicit destination overrides.
@@ -339,15 +341,19 @@ Definitions:
 
 * `virtual_user` (VU): a logical replay worker that drives one or more recorded connections.
 * `max_virtual_users_per_engine`: maximum number of VUs that may run concurrently in one replay engine.
-* `max_active_connections_per_engine`: maximum number of simultaneously open replay connections in one replay engine.
+* `max_active_connections_per_engine`: maximum number of retained outbound connection transports in one replay engine.
+* Capacity wait-queue entry: a logical-connection admission request for a connection without a retained transport.
 
 Normative behavior:
 
 1. A replay engine MUST NOT exceed `max_virtual_users_per_engine`.
-2. A replay engine MUST NOT exceed `max_active_connections_per_engine`.
-3. When either limit is reached, additional work MUST wait behind bounded worker or connection backpressure.
-4. Implementations MUST preserve per-connection ordering and lifecycle semantics while waiting.
-5. The specification does not require `max_requests_per_second` and does not use it as a primary control.
+2. A replay engine MUST NOT retain more than `max_active_connections_per_engine` outbound connection transports.
+3. Idle transports SHOULD remain available for keep-alive reuse while capacity is available.
+4. When retained-transport capacity is full but an idle transport exists, the oldest idle transport MUST be evicted and its slot transferred without discarding the connection's logical replay state.
+5. When every retained transport is busy, admissions MUST wait in FIFO order by oldest waiting logical connection.
+6. The wait queue MUST hold at most one blocked admission per active VU worker, so it contains no more than `max_virtual_users_per_engine` entries; cancellation MUST remove the waiter.
+7. Transport eviction MUST preserve per-connection event ordering, validation, pacing, and checkpoint state; a later request MAY reconnect when its recorded logical connection remains open.
+8. The specification does not require `max_requests_per_second` and does not use it as a primary control.
 
 Distributed replay note:
 

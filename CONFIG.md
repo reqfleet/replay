@@ -19,7 +19,7 @@ Durations use Go duration syntax, such as `750ms`, `3s`, or `2m`.
 | --- | --- | --- |
 | `replay.max_virtual_users_per_engine` | `20` | Maximum number of replay workers active in this process. Connections are assigned to these workers while preserving per-connection ordering. Must be greater than zero. |
 | `replay.rampup_duration` | `0s` | Spreads worker activation linearly across this duration. `0s` activates workers immediately; for example, `30s` stages them over 30 seconds. Must not be negative. |
-| `replay.max_active_connections_per_engine` | `200` | Maximum number of replay connection states open concurrently. Additional connections wait for capacity. Must be greater than zero. |
+| `replay.max_active_connections_per_engine` | `200` | Maximum number of retained outbound connection transports. A connection keeps its idle transport for reuse while capacity is available. Each capacity wait-queue entry is a logical-connection admission request for a connection without a retained transport. When retained-transport capacity is full but an idle transport exists, the oldest idle transport is evicted and its slot transferred. When every retained transport is busy, admissions wait in FIFO order by oldest waiting logical connection. The wait queue holds at most one blocked admission per active VU worker, so it contains no more than `max_virtual_users_per_engine` entries; cancellation removes the waiter. Logical connection ordering, validation, pacing, and checkpoints survive transport eviction. Must be greater than zero. |
 
 ### `replay.http2`
 
@@ -77,7 +77,7 @@ With the current settings, validation checks only HTTP status codes.
 | --- | --- | --- |
 | `replay.idempotency.enabled` | `true` | Enables the mutation-request safety policy. |
 | `replay.idempotency.block_methods` | `[POST, PUT, PATCH, DELETE]` | HTTP methods subject to the safety policy. Method matching is case-insensitive. |
-| `replay.idempotency.require_header_for_allow` | `[idempotency-key, x-idempotency-key]` | A blocked method is sent only when at least one listed header exists with a non-empty value. Otherwise, the request is counted as skipped. Header matching is case-insensitive. An empty list blocks every method listed in `block_methods`. |
+| `replay.idempotency.require_header_for_allow` | `[idempotency-key, x-idempotency-key]` | A blocked method is sent only when at least one configured allow header has a non-empty value in the final outbound header set after all rewriting, including automatic target `Host` rewriting. Otherwise, the request is counted as skipped. Header matching is case-insensitive. An empty list blocks every method listed in `block_methods`. |
 
 ### `replay.sharding`
 
@@ -119,8 +119,8 @@ The top-level `env` mapping exports arbitrary key/value pairs into the replay pr
 
 | Field | Current value | Meaning |
 | --- | --- | --- |
-| `target.override_url` | Empty string | Replaces the captured request scheme and authority while preserving its path and query. Replay also rewrites `Host` to the override host. An empty value disables the override. `REPLAY_OVERRIDE_URL` or `--override-url` can override this setting. |
-| `target.require_override` | `false` | When true, startup fails unless an override URL is configured. Use this as a safety guard against accidentally replaying traffic to captured production destinations. `REPLAY_REQUIRE_OVERRIDE` or `--require-override` can enable it. |
+| `target.override_url` | Empty string | Replaces the captured request scheme and authority while preserving its path and query. A non-empty value must be an absolute `http` or `https` URL with a host; invalid values fail validation before replay. Replay also rewrites `Host` to the override host. An empty value disables the override. `REPLAY_OVERRIDE_URL` or `--override-url` can override this setting. |
+| `target.require_override` | `false` | When true, startup fails unless a valid, usable override URL is configured. Use this as a safety guard against accidentally replaying traffic to captured production destinations. `REPLAY_REQUIRE_OVERRIDE` or `--require-override` can enable it. |
 
 ## `header_rewrite`
 
@@ -129,4 +129,4 @@ Header rewriting is applied to each outbound request after recorded headers are 
 | Field | Current value | Meaning |
 | --- | --- | --- |
 | `header_rewrite.drop` | `[authorization, cookie]` | Recorded request headers removed before sending. The current value prevents captured credentials and cookies from being replayed. Header matching is case-insensitive. |
-| `header_rewrite.set` | `{}` | Map of headers to replace or add after dropping headers and applying the target override. The empty map performs no explicit additions. For example, `authorization: "Bearer replacement-token"` installs a replacement credential. |
+| `header_rewrite.set` | `{}` | Map of headers to replace or add after dropping headers and applying the target override. Header names are case-insensitive, so case-variant duplicates such as `Authorization` and `authorization` are rejected during validation. The empty map performs no explicit additions. For example, `authorization: "Bearer replacement-token"` installs a replacement credential. |

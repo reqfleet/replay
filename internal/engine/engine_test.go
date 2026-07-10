@@ -929,6 +929,150 @@ func TestReplaySkipsMutationWithoutIdempotencyHeader(t *testing.T) {
 	}
 }
 
+func TestReplayIdempotencyPolicyUsesRewrittenHeaders(t *testing.T) {
+	t.Run("dropped allow header blocks mutation", func(t *testing.T) {
+		var attempts atomic.Int64
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempts.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		target, err := url.Parse(srv.URL)
+		if err != nil {
+			t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+		}
+
+		cfg := config.Default()
+		cfg.Header.Drop = []string{"x-idempotency-key"}
+		eng := New(cfg, metrics.New(cfg.Metrics))
+		events := []model.Event{
+			{Type: model.EventMeta},
+			{Type: model.EventConnectionOpen, ConnectionID: 1},
+			{
+				Type:         model.EventRequest,
+				ConnectionID: 1,
+				Sequence:     1,
+				HTTP: model.HTTPRequestMeta{
+					Method:    http.MethodPost,
+					Scheme:    target.Scheme,
+					Authority: target.Host,
+					Path:      "/mutate",
+				},
+				Headers: map[string][]string{"x-idempotency-key": {"recorded-key"}},
+			},
+			{Type: model.EventConnectionClose, ConnectionID: 1},
+		}
+
+		summary, err := runReplay(eng, events)
+		if err != nil {
+			t.Fatalf("runReplay() error: %v", err)
+		}
+		if got, want := summary.Skipped, int64(1); got != want {
+			t.Fatalf("summary.Skipped = %d, want %d", got, want)
+		}
+		if got := attempts.Load(); got != 0 {
+			t.Fatalf("request attempts = %d, want 0", got)
+		}
+	})
+
+	t.Run("set allow header permits mutation", func(t *testing.T) {
+		var seenKey string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			seenKey = r.Header.Get("x-idempotency-key")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		target, err := url.Parse(srv.URL)
+		if err != nil {
+			t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+		}
+
+		cfg := config.Default()
+		cfg.Header.Set["x-idempotency-key"] = "replacement-key"
+		eng := New(cfg, metrics.New(cfg.Metrics))
+		events := []model.Event{
+			{Type: model.EventMeta},
+			{Type: model.EventConnectionOpen, ConnectionID: 1},
+			{
+				Type:         model.EventRequest,
+				ConnectionID: 1,
+				Sequence:     1,
+				HTTP: model.HTTPRequestMeta{
+					Method:    http.MethodPost,
+					Scheme:    target.Scheme,
+					Authority: target.Host,
+					Path:      "/mutate",
+				},
+			},
+			{Type: model.EventConnectionClose, ConnectionID: 1},
+		}
+
+		summary, err := runReplay(eng, events)
+		if err != nil {
+			t.Fatalf("runReplay() error: %v", err)
+		}
+		if got, want := summary.RequestsSent, int64(1); got != want {
+			t.Fatalf("summary.RequestsSent = %d, want %d", got, want)
+		}
+		if got, want := seenKey, "replacement-key"; got != want {
+			t.Fatalf("idempotency key = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("override host permits mutation after recorded host is dropped", func(t *testing.T) {
+		var seenHost string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			seenHost = r.Host
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		target, err := url.Parse(srv.URL)
+		if err != nil {
+			t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+		}
+
+		cfg := config.Default()
+		cfg.Target.OverrideURL = srv.URL
+		cfg.Header.Drop = []string{"Host"}
+		cfg.Replay.Idempotency.RequireHeaderForAllow = []string{"Host"}
+		eng := New(cfg, metrics.New(cfg.Metrics))
+		events := []model.Event{
+			{Type: model.EventMeta},
+			{Type: model.EventConnectionOpen, ConnectionID: 1},
+			{
+				Type:         model.EventRequest,
+				ConnectionID: 1,
+				Sequence:     1,
+				HTTP: model.HTTPRequestMeta{
+					Method:    http.MethodPost,
+					Scheme:    "https",
+					Authority: "captured.example",
+					Path:      "/mutate",
+				},
+				Headers: map[string][]string{"Host": {"captured.example"}},
+			},
+			{Type: model.EventConnectionClose, ConnectionID: 1},
+		}
+
+		summary, err := runReplay(eng, events)
+		if err != nil {
+			t.Fatalf("runReplay() error: %v", err)
+		}
+		if got, want := summary.RequestsSent, int64(1); got != want {
+			t.Errorf("summary.RequestsSent = %d, want %d", got, want)
+		}
+		if got, want := summary.Skipped, int64(0); got != want {
+			t.Errorf("summary.Skipped = %d, want %d", got, want)
+		}
+		if got, want := seenHost, target.Host; got != want {
+			t.Errorf("request Host = %q, want %q", got, want)
+		}
+	})
+}
+
 func TestReplayAllowsImplicitLifecycleCloseAtEOF(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -1182,6 +1326,162 @@ func TestReplayRampupStagesWorkerActivation(t *testing.T) {
 	}
 	if got, want := result.summary.RequestsSent, int64(3); got != want {
 		t.Fatalf("summary.RequestsSent = %d, want %d", got, want)
+	}
+}
+
+func TestReplayConnectionCapacityDoesNotBlockCloseEvents(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.MaxVirtualUsersPerEngine = 1
+	cfg.Replay.MaxActiveConnectionsPerEngine = 1
+	cfg.Replay.Idempotency.Enabled = false
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/one"}},
+		{Type: model.EventConnectionOpen, ConnectionID: 2},
+		{Type: model.EventRequest, ConnectionID: 2, Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/two"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+		{Type: model.EventConnectionClose, ConnectionID: 2},
+	}
+
+	select {
+	case result := <-runReplayAsync(eng, events):
+		if result.err != nil {
+			t.Fatalf("runReplay() error: %v", result.err)
+		}
+		if got, want := result.summary.RequestsSent, int64(2); got != want {
+			t.Fatalf("summary.RequestsSent = %d, want %d", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replay deadlocked while waiting for connection capacity")
+	}
+}
+
+func TestReplayConnectionCapacityLimitsConcurrentRequests(t *testing.T) {
+	started := make(chan string, 2)
+	releaseFirst := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+	t.Cleanup(release)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- r.URL.Path
+		if r.URL.Path == "/one" {
+			<-releaseFirst
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.MaxVirtualUsersPerEngine = 2
+	cfg.Replay.MaxActiveConnectionsPerEngine = 1
+	cfg.Replay.Idempotency.Enabled = false
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := make(chan model.Event)
+	resultCh := make(chan replayResult, 1)
+	go func() {
+		summary, replayErr := eng.ReplayStream(context.Background(), events)
+		resultCh <- replayResult{summary: summary, err: replayErr}
+	}()
+
+	events <- model.Event{Type: model.EventMeta}
+	events <- model.Event{Type: model.EventConnectionOpen, ConnectionID: 1}
+	events <- model.Event{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/one"}}
+	if got := <-started; got != "/one" {
+		t.Fatalf("first request path = %q, want %q", got, "/one")
+	}
+
+	events <- model.Event{Type: model.EventConnectionOpen, ConnectionID: 2}
+	events <- model.Event{Type: model.EventRequest, ConnectionID: 2, Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/two"}}
+	events <- model.Event{Type: model.EventConnectionClose, ConnectionID: 1}
+	events <- model.Event{Type: model.EventConnectionClose, ConnectionID: 2}
+	close(events)
+
+	select {
+	case got := <-started:
+		t.Fatalf("request %q started while the only connection lease was busy", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case got := <-started:
+		if got != "/two" {
+			t.Fatalf("second request path = %q, want %q", got, "/two")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second request did not start after capacity became idle")
+	}
+
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			t.Fatalf("ReplayStream() error: %v", result.err)
+		}
+		if got, want := result.summary.RequestsSent, int64(2); got != want {
+			t.Fatalf("summary.RequestsSent = %d, want %d", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReplayStream() did not finish after capacity handoff")
+	}
+}
+
+func TestReplayConnectionCapacityRetainsKeepAliveWithoutPressure(t *testing.T) {
+	var mu sync.Mutex
+	remoteAddresses := make(map[string]struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		remoteAddresses[r.RemoteAddr] = struct{}{}
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.MaxActiveConnectionsPerEngine = 1
+	cfg.Replay.Idempotency.Enabled = false
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/one"}},
+		{Type: model.EventRequest, ConnectionID: 1, Sequence: 2, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/two"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("runReplay() error: %v", err)
+	}
+	if got, want := summary.RequestsSent, int64(2); got != want {
+		t.Fatalf("summary.RequestsSent = %d, want %d", got, want)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got, want := len(remoteAddresses), 1; got != want {
+		t.Fatalf("unique remote addresses = %d, want %d", got, want)
 	}
 }
 
@@ -1837,6 +2137,40 @@ func TestNewEngineAbsoluteURLValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestReplayRejectsInvalidRequiredOverride(t *testing.T) {
+	var attempts atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+
+	cfg := config.Default()
+	cfg.Target.OverrideURL = "example.com"
+	cfg.Target.Require = true
+	cfg.Replay.Idempotency.Enabled = false
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := make(chan model.Event, 4)
+	events <- model.Event{Type: model.EventMeta}
+	events <- model.Event{Type: model.EventConnectionOpen, ConnectionID: 1}
+	events <- model.Event{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}}
+	events <- model.Event{Type: model.EventConnectionClose, ConnectionID: 1}
+	close(events)
+
+	summary, err := eng.ReplayStream(context.Background(), events)
+	if err == nil {
+		t.Fatalf("runReplay() error = nil, summary=%+v", summary)
+	}
+	if got := attempts.Load(); got != 0 {
+		t.Fatalf("original target requests = %d, want 0", got)
 	}
 }
 

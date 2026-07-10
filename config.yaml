@@ -39,7 +39,7 @@ metrics:
   namespace: "replay"
   listen_address: "0.0.0.0:9102"
   path: "/metrics"
-  max_labels: 20
+  graceful_termination_period: 5s
   common_labels:
     - name: "run_id"
       value: "unknown"
@@ -50,6 +50,10 @@ metrics:
     - name: "zone"
       value: "unknown"
       env: "REPLAY_ZONE"
+
+env:
+  TARGET_ENV: "staging"
+  AUTH_MODE: "token-rewrite"
 
 target:
   override_url: ""

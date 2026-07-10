@@ -104,6 +104,53 @@ func TestConfigPrecedence(t *testing.T) {
 	}
 }
 
+func TestLoadDefersTargetOverrideValidationUntilResolved(t *testing.T) {
+	tests := []struct {
+		name        string
+		overrideURL string
+	}{
+		{name: "empty override", overrideURL: ""},
+		{name: "malformed override", overrideURL: "http://[::1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := dir + "/cfg.yaml"
+			content := "target:\n" +
+				"  require_override: true\n" +
+				"  override_url: \"" + tt.overrideURL + "\"\n"
+			if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+				t.Fatalf("os.WriteFile(%q) error = %v, want nil", path, err)
+			}
+
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load(%q) error = %v, want nil", path, err)
+			}
+			if got, want := cfg.Target.Require, true; got != want {
+				t.Errorf("Load(%q).Target.Require = %t, want %t", path, got, want)
+			}
+			if got, want := cfg.Target.OverrideURL, tt.overrideURL; got != want {
+				t.Errorf("Load(%q).Target.OverrideURL = %q, want %q", path, got, want)
+			}
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("Load(%q).Validate() with unresolved target.override_url %q error = nil, want error", path, tt.overrideURL)
+			}
+
+			const effectiveOverrideURL = "https://effective.example"
+			t.Setenv("REPLAY_OVERRIDE_URL", effectiveOverrideURL)
+			cfg.ApplyEnv()
+			if got, want := cfg.Target.OverrideURL, effectiveOverrideURL; got != want {
+				t.Errorf("ApplyEnv().Target.OverrideURL = %q, want %q", got, want)
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() after REPLAY_OVERRIDE_URL=%q error = %v, want nil", effectiveOverrideURL, err)
+			}
+		})
+	}
+}
+
 func TestApplyEnvMetricLabelRefsFallback(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -282,5 +329,49 @@ func TestApplyEnvInvalidMetricsNamespaceFailsValidation(t *testing.T) {
 	cfg.ApplyEnv()
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() after invalid METRICS_NAMESPACE error = nil, want error")
+	}
+}
+
+func TestValidateTargetOverride(t *testing.T) {
+	tests := []struct {
+		name        string
+		overrideURL string
+		require     bool
+		wantErr     bool
+	}{
+		{name: "optional and empty", wantErr: false},
+		{name: "required and empty", require: true, wantErr: true},
+		{name: "relative URL", overrideURL: "example.com", wantErr: true},
+		{name: "unsupported scheme", overrideURL: "file://example.com/path", wantErr: true},
+		{name: "missing hostname", overrideURL: "http://:8080", require: true, wantErr: true},
+		{name: "absolute HTTP URL", overrideURL: "http://example.com", require: true, wantErr: false},
+		{name: "absolute HTTPS URL", overrideURL: "https://example.com", require: true, wantErr: false},
+		{name: "uppercase HTTPS URL", overrideURL: "HTTPS://example.com", require: true, wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Target.OverrideURL = tt.overrideURL
+			cfg.Target.Require = tt.require
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatal("Validate() error = nil, want error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsCaseInsensitiveDuplicateSetHeaders(t *testing.T) {
+	cfg := Default()
+	cfg.Header.Set = map[string]string{
+		"Idempotency-Key": "first",
+		"idempotency-key": "second",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() error = nil, want duplicate header error")
 	}
 }

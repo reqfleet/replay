@@ -143,8 +143,9 @@ When a recorded response exists for a request (`connection_id` + `sequence`), mi
 
 When the target is unreachable or times out, the request is recorded as `send_error`, the run remains `partial_success`, and `replay_status_counter` is incremented with a synthetic transport status.
 
-When idempotency safeguards are enabled, mutation methods are skipped unless one of the allow headers is present.
+When idempotency safeguards are enabled, mutation methods are skipped unless at least one configured allow header has a non-empty value in the final outbound header set after all rewriting, including automatic target `Host` rewriting.
 Lifecycle checks require `connection_open` before each replayed connection. `connection_close` is optional; EOF finalizes any still-open connections.
+Connection capacity retains idle transports for keep-alive while slots are available. Each capacity wait-queue entry is a logical-connection admission request for a connection without a retained transport. When retained-transport capacity is full but an idle transport exists, the oldest idle transport is evicted and its slot transferred. When every retained transport is busy, admissions wait in FIFO order by oldest waiting logical connection. The wait queue holds at most one blocked admission per active VU worker, so it contains no more than `max_virtual_users_per_engine` entries; cancellation removes the waiter.
 
 Sharding routes connections by `node` + `connection_id` hash (`shard_index` / `shard_count`) and only replays the local shard.
 If `checkpoint.file` is set, completed sequences are persisted and skipped on the next run using the same `node` + `connection_id` identity.

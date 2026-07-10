@@ -116,10 +116,6 @@ func main() {
 	}
 	// Apply environment overrides (env > YAML)
 	cfg.ApplyEnv()
-	if err := cfg.Validate(); err != nil {
-		slog.Error("validate config", "error", err)
-		os.Exit(2)
-	}
 	slog.Info("resolved metric labels", cfg.Metrics.CommonLabelAttrs()...)
 	// Apply CLI overrides with higher precedence for safety-related flags
 	if *dryRunFlag {
@@ -134,11 +130,11 @@ func main() {
 	if *verboseFlag {
 		cfg.Replay.Verbose = true
 	}
-
-	if cfg.Target.Require && cfg.Target.OverrideURL == "" {
-		slog.Error("target override required but missing; aborting")
+	if err := cfg.Validate(); err != nil {
+		slog.Error("validate config", "error", err)
 		os.Exit(2)
 	}
+
 	for key, value := range cfg.Env {
 		if setErr := os.Setenv(key, value); setErr != nil {
 			slog.Error("set env failed", "key", key, "error", setErr)

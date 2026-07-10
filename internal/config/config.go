@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -203,9 +204,6 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(b, &base); err != nil {
 		return Config{}, fmt.Errorf("parse yaml: %w", err)
 	}
-	if err := base.Validate(); err != nil {
-		return Config{}, err
-	}
 	return base, nil
 }
 
@@ -238,6 +236,21 @@ func (c Config) Validate() error {
 	}
 	if c.Replay.Sharding.ShardIndex < 0 || c.Replay.Sharding.ShardIndex >= c.Replay.Sharding.ShardCount {
 		return errors.New("replay.sharding.shard_index must be within [0, shard_count)")
+	}
+	if c.Target.Require && c.Target.OverrideURL == "" {
+		return errors.New("target.override_url is required when target.require_override is true")
+	}
+	if c.Target.OverrideURL != "" {
+		u, err := url.Parse(c.Target.OverrideURL)
+		if err != nil || u.Hostname() == "" || u.Scheme == "" {
+			return errors.New("target.override_url must be an absolute URL with scheme and host")
+		}
+		if scheme := strings.ToLower(u.Scheme); scheme != "http" && scheme != "https" {
+			return errors.New("target.override_url scheme must be http or https")
+		}
+	}
+	if err := validateHeaderRewrite(c.Header); err != nil {
+		return err
 	}
 	if c.Metrics.GracefulTerminationPeriod < 0 {
 		return errors.New("metrics.graceful_termination_period must be >= 0")
@@ -358,6 +371,18 @@ func (m MetricsConfig) CommonLabelAttrs() []any {
 		attrs = append(attrs, label.Name, label.Value)
 	}
 	return attrs
+}
+
+func validateHeaderRewrite(header HeaderRewriteConfig) error {
+	seenSet := make(map[string]string, len(header.Set))
+	for name := range header.Set {
+		normalized := strings.ToLower(name)
+		if previous, ok := seenSet[normalized]; ok {
+			return fmt.Errorf("header_rewrite.set contains duplicate header names %q and %q", previous, name)
+		}
+		seenSet[normalized] = name
+	}
+	return nil
 }
 
 func validateMetricLabels(labels []MetricLabel) error {

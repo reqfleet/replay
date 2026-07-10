@@ -146,6 +146,9 @@ func New(cfg config.Config, registry *metrics.Registry) *Engine {
 // synchronously as they arrive. HTTP/2 multiplexed requests are dispatched
 // concurrently on the shared per-connection client and joined at close/EOF.
 func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (Summary, error) {
+	if err := e.cfg.Validate(); err != nil {
+		return Summary{Outcome: RunFailed}, fmt.Errorf("validate config: %w", err)
+	}
 	checkpoints, err := newCheckpointStore(e.cfg.Replay.Checkpoint.File)
 	if err != nil {
 		return Summary{Outcome: RunFailed}, err
@@ -162,7 +165,7 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	defer cancelReplay()
 
 	vus := max(e.cfg.Replay.MaxVirtualUsersPerEngine, 1)
-	connSem := make(chan struct{}, e.cfg.Replay.MaxActiveConnectionsPerEngine)
+	connLimiter := newConnectionLimiter(e.cfg.Replay.MaxActiveConnectionsPerEngine)
 
 	workerChs := make([]chan model.Event, vus)
 	for i := range workerChs {
@@ -175,7 +178,7 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	for i := range workerChs {
 		activationDelay := workerActivationDelay(i, vus, e.cfg.Replay.RampupDuration)
 		wg.Go(func() {
-			results <- e.runEventWorker(replayCtx, workerChs[i], activationDelay, checkpoints, connSem)
+			results <- e.runEventWorker(replayCtx, workerChs[i], activationDelay, checkpoints, connLimiter)
 		})
 	}
 
@@ -207,13 +210,14 @@ const eventChannelDepth = 256
 
 // connState holds per-connection state within an event worker.
 type connState struct {
-	connKey     model.ConnectionKey
-	client      *http.Client
-	transport   *http.Transport
-	http2       bool
-	multiplexed bool
-	detected    bool
-	semAcquired bool
+	connKey       model.ConnectionKey
+	client        *http.Client
+	transport     *http.Transport
+	http2         bool
+	multiplexed   bool
+	detected      bool
+	leaseAcquired bool
+	inFlight      int
 
 	// Per-connection event processing state
 	previousTimestamp     time.Time
@@ -239,6 +243,135 @@ type connState struct {
 	// goroutines are in flight.
 	h2Mu sync.Mutex
 	h2WG sync.WaitGroup
+}
+
+// connectionLimiter bounds open outbound transports. Idle transports retain
+// their lease for keep-alive reuse until capacity pressure evicts them.
+type connectionLimiter struct {
+	mu       sync.Mutex
+	capacity int
+	leased   int
+	idle     []*connState
+	waiters  []*connectionWaiter
+}
+
+type connectionWaiter struct {
+	cs      *connState
+	ready   chan struct{}
+	granted bool
+}
+
+func newConnectionLimiter(capacity int) *connectionLimiter {
+	return &connectionLimiter{capacity: max(capacity, 1)}
+}
+
+func (l *connectionLimiter) beginRequest(ctx context.Context, cs *connState) error {
+	l.mu.Lock()
+	if cs.leaseAcquired && cs.inFlight > 0 {
+		cs.inFlight++
+		l.mu.Unlock()
+		return nil
+	}
+	if cs.leaseAcquired && len(l.waiters) == 0 {
+		l.removeIdleLocked(cs)
+		cs.inFlight = 1
+		l.mu.Unlock()
+		return nil
+	}
+
+	waiter := &connectionWaiter{cs: cs, ready: make(chan struct{})}
+	l.waiters = append(l.waiters, waiter)
+	l.dispatchLocked()
+	if waiter.granted {
+		l.mu.Unlock()
+		return nil
+	}
+	l.mu.Unlock()
+
+	select {
+	case <-waiter.ready:
+		return nil
+	case <-ctx.Done():
+		l.mu.Lock()
+		if waiter.granted {
+			l.mu.Unlock()
+			return nil
+		}
+		l.removeWaiterLocked(waiter)
+		l.dispatchLocked()
+		l.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+func (l *connectionLimiter) endRequest(cs *connState) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	cs.inFlight--
+	if cs.inFlight == 0 && cs.leaseAcquired {
+		l.idle = append(l.idle, cs)
+		l.dispatchLocked()
+	}
+}
+
+func (l *connectionLimiter) release(cs *connState) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.removeIdleLocked(cs)
+	closeConnectionTransport(cs)
+	if cs.leaseAcquired {
+		cs.leaseAcquired = false
+		l.leased--
+	}
+	l.dispatchLocked()
+}
+
+func (l *connectionLimiter) dispatchLocked() {
+	for len(l.waiters) > 0 {
+		if l.leased < l.capacity {
+			l.leased++
+		} else if len(l.idle) > 0 {
+			victim := l.idle[0]
+			l.idle = l.idle[1:]
+			closeConnectionTransport(victim)
+			victim.leaseAcquired = false
+		} else {
+			return
+		}
+
+		waiter := l.waiters[0]
+		l.waiters = l.waiters[1:]
+		waiter.cs.leaseAcquired = true
+		waiter.cs.inFlight = 1
+		waiter.granted = true
+		close(waiter.ready)
+	}
+}
+
+func (l *connectionLimiter) removeIdleLocked(cs *connState) {
+	for i, idle := range l.idle {
+		if idle == cs {
+			l.idle = append(l.idle[:i], l.idle[i+1:]...)
+			return
+		}
+	}
+}
+
+func (l *connectionLimiter) removeWaiterLocked(target *connectionWaiter) {
+	for i, waiter := range l.waiters {
+		if waiter == target {
+			l.waiters = append(l.waiters[:i], l.waiters[i+1:]...)
+			return
+		}
+	}
+}
+
+func closeConnectionTransport(cs *connState) {
+	if cs.transport != nil {
+		cs.transport.CloseIdleConnections()
+	}
+	cs.client = nil
+	cs.transport = nil
 }
 
 func (e *Engine) newConnState(connKey model.ConnectionKey) *connState {
@@ -341,7 +474,7 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 // For HTTP/1.1, requests are processed synchronously as they arrive. For HTTP/2
 // multiplexed mode, requests are sent concurrently on the same per-connection
 // client and finalized when connection_close or EOF is observed.
-func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, activationDelay time.Duration, checkpoints *checkpointStore, connSem chan struct{}) Summary {
+func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, activationDelay time.Duration, checkpoints *checkpointStore, connLimiter *connectionLimiter) Summary {
 	if err := waitForWorkerActivation(ctx, activationDelay); err != nil {
 		return Summary{}
 	}
@@ -378,17 +511,6 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 				if cs.multiplexed {
 					cs.checkpointWatermark = checkpoints.lastProcessed(connKey)
 				}
-				client, transport := e.makePerConnectionClient(cs.http2)
-				cs.client = client
-				cs.transport = transport
-				select {
-				case <-ctx.Done():
-					e.finalizeConn(cs, connSem, &result)
-					delete(conns, connKey)
-					continue
-				case connSem <- struct{}{}:
-					cs.semAcquired = true
-				}
 			}
 
 			if cs.multiplexed {
@@ -396,14 +518,14 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 				aborted := cs.aborted
 				cs.h2Mu.Unlock()
 				if !aborted {
-					e.processRequestConcurrent(ctx, cs, ev, checkpoints)
+					e.processRequestConcurrent(ctx, cs, ev, checkpoints, connLimiter)
 				}
 			} else {
 				if !cs.aborted {
-					abort := e.processRequest(ctx, cs, ev, checkpoints)
+					abort := e.processRequest(ctx, cs, ev, checkpoints, connLimiter)
 					if abort {
 						cs.aborted = true
-						e.closeConnResources(cs, connSem)
+						e.closeConnResources(cs, connLimiter)
 					}
 				}
 			}
@@ -424,22 +546,22 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 			if cs == nil {
 				continue
 			}
-			e.finalizeConn(cs, connSem, &result)
+			e.finalizeConn(cs, connLimiter, &result)
 			delete(conns, connKey)
 		}
 	}
 
 	// EOF: finalize remaining connections
 	for _, cs := range conns {
-		e.finalizeConn(cs, connSem, &result)
+		e.finalizeConn(cs, connLimiter, &result)
 	}
 
 	return result
 }
 
-func (e *Engine) finalizeConn(cs *connState, connSem chan struct{}, result *Summary) {
+func (e *Engine) finalizeConn(cs *connState, connLimiter *connectionLimiter, result *Summary) {
 	if !cs.detected {
-		e.closeConnResources(cs, connSem)
+		e.closeConnResources(cs, connLimiter)
 		return
 	}
 
@@ -449,18 +571,11 @@ func (e *Engine) finalizeConn(cs *connState, connSem chan struct{}, result *Summ
 	e.validatePendingInlineResponses(cs)
 	e.finalizePendingValidation(cs)
 	e.collectConnResults(cs, result)
-	e.closeConnResources(cs, connSem)
+	e.closeConnResources(cs, connLimiter)
 }
 
-func (e *Engine) closeConnResources(cs *connState, connSem chan struct{}) {
-	if cs.transport != nil {
-		cs.transport.CloseIdleConnections()
-		cs.transport = nil
-	}
-	if cs.semAcquired {
-		<-connSem
-		cs.semAcquired = false
-	}
+func (e *Engine) closeConnResources(cs *connState, connLimiter *connectionLimiter) {
+	connLimiter.release(cs)
 }
 
 func (e *Engine) collectConnResults(cs *connState, result *Summary) {
@@ -507,9 +622,19 @@ func connOutcome(aborted bool) ConnectionOutcome {
 	return ConnectionCompleted
 }
 
+func (e *Engine) beginConnectionRequest(ctx context.Context, cs *connState, connLimiter *connectionLimiter) error {
+	if err := connLimiter.beginRequest(ctx, cs); err != nil {
+		return err
+	}
+	if cs.client == nil {
+		cs.client, cs.transport = e.makePerConnectionClient(cs.http2)
+	}
+	return nil
+}
+
 // processRequest handles a single HTTP/1.1 request event synchronously.
 // Returns true if the connection should be aborted.
-func (e *Engine) processRequest(ctx context.Context, cs *connState, requestEvent model.Event, checkpoints *checkpointStore) (abort bool) {
+func (e *Engine) processRequest(ctx context.Context, cs *connState, requestEvent model.Event, checkpoints *checkpointStore, connLimiter *connectionLimiter) (abort bool) {
 	if e.paceRequest(ctx, cs, requestEvent) != nil {
 		cs.aborted = true
 		return true
@@ -519,6 +644,11 @@ func (e *Engine) processRequest(ctx context.Context, cs *connState, requestEvent
 	if handled {
 		return abort
 	}
+	if err := e.beginConnectionRequest(ctx, cs, connLimiter); err != nil {
+		cs.aborted = true
+		return true
+	}
+	defer connLimiter.endRequest(cs)
 
 	exec, err := e.sendRequest(ctx, cs.client, requestEvent)
 	if err != nil {
@@ -534,7 +664,7 @@ func (e *Engine) processRequest(ctx context.Context, cs *connState, requestEvent
 // sending it on the shared per-connection client in its own goroutine. Go's
 // http.Transport is safe for concurrent use and owns the actual H/2 stream
 // multiplexing below this abstraction.
-func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, requestEvent model.Event, checkpoints *checkpointStore) {
+func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, requestEvent model.Event, checkpoints *checkpointStore, connLimiter *connectionLimiter) {
 	if e.paceRequest(ctx, cs, requestEvent) != nil {
 		cs.h2Mu.Lock()
 		cs.aborted = true
@@ -555,8 +685,15 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 	if handled {
 		return
 	}
+	if err := e.beginConnectionRequest(ctx, cs, connLimiter); err != nil {
+		cs.h2Mu.Lock()
+		cs.aborted = true
+		cs.h2Mu.Unlock()
+		return
+	}
 
 	cs.h2WG.Go(func() {
+		defer connLimiter.endRequest(cs)
 		exec, err := e.sendRequest(ctx, cs.client, requestEvent)
 		if err != nil {
 			cs.h2Mu.Lock()
@@ -1222,7 +1359,7 @@ func (e *Engine) shouldSkipByIdempotencyPolicy(request model.Event) bool {
 		return true
 	}
 	for _, headerName := range policy.RequireHeaderForAllow {
-		if hasHeaderValue(request.Headers, headerName) {
+		if e.hasEffectiveHeaderValue(request.Headers, headerName) {
 			return false
 		}
 	}
@@ -1245,6 +1382,26 @@ func hasHeaderValue(headers map[string][]string, name string) bool {
 		}
 	}
 	return false
+}
+
+func (e *Engine) hasEffectiveHeaderValue(recorded map[string][]string, name string) bool {
+	if name == "" {
+		return false
+	}
+	if e.parsedOverrideURL != nil && (strings.EqualFold(name, "Host") || strings.EqualFold(name, ":authority")) {
+		return e.parsedOverrideURL.Host != ""
+	}
+	for header, value := range e.cfg.Header.Set {
+		if strings.EqualFold(header, name) {
+			return strings.TrimSpace(value) != ""
+		}
+	}
+	for _, header := range e.cfg.Header.Drop {
+		if strings.EqualFold(header, name) {
+			return false
+		}
+	}
+	return hasHeaderValue(recorded, name)
 }
 
 func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEvent model.Event) (requestExecution, error) {
