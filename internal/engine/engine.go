@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
@@ -100,12 +101,15 @@ type Engine struct {
 const maxBodyRead = 10 * 1024 * 1024 // 10 MiB
 
 type requestExecution struct {
-	latencyMS   float64
-	statusCode  int
-	egressBytes int64
-	attempted   bool
-	headers     map[string][]string
-	body        []byte
+	latencyMS     float64
+	statusCode    int
+	egressBytes   int64
+	attempted     bool
+	headers       map[string][]string
+	body          []byte
+	bodySize      int64
+	bodyDigest    [sha256.Size]byte
+	bodyTruncated bool
 }
 
 func responseHeaderBytes(headers http.Header) int64 {
@@ -1327,7 +1331,7 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	}
 
 	var bodyReader io.Reader
-	if requestEvent.Body.Content != "" {
+	if requestEvent.Body != nil && requestEvent.Body.Content != "" {
 		decoded, decodeErr := base64.StdEncoding.DecodeString(requestEvent.Body.Content)
 		if decodeErr != nil {
 			return requestExecution{}, fmt.Errorf("decode body: %w", decodeErr)
@@ -1359,20 +1363,29 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 		}, err
 	}
 	defer resp.Body.Close()
-	// Retain a bounded response body for validation, then drain any remainder so
-	// the transport can reuse the recorded connection's socket.
-	lr := io.LimitReader(resp.Body, maxBodyRead)
+	// Retain a bounded response body for validation while hashing and draining
+	// the complete body so oversized responses can still be compared exactly.
+	bodyHasher := sha256.New()
+	lr := io.LimitReader(io.TeeReader(resp.Body, bodyHasher), maxBodyRead+1)
 	body, err := io.ReadAll(lr)
+	bodySize := int64(len(body))
+	bodyTruncated := len(body) > maxBodyRead
+	if bodyTruncated {
+		body = body[:maxBodyRead]
+	}
 	var drainedBytes int64
 	if err == nil {
-		drainedBytes, err = io.Copy(io.Discard, resp.Body)
+		drainedBytes, err = io.Copy(bodyHasher, resp.Body)
+		bodySize += drainedBytes
 	}
+	var bodyDigest [sha256.Size]byte
+	bodyHasher.Sum(bodyDigest[:0])
 	headerBytes := responseHeaderBytes(resp.Header)
 	if err != nil {
 		return requestExecution{
 			latencyMS:   time.Since(start).Seconds() * 1000,
 			statusCode:  resp.StatusCode,
-			egressBytes: headerBytes + int64(len(body)) + drainedBytes,
+			egressBytes: headerBytes + bodySize,
 			attempted:   true,
 		}, err
 	}
@@ -1385,12 +1398,15 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	}
 
 	return requestExecution{
-		latencyMS:   time.Since(start).Seconds() * 1000,
-		statusCode:  resp.StatusCode,
-		egressBytes: int64(len(body)) + drainedBytes + headerBytes,
-		attempted:   true,
-		headers:     headers,
-		body:        body,
+		latencyMS:     time.Since(start).Seconds() * 1000,
+		statusCode:    resp.StatusCode,
+		egressBytes:   bodySize + headerBytes,
+		attempted:     true,
+		headers:       headers,
+		body:          body,
+		bodySize:      bodySize,
+		bodyDigest:    bodyDigest,
+		bodyTruncated: bodyTruncated,
 	}, nil
 }
 
@@ -1537,10 +1553,16 @@ func (e *Engine) responseValidationFailed(expected model.Event, actual requestEx
 	if validation.Headers && headersMismatch(expected.Headers, actual.headers, validation.IgnoreHeaders) {
 		return true
 	}
-	if validation.Body && expected.Body.Content != "" {
+	if validation.Body && expected.Body != nil {
 		expectedBody, err := base64.StdEncoding.DecodeString(expected.Body.Content)
 		if err != nil {
 			return true
+		}
+		if int64(len(expectedBody)) != actual.bodySize {
+			return true
+		}
+		if actual.bodyTruncated {
+			return sha256.Sum256(expectedBody) != actual.bodyDigest
 		}
 		if !slices.Equal(expectedBody, actual.body) {
 			return true
@@ -1614,7 +1636,7 @@ func resolvedRequestMethod(request model.Event) string {
 
 	// If the method is not recorded, infer the most likely method once and
 	// reuse the same resolution for both policy checks and request execution.
-	if request.Body.Content != "" || request.Body.SizeBytes > 0 || hasHeaderValue(request.Headers, "content-type") {
+	if (request.Body != nil && (request.Body.Content != "" || request.Body.SizeBytes > 0)) || hasHeaderValue(request.Headers, "content-type") {
 		return http.MethodPost
 	}
 	return http.MethodGet

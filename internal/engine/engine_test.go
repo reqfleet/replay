@@ -852,7 +852,7 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 			ConnectionID: 1,
 			Sequence:     1,
 			Status:       http.StatusOK,
-			Body: model.Body{
+			Body: &model.Body{
 				Encoding: "base64",
 				Content:  base64.StdEncoding.EncodeToString([]byte("expected-body")),
 			},
@@ -869,6 +869,131 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 	}
 	if summary.Outcome != RunPartialSuccess {
 		t.Fatalf("summary.Outcome = %s, want %s", summary.Outcome, RunPartialSuccess)
+	}
+}
+
+func TestReplayBodyValidationDistinguishesEmptyFromAbsent(t *testing.T) {
+	tests := []struct {
+		name         string
+		actualBody   string
+		expectedBody *model.Body
+		wantFailures int64
+	}{
+		{
+			name:         "explicit empty body rejects non-empty response",
+			actualBody:   "unexpected",
+			expectedBody: &model.Body{Encoding: "base64"},
+			wantFailures: 1,
+		},
+		{
+			name:         "explicit empty body accepts empty response",
+			expectedBody: &model.Body{Encoding: "base64"},
+		},
+		{
+			name:       "absent body does not assert emptiness",
+			actualBody: "unexpected",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tt.actualBody))
+			}))
+			defer srv.Close()
+
+			target, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+			}
+			cfg := config.Default()
+			cfg.Replay.Validation.Enabled = true
+			cfg.Replay.Validation.Body = true
+			eng := New(cfg, metrics.New(cfg.Metrics))
+			events := []model.Event{
+				{Type: model.EventMeta},
+				{Type: model.EventConnectionOpen, ConnectionID: 1},
+				{
+					Type:         model.EventRequest,
+					ConnectionID: 1,
+					Sequence:     1,
+					HTTP: model.HTTPRequestMeta{
+						Method:    http.MethodGet,
+						Scheme:    target.Scheme,
+						Authority: target.Host,
+						Path:      "/",
+					},
+				},
+				{
+					Type:         model.EventResponse,
+					ConnectionID: 1,
+					Sequence:     1,
+					Status:       http.StatusOK,
+					Body:         tt.expectedBody,
+				},
+				{Type: model.EventConnectionClose, ConnectionID: 1},
+			}
+
+			summary, err := runReplay(eng, events)
+			if err != nil {
+				t.Fatalf("runReplay() error: %v", err)
+			}
+			if got := summary.ValidationFailed; got != tt.wantFailures {
+				t.Fatalf("summary.ValidationFailed = %d, want %d", got, tt.wantFailures)
+			}
+		})
+	}
+}
+
+func TestResponseValidationComparesOversizedBodiesExactly(t *testing.T) {
+	actualBody := append(bytes.Repeat([]byte("x"), maxBodyRead), 'y')
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(actualBody)
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+	cfg := config.Default()
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Body = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	client, transport := eng.makePerConnectionClient(false)
+	defer transport.CloseIdleConnections()
+	requestEvent := model.Event{HTTP: model.HTTPRequestMeta{
+		Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/",
+	}}
+
+	exec, err := eng.executeRequest(
+		context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil),
+	)
+	if err != nil {
+		t.Fatalf("executeRequest() error: %v", err)
+	}
+	if !exec.bodyTruncated {
+		t.Fatal("executeRequest().bodyTruncated = false, want true")
+	}
+	if got, want := exec.bodySize, int64(len(actualBody)); got != want {
+		t.Fatalf("executeRequest().bodySize = %d, want %d", got, want)
+	}
+
+	prefixOnly := model.Event{Body: &model.Body{
+		Encoding: "base64",
+		Content:  base64.StdEncoding.EncodeToString(actualBody[:maxBodyRead]),
+	}}
+	if !eng.responseValidationFailed(prefixOnly, exec) {
+		t.Fatal("responseValidationFailed(prefix only) = false, want true")
+	}
+	exact := model.Event{Body: &model.Body{
+		Encoding: "base64",
+		Content:  base64.StdEncoding.EncodeToString(actualBody),
+	}}
+	if eng.responseValidationFailed(exact, exec) {
+		t.Fatal("responseValidationFailed(exact oversized body) = true, want false")
 	}
 }
 
