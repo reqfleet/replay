@@ -266,6 +266,9 @@ func (c Config) Validate() error {
 	if c.Metrics.MaxLabels < 0 {
 		return errors.New("metrics.max_labels must be >= 0")
 	}
+	if err := validateHeaderRewriteSet(c.Header.Set); err != nil {
+		return err
+	}
 	if c.Metrics.Namespace != "" && !isValidMetricLabelName(c.Metrics.Namespace) {
 		return errors.New("metrics.namespace must be a valid Prometheus metric namespace")
 	}
@@ -394,6 +397,18 @@ func validateMetricLabels(labels []MetricLabel) error {
 			return fmt.Errorf("metrics.common_labels contains duplicate label name %q", label.Name)
 		}
 		seen[label.Name] = struct{}{}
+	}
+	return nil
+}
+
+func validateHeaderRewriteSet(headers map[string]string) error {
+	seen := make(map[string]string, len(headers))
+	for name := range headers {
+		canonicalName := strings.ToLower(name)
+		if previous, ok := seen[canonicalName]; ok {
+			return fmt.Errorf("header_rewrite.set contains case-insensitive duplicate header names %q and %q", previous, name)
+		}
+		seen[canonicalName] = name
 	}
 	return nil
 }

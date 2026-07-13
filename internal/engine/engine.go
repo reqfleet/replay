@@ -1210,8 +1210,9 @@ func (e *Engine) shouldSkipByIdempotencyPolicy(request model.Event) bool {
 	if len(policy.RequireHeaderForAllow) == 0 {
 		return true
 	}
+	effectiveHeaders := e.effectiveRequestHeaders(request.Headers)
 	for _, headerName := range policy.RequireHeaderForAllow {
-		if hasHeaderValue(request.Headers, headerName) {
+		if hasHeaderValue(effectiveHeaders, headerName) {
 			return false
 		}
 	}
@@ -1234,6 +1235,28 @@ func hasHeaderValue(headers map[string][]string, name string) bool {
 		}
 	}
 	return false
+}
+
+func (e *Engine) effectiveRequestHeaders(recorded map[string][]string) http.Header {
+	headers := make(http.Header, len(recorded)+len(e.cfg.Header.Set))
+	for key, values := range recorded {
+		if strings.HasPrefix(key, ":") {
+			continue
+		}
+		for _, value := range values {
+			headers.Add(key, value)
+		}
+	}
+	for _, headerName := range e.cfg.Header.Drop {
+		headers.Del(headerName)
+	}
+	if e.parsedOverrideURL != nil {
+		headers.Set("Host", e.parsedOverrideURL.Host)
+	}
+	for key, value := range e.cfg.Header.Set {
+		headers.Set(key, value)
+	}
+	return headers
 }
 
 func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEvent model.Event) (requestExecution, error) {
@@ -1316,28 +1339,12 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 		return requestExecution{}, err
 	}
 
-	for key, values := range requestEvent.Headers {
-		if strings.HasPrefix(key, ":") {
-			continue
-		}
-		for _, value := range values {
-			req.Header.Add(key, value)
-		}
-	}
-	for _, headerName := range e.cfg.Header.Drop {
-		req.Header.Del(headerName)
-	}
+	req.Header = e.effectiveRequestHeaders(requestEvent.Headers)
 
 	// Automatic Host/:authority rewrite when override_url is set.
 	if e.parsedOverrideURL != nil {
 		// set request Host to override host (preserves path/query in URL)
 		req.Host = e.parsedOverrideURL.Host
-		// also set Host header explicitly for clarity
-		req.Header.Set("Host", e.parsedOverrideURL.Host)
-	}
-
-	for key, value := range e.cfg.Header.Set {
-		req.Header.Set(key, value)
 	}
 
 	start := time.Now()

@@ -300,6 +300,18 @@ func TestValidateRejectsInvalidMetricCommonLabels(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsCaseInsensitiveDuplicateSetHeaders(t *testing.T) {
+	cfg := Default()
+	cfg.Header.Set = map[string]string{
+		"Idempotency-Key": "first",
+		"idempotency-key": "second",
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() with case-insensitive duplicate header_rewrite.set keys error = nil, want error")
+	}
+}
+
 func TestValidateRejectsInvalidMetricsNamespace(t *testing.T) {
 	cfg := Default()
 	cfg.Metrics.Namespace = "bad-namespace"

@@ -929,6 +929,90 @@ func TestReplaySkipsMutationWithoutIdempotencyHeader(t *testing.T) {
 	}
 }
 
+func TestReplayIdempotencyPolicyUsesRewrittenHeaders(t *testing.T) {
+	tests := []struct {
+		name            string
+		recordedHeaders map[string][]string
+		dropHeaders     []string
+		setHeaders      map[string]string
+		wantSkipped     int64
+		wantSent        int64
+		wantAttempts    int64
+		wantHeader      string
+	}{
+		{
+			name:            "dropped required header blocks request",
+			recordedHeaders: map[string][]string{"Idempotency-Key": {"recorded"}},
+			dropHeaders:     []string{"idempotency-key"},
+			wantSkipped:     1,
+		},
+		{
+			name:         "set required header allows request",
+			setHeaders:   map[string]string{"Idempotency-Key": "replacement"},
+			wantSent:     1,
+			wantAttempts: 1,
+			wantHeader:   "replacement",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var attempts int64
+			var receivedHeader string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				atomic.AddInt64(&attempts, 1)
+				receivedHeader = r.Header.Get("Idempotency-Key")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			target, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+			}
+
+			cfg := config.Default()
+			cfg.Header.Drop = tt.dropHeaders
+			cfg.Header.Set = tt.setHeaders
+			eng := New(cfg, metrics.New(cfg.Metrics))
+			events := []model.Event{
+				{Type: model.EventMeta},
+				{Type: model.EventConnectionOpen, ConnectionID: 1},
+				{
+					Type:         model.EventRequest,
+					ConnectionID: 1,
+					Sequence:     1,
+					Headers:      tt.recordedHeaders,
+					HTTP: model.HTTPRequestMeta{
+						Method:    http.MethodPost,
+						Scheme:    target.Scheme,
+						Authority: target.Host,
+						Path:      "/mutate",
+					},
+				},
+				{Type: model.EventConnectionClose, ConnectionID: 1},
+			}
+
+			summary, err := runReplay(eng, events)
+			if err != nil {
+				t.Fatalf("runReplay() error: %v", err)
+			}
+			if got := summary.Skipped; got != tt.wantSkipped {
+				t.Errorf("summary.Skipped = %d, want %d", got, tt.wantSkipped)
+			}
+			if got := summary.RequestsSent; got != tt.wantSent {
+				t.Errorf("summary.RequestsSent = %d, want %d", got, tt.wantSent)
+			}
+			if got := atomic.LoadInt64(&attempts); got != tt.wantAttempts {
+				t.Errorf("attempts = %d, want %d", got, tt.wantAttempts)
+			}
+			if receivedHeader != tt.wantHeader {
+				t.Errorf("received Idempotency-Key = %q, want %q", receivedHeader, tt.wantHeader)
+			}
+		})
+	}
+}
+
 func TestReplayAllowsImplicitLifecycleCloseAtEOF(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
