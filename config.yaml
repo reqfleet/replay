@@ -53,7 +53,7 @@ metrics:
 
 target:
   override_url: ""
-  require_override: false
+  disallow_recorded_targets: false
 
 header_rewrite:
   drop: [authorization, cookie]

@@ -82,7 +82,7 @@ func main() {
 	gzipFlag := flag.Bool("gzip", false, "read log file compressed with gzip")
 	dryRunFlag := flag.Bool("dry-run", false, "dry run mode: do not send network requests")
 	overrideFlag := flag.String("override-url", "", "override target URL (overrides config)")
-	requireOverride := flag.Bool("require-override", false, "fail if override-url is required but missing")
+	disallowRecordedTargets := flag.Bool("disallow-recorded-targets", false, "fail if no target override is configured")
 	verboseFlag := flag.Bool("verbose", false, "enable verbose output (e.g. log response errors)")
 	flag.Parse()
 
@@ -128,15 +128,15 @@ func main() {
 	if *overrideFlag != "" {
 		cfg.Target.OverrideURL = *overrideFlag
 	}
-	if *requireOverride {
-		cfg.Target.Require = true
+	if *disallowRecordedTargets {
+		cfg.Target.DisallowRecordedTargets = true
 	}
 	if *verboseFlag {
 		cfg.Replay.Verbose = true
 	}
 
-	if cfg.Target.Require && cfg.Target.OverrideURL == "" {
-		slog.Error("target override required but missing; aborting")
+	if _, err := cfg.Target.ParseURL(); err != nil {
+		slog.Error("validate target override", "error", err)
 		os.Exit(2)
 	}
 	for key, value := range cfg.Env {

@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -117,8 +118,30 @@ type MetricLabel struct {
 }
 
 type TargetOverrideConfig struct {
-	OverrideURL string `yaml:"override_url"`
-	Require     bool   `yaml:"require_override"`
+	OverrideURL             string `yaml:"override_url"`
+	DisallowRecordedTargets bool   `yaml:"disallow_recorded_targets"`
+}
+
+// ParseURL validates and parses the configured target override.
+func (c TargetOverrideConfig) ParseURL() (*url.URL, error) {
+	if c.OverrideURL == "" {
+		if c.DisallowRecordedTargets {
+			return nil, errors.New("recorded targets are disallowed but target.override_url is empty")
+		}
+		return nil, nil
+	}
+
+	parsed, err := url.Parse(c.OverrideURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse target.override_url: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, errors.New("target.override_url scheme must be http or https")
+	}
+	if parsed.Hostname() == "" {
+		return nil, errors.New("target.override_url must include a hostname")
+	}
+	return parsed, nil
 }
 
 type HeaderRewriteConfig struct {
@@ -280,9 +303,9 @@ func (c *Config) ApplyEnv() {
 	if v, ok := os.LookupEnv("REPLAY_OVERRIDE_URL"); ok && v != "" {
 		c.Target.OverrideURL = v
 	}
-	if v, ok := os.LookupEnv("REPLAY_REQUIRE_OVERRIDE"); ok {
+	if v, ok := os.LookupEnv("REPLAY_DISALLOW_RECORDED_TARGETS"); ok {
 		if b, err := strconv.ParseBool(v); err == nil {
-			c.Target.Require = b
+			c.Target.DisallowRecordedTargets = b
 		}
 	}
 	if v, ok := os.LookupEnv("METRICS_ENABLED"); ok {

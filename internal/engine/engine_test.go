@@ -2152,6 +2152,78 @@ func TestNewEngineAbsoluteURLValidation(t *testing.T) {
 	}
 }
 
+func TestReplayRejectsInvalidOverride(t *testing.T) {
+	cfg := config.Default()
+	cfg.Target.OverrideURL = "example.com"
+
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := make(chan model.Event)
+	close(events)
+
+	summary, err := eng.ReplayStream(context.Background(), events)
+	if err == nil {
+		t.Fatal("ReplayStream() error = nil, want invalid target override error")
+	}
+	if got, want := summary.Outcome, RunFailed; got != want {
+		t.Errorf("ReplayStream() outcome = %s, want %s", got, want)
+	}
+}
+
+func TestReplayStreamDrainsEventsOnInitializationError(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*testing.T, *config.Config)
+	}{
+		{
+			name: "invalid_override",
+			configure: func(_ *testing.T, cfg *config.Config) {
+				cfg.Target.OverrideURL = "example.com"
+			},
+		},
+		{
+			name: "invalid_checkpoint",
+			configure: func(t *testing.T, cfg *config.Config) {
+				t.Helper()
+				checkpointPath := filepath.Join(t.TempDir(), "checkpoint.json")
+				if err := os.WriteFile(checkpointPath, []byte("{"), 0o600); err != nil {
+					t.Fatalf("os.WriteFile(%q) error: %v", checkpointPath, err)
+				}
+				cfg.Replay.Checkpoint.File = checkpointPath
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			tt.configure(t, &cfg)
+			eng := New(cfg, metrics.New(cfg.Metrics))
+
+			events := make(chan model.Event)
+			senderDone := make(chan struct{})
+			go func() {
+				events <- model.Event{Type: model.EventMeta}
+				close(events)
+				close(senderDone)
+			}()
+
+			summary, err := eng.ReplayStream(context.Background(), events)
+			if err == nil {
+				t.Fatal("ReplayStream() error = nil, want initialization error")
+			}
+			if got, want := summary.Outcome, RunFailed; got != want {
+				t.Errorf("ReplayStream() outcome = %s, want %s", got, want)
+			}
+
+			select {
+			case <-senderDone:
+			case <-time.After(time.Second):
+				t.Fatal("event sender remained blocked after ReplayStream returned")
+			}
+		})
+	}
+}
+
 func TestReplayStreamCancelsInFlightRequestOnRouteError(t *testing.T) {
 	started := make(chan struct{})
 	canceled := make(chan struct{})

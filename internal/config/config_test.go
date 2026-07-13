@@ -75,6 +75,7 @@ func TestConfigPrecedence(t *testing.T) {
 
 	// env should override YAML
 	t.Setenv("REPLAY_OVERRIDE_URL", "http://fromenv")
+	t.Setenv("REPLAY_DISALLOW_RECORDED_TARGETS", "true")
 	t.Setenv("REPLAY_DRY_RUN", "true")
 	t.Setenv("METRICS_ENABLED", "true")
 	t.Setenv("TENANT_ID_FROM_ENV", "tenant-from-config-env")
@@ -86,6 +87,9 @@ func TestConfigPrecedence(t *testing.T) {
 
 	if cfg.Target.OverrideURL != "http://fromenv" {
 		t.Fatalf("override url not taken from env: %v", cfg.Target.OverrideURL)
+	}
+	if !cfg.Target.DisallowRecordedTargets {
+		t.Fatal("cfg.Target.DisallowRecordedTargets = false, want true")
 	}
 	if cfg.Replay.DryRun != true {
 		t.Fatalf("dry run not taken from env: %v", cfg.Replay.DryRun)
@@ -310,5 +314,65 @@ func TestApplyEnvInvalidMetricsNamespaceFailsValidation(t *testing.T) {
 	cfg.ApplyEnv()
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() after invalid METRICS_NAMESPACE error = nil, want error")
+	}
+}
+
+func TestValidateTargetOverride(t *testing.T) {
+	tests := []struct {
+		name    string
+		target  TargetOverrideConfig
+		want    string
+		wantErr bool
+	}{
+		{
+			name:   "valid_absolute_url",
+			target: TargetOverrideConfig{OverrideURL: "https://staging.example.com/base", DisallowRecordedTargets: true},
+			want:   "https://staging.example.com/base",
+		},
+		{
+			name:    "invalid_url",
+			target:  TargetOverrideConfig{OverrideURL: "example.com"},
+			wantErr: true,
+		},
+		{
+			name:    "unsupported_scheme",
+			target:  TargetOverrideConfig{OverrideURL: "ftp://staging.example.com"},
+			wantErr: true,
+		},
+		{
+			name:    "missing_hostname",
+			target:  TargetOverrideConfig{OverrideURL: "https:///base"},
+			wantErr: true,
+		},
+		{
+			name:    "recorded_targets_disallowed_without_override",
+			target:  TargetOverrideConfig{DisallowRecordedTargets: true},
+			wantErr: true,
+		},
+		{
+			name:   "optional_missing_url",
+			target: TargetOverrideConfig{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.target.ParseURL()
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("TargetOverrideConfig.ParseURL() error = %v, want error presence = %t", err, tt.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			if got == nil {
+				if tt.want != "" {
+					t.Fatalf("TargetOverrideConfig.ParseURL() = nil, want %q", tt.want)
+				}
+				return
+			}
+			if got.String() != tt.want {
+				t.Errorf("TargetOverrideConfig.ParseURL() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

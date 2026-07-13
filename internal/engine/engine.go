@@ -94,6 +94,7 @@ type Engine struct {
 	metricLabelValues   []string
 	parsedPathTemplates map[int][]PathTemplate
 	parsedOverrideURL   *url.URL
+	targetOverrideErr   error
 }
 
 const maxBodyRead = 10 * 1024 * 1024 // 10 MiB
@@ -118,17 +119,9 @@ func responseHeaderBytes(headers http.Header) int64 {
 }
 
 func New(cfg config.Config, registry *metrics.Registry) *Engine {
-	var parsedOverride *url.URL
-	if cfg.Target.OverrideURL != "" {
-		u, err := url.Parse(cfg.Target.OverrideURL)
-		if err == nil && u.Scheme != "" && u.Host != "" {
-			parsedOverride = u
-		} else {
-			if err == nil {
-				err = fmt.Errorf("url must be absolute (include scheme and host)")
-			}
-			slog.Error("failed to parse config target.override_url", "url", cfg.Target.OverrideURL, "error", err)
-		}
+	parsedOverride, overrideErr := cfg.Target.ParseURL()
+	if overrideErr != nil {
+		slog.Error("failed to parse config target.override_url", "url", cfg.Target.OverrideURL, "error", overrideErr)
 	}
 	return &Engine{
 		cfg:                 cfg,
@@ -136,7 +129,15 @@ func New(cfg config.Config, registry *metrics.Registry) *Engine {
 		metricLabelValues:   cfg.Metrics.CommonLabelValues(),
 		parsedPathTemplates: ParsePathTemplates(cfg.Metrics.PathTemplates),
 		parsedOverrideURL:   parsedOverride,
+		targetOverrideErr:   overrideErr,
 	}
+}
+
+func drainEvents(events <-chan model.Event) {
+	go func() {
+		for range events {
+		}
+	}()
 }
 
 // ReplayStream processes events from the provided channel as they arrive.
@@ -146,8 +147,13 @@ func New(cfg config.Config, registry *metrics.Registry) *Engine {
 // synchronously as they arrive. HTTP/2 multiplexed requests are dispatched
 // concurrently on the shared per-connection client and joined at close/EOF.
 func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (Summary, error) {
+	if e.targetOverrideErr != nil {
+		drainEvents(events)
+		return Summary{Outcome: RunFailed}, fmt.Errorf("validate target override: %w", e.targetOverrideErr)
+	}
 	checkpoints, err := newCheckpointStore(e.cfg.Replay.Checkpoint.File)
 	if err != nil {
+		drainEvents(events)
 		return Summary{Outcome: RunFailed}, err
 	}
 	if checkpoints != nil {
@@ -182,10 +188,7 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 
 	if routeErr != nil {
 		cancelReplay()
-		go func() {
-			for range events {
-			}
-		}()
+		drainEvents(events)
 	}
 
 	for _, ch := range workerChs {
