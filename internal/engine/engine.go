@@ -133,6 +133,13 @@ func New(cfg config.Config, registry *metrics.Registry) *Engine {
 	}
 }
 
+func drainEvents(events <-chan model.Event) {
+	go func() {
+		for range events {
+		}
+	}()
+}
+
 // ReplayStream processes events from the provided channel as they arrive.
 // Events are routed to per-worker channels by connection assignment, providing
 // bounded backpressure without buffering entire connections in memory.
@@ -141,10 +148,12 @@ func New(cfg config.Config, registry *metrics.Registry) *Engine {
 // concurrently on the shared per-connection client and joined at close/EOF.
 func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (Summary, error) {
 	if e.targetOverrideErr != nil {
+		drainEvents(events)
 		return Summary{Outcome: RunFailed}, fmt.Errorf("validate target override: %w", e.targetOverrideErr)
 	}
 	checkpoints, err := newCheckpointStore(e.cfg.Replay.Checkpoint.File)
 	if err != nil {
+		drainEvents(events)
 		return Summary{Outcome: RunFailed}, err
 	}
 	if checkpoints != nil {
@@ -179,10 +188,7 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 
 	if routeErr != nil {
 		cancelReplay()
-		go func() {
-			for range events {
-			}
-		}()
+		drainEvents(events)
 	}
 
 	for _, ch := range workerChs {
