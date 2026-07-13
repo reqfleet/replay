@@ -162,7 +162,6 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	defer cancelReplay()
 
 	vus := max(e.cfg.Replay.MaxVirtualUsersPerEngine, 1)
-	connSem := make(chan struct{}, e.cfg.Replay.MaxActiveConnectionsPerEngine)
 
 	workerChs := make([]chan model.Event, vus)
 	for i := range workerChs {
@@ -175,7 +174,7 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	for i := range workerChs {
 		activationDelay := workerActivationDelay(i, vus, e.cfg.Replay.RampupDuration)
 		wg.Go(func() {
-			results <- e.runEventWorker(replayCtx, workerChs[i], activationDelay, checkpoints, connSem)
+			results <- e.runEventWorker(replayCtx, workerChs[i], activationDelay, checkpoints)
 		})
 	}
 
@@ -213,7 +212,6 @@ type connState struct {
 	http2       bool
 	multiplexed bool
 	detected    bool
-	semAcquired bool
 
 	// Per-connection event processing state
 	previousTimestamp     time.Time
@@ -341,7 +339,7 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 // For HTTP/1.1, requests are processed synchronously as they arrive. For HTTP/2
 // multiplexed mode, requests are sent concurrently on the same per-connection
 // client and finalized when connection_close or EOF is observed.
-func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, activationDelay time.Duration, checkpoints *checkpointStore, connSem chan struct{}) Summary {
+func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, activationDelay time.Duration, checkpoints *checkpointStore) Summary {
 	if err := waitForWorkerActivation(ctx, activationDelay); err != nil {
 		return Summary{}
 	}
@@ -381,14 +379,6 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 				client, transport := e.makePerConnectionClient(cs.http2)
 				cs.client = client
 				cs.transport = transport
-				select {
-				case <-ctx.Done():
-					e.finalizeConn(cs, connSem, &result)
-					delete(conns, connKey)
-					continue
-				case connSem <- struct{}{}:
-					cs.semAcquired = true
-				}
 			}
 
 			if cs.multiplexed {
@@ -403,7 +393,7 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 					abort := e.processRequest(ctx, cs, ev, checkpoints)
 					if abort {
 						cs.aborted = true
-						e.closeConnResources(cs, connSem)
+						e.closeConnResources(cs)
 					}
 				}
 			}
@@ -424,22 +414,22 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 			if cs == nil {
 				continue
 			}
-			e.finalizeConn(cs, connSem, &result)
+			e.finalizeConn(cs, &result)
 			delete(conns, connKey)
 		}
 	}
 
 	// EOF: finalize remaining connections
 	for _, cs := range conns {
-		e.finalizeConn(cs, connSem, &result)
+		e.finalizeConn(cs, &result)
 	}
 
 	return result
 }
 
-func (e *Engine) finalizeConn(cs *connState, connSem chan struct{}, result *Summary) {
+func (e *Engine) finalizeConn(cs *connState, result *Summary) {
 	if !cs.detected {
-		e.closeConnResources(cs, connSem)
+		e.closeConnResources(cs)
 		return
 	}
 
@@ -449,17 +439,13 @@ func (e *Engine) finalizeConn(cs *connState, connSem chan struct{}, result *Summ
 	e.validatePendingInlineResponses(cs)
 	e.finalizePendingValidation(cs)
 	e.collectConnResults(cs, result)
-	e.closeConnResources(cs, connSem)
+	e.closeConnResources(cs)
 }
 
-func (e *Engine) closeConnResources(cs *connState, connSem chan struct{}) {
+func (e *Engine) closeConnResources(cs *connState) {
 	if cs.transport != nil {
 		cs.transport.CloseIdleConnections()
 		cs.transport = nil
-	}
-	if cs.semAcquired {
-		<-connSem
-		cs.semAcquired = false
 	}
 }
 
@@ -1363,16 +1349,20 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 		}, err
 	}
 	defer resp.Body.Close()
-	// Limit the amount of response body read to avoid unbounded memory growth.
-	// This prevents OOMs when replaying unexpectedly large responses.
+	// Retain a bounded response body for validation, then drain any remainder so
+	// the transport can reuse the recorded connection's socket.
 	lr := io.LimitReader(resp.Body, maxBodyRead)
 	body, err := io.ReadAll(lr)
+	var drainedBytes int64
+	if err == nil {
+		drainedBytes, err = io.Copy(io.Discard, resp.Body)
+	}
 	headerBytes := responseHeaderBytes(resp.Header)
 	if err != nil {
 		return requestExecution{
 			latencyMS:   time.Since(start).Seconds() * 1000,
 			statusCode:  resp.StatusCode,
-			egressBytes: headerBytes + int64(len(body)),
+			egressBytes: headerBytes + int64(len(body)) + drainedBytes,
 			attempted:   true,
 		}, err
 	}
@@ -1387,7 +1377,7 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	return requestExecution{
 		latencyMS:   time.Since(start).Seconds() * 1000,
 		statusCode:  resp.StatusCode,
-		egressBytes: int64(len(body)) + headerBytes,
+		egressBytes: int64(len(body)) + drainedBytes + headerBytes,
 		attempted:   true,
 		headers:     headers,
 		body:        body,

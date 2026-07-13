@@ -331,28 +331,30 @@ Example rewrite intent:
 * Override target: `https://api.staging.example.com`
 * Replayed URL: `https://api.staging.example.com/api/v1/login?redirect=/home`
 
-### 11.2 Per-Engine Capacity Limits (VU/Connection Model)
+### 11.2 Per-Engine Capacity Limits (VU Model)
 
-Replay engines SHOULD expose per-engine capacity controls based on virtual users (VU) and connection counts, rather than request-per-second throttling.
+Replay engines SHOULD expose virtual-user (VU) worker controls rather than treating VU count as a request-per-second or total-load throttle.
 
 Definitions:
 
 * `virtual_user` (VU): a logical replay worker that drives one or more recorded connections.
 * `max_virtual_users_per_engine`: maximum number of VUs that may run concurrently in one replay engine.
-* `max_active_connections_per_engine`: maximum number of simultaneously open replay connections in one replay engine.
+* `max_active_connections_per_engine`: configured ceiling for simultaneously open replay connections. `0` means unlimited. This version preserves the setting for configuration compatibility but does not yet enforce positive values.
 
 Normative behavior:
 
-1. A replay engine MUST NOT exceed `max_virtual_users_per_engine`.
-2. A replay engine MUST NOT exceed `max_active_connections_per_engine`.
-3. When either limit is reached, additional work MUST wait behind bounded worker or connection backpressure.
-4. Implementations MUST preserve per-connection ordering and lifecycle semantics while waiting.
+1. A replay engine MUST NOT exceed `max_virtual_users_per_engine` replay workers.
+2. Connections MAY be assigned to VUs round-robin, but every event for one `node` + `connection_id` identity MUST remain on the same VU.
+3. Each recorded connection SHOULD own its outbound transport until `connection_close` or EOF so keep-alive reuse and socket isolation are preserved.
+4. Implementations MUST preserve per-connection event ordering and lifecycle semantics when a VU drives multiple connections.
 5. The specification does not require `max_requests_per_second` and does not use it as a primary control.
+
+The VU limit bounds replay workers only. It does not bound retained per-connection transports or concurrent streams dispatched by multiplexed HTTP/2 connections. Actual connection and request concurrency therefore depend on capture topology, HTTP mode, and target latency.
 
 Distributed replay note:
 
-* In multi-engine deployments, these limits apply per engine.
-* Aggregate load is the sum of all engine capacities and SHOULD be configured explicitly by operators.
+* In multi-engine deployments, the VU limit applies per engine.
+* The sum of per-engine worker limits is aggregate VU capacity, not an aggregate load ceiling. Operators SHOULD size and shard replay engines for the capture's peak open connections and multiplexed stream concurrency.
 
 ### 11.3 Replay Outcome Model
 
@@ -425,7 +427,7 @@ Minimum configurable domains:
 * Lifecycle: whether replay requires `connection_open` before requests.
 * Environment variables: key/value pairs injected into replay process/runtime.
 * Metrics server: listen address/port, endpoint enable toggle (default enabled), path (default `/metrics`).
-* Capacity controls: `max_virtual_users_per_engine`, `max_active_connections_per_engine`.
+* Capacity controls: `max_virtual_users_per_engine`, `max_active_connections_per_engine` (`0` means unlimited).
 
 Configuration precedence (recommended):
 
@@ -439,8 +441,8 @@ Example:
 ```yaml
 replay:
   max_virtual_users_per_engine: 20
+  max_active_connections_per_engine: 0
   rampup_duration: 0s
-  max_active_connections_per_engine: 200
   http2:
     mode: serialized
   timeout:

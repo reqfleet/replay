@@ -1120,7 +1120,6 @@ func TestReplayZeroRampupStartsAllWorkersImmediately(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Replay.MaxVirtualUsersPerEngine = 3
-	cfg.Replay.MaxActiveConnectionsPerEngine = 3
 	cfg.Replay.RampupDuration = 0
 	cfg.Replay.Idempotency.Enabled = false
 
@@ -1164,7 +1163,6 @@ func TestReplayRampupStagesWorkerActivation(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Replay.MaxVirtualUsersPerEngine = 3
-	cfg.Replay.MaxActiveConnectionsPerEngine = 3
 	cfg.Replay.RampupDuration = 300 * time.Millisecond
 	cfg.Replay.Idempotency.Enabled = false
 
@@ -1650,7 +1648,321 @@ func TestPerConnectionSocketOwnership(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(addrs) != 2 {
-		t.Fatalf("expected 2 distinct remote addresses, got %d", len(addrs))
+		t.Fatalf("remote addresses = %v, want 2 distinct addresses for sequential recorded connections", addrs)
+	}
+}
+
+func TestHTTP1RequestsReuseRecordedConnectionSocket(t *testing.T) {
+	var mu sync.Mutex
+	var addrs []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		addrs = append(addrs, r.RemoteAddr)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/1.1", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/first"}},
+		{Type: model.EventRequest, ConnectionID: 1, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/1.1", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/second"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if summary.RequestsSent != 2 {
+		t.Fatalf("summary.RequestsSent = %d, want 2", summary.RequestsSent)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(addrs) != 2 {
+		t.Fatalf("remote addresses = %v, want one observation for each of 2 requests", addrs)
+	}
+	if addrs[0] != addrs[1] {
+		t.Fatalf("remote addresses = %v, want both requests on recorded connection 1 to reuse one socket", addrs)
+	}
+}
+
+func TestHTTP1OversizedResponsePreservesRecordedConnectionSocket(t *testing.T) {
+	var mu sync.Mutex
+	var addrs []string
+	payload := bytes.Repeat([]byte("x"), maxBodyRead+1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		addrs = append(addrs, r.RemoteAddr)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Idempotency.Enabled = false
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/1.1", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/first"}},
+		{Type: model.EventRequest, ConnectionID: 1, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/1.1", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/second"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("runReplay() error: %v", err)
+	}
+	if got, want := summary.RequestsSent, int64(2); got != want {
+		t.Errorf("summary.RequestsSent = %d, want %d", got, want)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(addrs) != 2 {
+		t.Fatalf("remote addresses = %v, want one observation for each of 2 requests", addrs)
+	}
+	if addrs[0] != addrs[1] {
+		t.Fatalf("remote addresses = %v, want oversized responses to preserve recorded connection 1 socket", addrs)
+	}
+}
+
+func TestHTTP1InterleavedRecordedConnectionsHaveStableSockets(t *testing.T) {
+	var mu sync.Mutex
+	addrsByPath := make(map[string]string)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		addrsByPath[r.URL.Path] = r.RemoteAddr
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.MaxVirtualUsersPerEngine = 1
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventConnectionOpen, ConnectionID: 2},
+		{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/1.1", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/connection-1/first"}},
+		{Type: model.EventRequest, ConnectionID: 2, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/1.1", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/connection-2/first"}},
+		{Type: model.EventRequest, ConnectionID: 1, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/1.1", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/connection-1/second"}},
+		{Type: model.EventRequest, ConnectionID: 2, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/1.1", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/connection-2/second"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+		{Type: model.EventConnectionClose, ConnectionID: 2},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if summary.RequestsSent != 4 {
+		t.Fatalf("summary.RequestsSent = %d, want 4", summary.RequestsSent)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(addrsByPath) != 4 {
+		t.Fatalf("remote addresses by path = %v, want observations for all 4 requests", addrsByPath)
+	}
+	connection1First := addrsByPath["/connection-1/first"]
+	connection1Second := addrsByPath["/connection-1/second"]
+	connection2First := addrsByPath["/connection-2/first"]
+	connection2Second := addrsByPath["/connection-2/second"]
+	if connection1First == "" || connection1Second == "" || connection2First == "" || connection2Second == "" {
+		t.Fatalf("remote addresses by path = %v, want a non-empty address for every request", addrsByPath)
+	}
+	if connection1First != connection1Second {
+		t.Fatalf("connection 1 remote addresses = [%q %q], want a stable socket across interleaved requests; all observations: %v", connection1First, connection1Second, addrsByPath)
+	}
+	if connection2First != connection2Second {
+		t.Fatalf("connection 2 remote addresses = [%q %q], want a stable socket across interleaved requests; all observations: %v", connection2First, connection2Second, addrsByPath)
+	}
+	if connection1First == connection2First {
+		t.Fatalf("remote addresses by path = %v, want simultaneously open recorded connections on distinct sockets with one virtual user", addrsByPath)
+	}
+}
+
+func TestHTTP1ClosingRecordedConnectionPreservesOtherSocket(t *testing.T) {
+	var mu sync.Mutex
+	addrsByPath := make(map[string]string)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		addrsByPath[r.URL.Path] = r.RemoteAddr
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.MaxVirtualUsersPerEngine = 1
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventConnectionOpen, ConnectionID: 2},
+		{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/1.1", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/closing"}},
+		{Type: model.EventRequest, ConnectionID: 2, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/1.1", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/still-open/before"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+		{Type: model.EventRequest, ConnectionID: 2, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/1.1", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/still-open/after"}},
+		{Type: model.EventConnectionClose, ConnectionID: 2},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if summary.RequestsSent != 3 {
+		t.Fatalf("summary.RequestsSent = %d, want 3", summary.RequestsSent)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(addrsByPath) != 3 {
+		t.Fatalf("remote addresses by path = %v, want observations for all 3 requests", addrsByPath)
+	}
+	closing := addrsByPath["/closing"]
+	beforeClose := addrsByPath["/still-open/before"]
+	afterClose := addrsByPath["/still-open/after"]
+	if closing == "" || beforeClose == "" || afterClose == "" {
+		t.Fatalf("remote addresses by path = %v, want a non-empty address for every request", addrsByPath)
+	}
+	if closing == beforeClose {
+		t.Fatalf("remote addresses by path = %v, want simultaneously open recorded connections on distinct sockets", addrsByPath)
+	}
+	if beforeClose != afterClose {
+		t.Fatalf("still-open connection remote address changed from %q to %q after the other recorded connection closed; all observations: %v", beforeClose, afterClose, addrsByPath)
+	}
+}
+
+func TestHTTP2RecordedConnectionsOwnDistinctMultiplexedSockets(t *testing.T) {
+	type observation struct {
+		remoteAddr string
+		proto      string
+	}
+
+	var mu sync.Mutex
+	observations := make(map[string]observation)
+	inFlight := make(map[string]int)
+	maxInFlight := make(map[string]int)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		mu.Lock()
+		observations[r.URL.Path] = observation{remoteAddr: r.RemoteAddr, proto: r.Proto}
+		inFlight[connection]++
+		if inFlight[connection] > maxInFlight[connection] {
+			maxInFlight[connection] = inFlight[connection]
+		}
+		mu.Unlock()
+
+		time.Sleep(80 * time.Millisecond)
+
+		mu.Lock()
+		inFlight[connection]--
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url parse failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.MaxVirtualUsersPerEngine = 1
+	cfg.Replay.HTTP2.Mode = "multiplexed"
+	cfg.Replay.TLS.InsecureSkipVerify = true
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{Type: model.EventConnectionOpen, ConnectionID: 2},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/connection-1/first"}},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 3, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/connection-1/second"}},
+		{Type: model.EventRequest, ConnectionID: 2, StreamID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/connection-2/first"}},
+		{Type: model.EventRequest, ConnectionID: 2, StreamID: 3, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/connection-2/second"}},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+		{Type: model.EventConnectionClose, ConnectionID: 2},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("replay failed: %v", err)
+	}
+	if summary.RequestsSent != 4 {
+		t.Fatalf("summary.RequestsSent = %d, want 4", summary.RequestsSent)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(observations) != 4 {
+		t.Fatalf("HTTP/2 observations = %v, want all 4 request paths", observations)
+	}
+	connection1First := observations["/connection-1/first"]
+	connection1Second := observations["/connection-1/second"]
+	connection2First := observations["/connection-2/first"]
+	connection2Second := observations["/connection-2/second"]
+	for path, got := range observations {
+		if got.proto != "HTTP/2.0" {
+			t.Fatalf("request %q protocol = %q, want HTTP/2.0; all observations: %v", path, got.proto, observations)
+		}
+		if got.remoteAddr == "" {
+			t.Fatalf("request %q remote address is empty; all observations: %v", path, observations)
+		}
+	}
+	if connection1First.remoteAddr != connection1Second.remoteAddr {
+		t.Fatalf("connection 1 HTTP/2 remote addresses = [%q %q], want streams multiplexed on one transport connection; all observations: %v", connection1First.remoteAddr, connection1Second.remoteAddr, observations)
+	}
+	if connection2First.remoteAddr != connection2Second.remoteAddr {
+		t.Fatalf("connection 2 HTTP/2 remote addresses = [%q %q], want streams multiplexed on one transport connection; all observations: %v", connection2First.remoteAddr, connection2Second.remoteAddr, observations)
+	}
+	if connection1First.remoteAddr == connection2First.remoteAddr {
+		t.Fatalf("HTTP/2 observations = %v, want separate recorded connections to own distinct transport connections", observations)
+	}
+	if maxInFlight["connection-1"] != 2 || maxInFlight["connection-2"] != 2 {
+		t.Fatalf("maximum concurrent streams = %v, want 2 for each recorded HTTP/2 connection", maxInFlight)
 	}
 }
 
