@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -16,9 +17,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -340,6 +343,118 @@ func TestSendRequestReturnsAttemptedExecutionWhenRetryBackoffCanceled(t *testing
 	}
 	if got, want := exec.statusCode, http.StatusServiceUnavailable; got != want {
 		t.Errorf("sendRequest(canceled retry backoff).statusCode = %d, want %d", got, want)
+	}
+}
+
+func TestRetryErrorCategoryUsesStructuredErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "timeout",
+			err:  context.DeadlineExceeded,
+			want: "timeout",
+		},
+		{
+			name: "connection reset",
+			err: &net.OpError{
+				Op:  "read",
+				Net: "tcp",
+				Err: syscall.ECONNRESET,
+			},
+			want: "connection_reset",
+		},
+		{
+			name: "TLS",
+			err:  tls.RecordHeaderError{Msg: "invalid record"},
+			want: "tls",
+		},
+		{
+			name: "network",
+			err: &net.DNSError{
+				Err:        "lookup failed",
+				Name:       "example.test",
+				IsNotFound: true,
+			},
+			want: "network",
+		},
+		{
+			name: "unstructured message",
+			err:  errors.New("connection reset during TLS dial tcp"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := retryErrorCategory(tt.err); got != tt.want {
+				t.Errorf("retryErrorCategory(%T) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMetricStatusForSendErrorUsesStructuredErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "nil",
+			want: "send_error",
+		},
+		{
+			name: "timeout",
+			err:  context.DeadlineExceeded,
+			want: "timeout",
+		},
+		{
+			name: "connection refused",
+			err: &net.OpError{
+				Op:  "dial",
+				Net: "tcp",
+				Err: syscall.ECONNREFUSED,
+			},
+			want: "connection_refused",
+		},
+		{
+			name: "connection reset",
+			err: &net.OpError{
+				Op:  "read",
+				Net: "tcp",
+				Err: syscall.ECONNRESET,
+			},
+			want: "connection_reset",
+		},
+		{
+			name: "TLS",
+			err:  tls.RecordHeaderError{Msg: "invalid record"},
+			want: "tls",
+		},
+		{
+			name: "network",
+			err: &net.DNSError{
+				Err:        "lookup failed",
+				Name:       "example.test",
+				IsNotFound: true,
+			},
+			want: "network",
+		},
+		{
+			name: "unstructured message",
+			err:  errors.New("connection reset during TLS dial tcp"),
+			want: "send_error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := metricStatusForSendError(tt.err); got != tt.want {
+				t.Errorf("metricStatusForSendError(%T) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1469,6 +1584,24 @@ func TestConnectionBelongsToShardUsesNode(t *testing.T) {
 		}
 	}
 	t.Fatal("expected node to affect shard assignment")
+}
+
+func TestConnectionBelongsToShardSupportsFullHashSpace(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("int cannot represent the full 32-bit hash space")
+	}
+
+	const shardIndex = 1803821790
+	shardCount := int(uint64(1) << 32)
+	connectionKey := model.ConnectionKey{ConnectionID: 1}
+	if !connectionBelongsToShard(connectionKey, shardIndex, shardCount) {
+		t.Errorf(
+			"connectionBelongsToShard(%v, %d, %d) = false, want true",
+			connectionKey,
+			shardIndex,
+			shardCount,
+		)
+	}
 }
 
 func TestReplayGroupsSameConnectionIDByNode(t *testing.T) {

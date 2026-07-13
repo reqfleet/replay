@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/reqfleet/replay/internal/config"
@@ -1175,7 +1176,7 @@ func connectionBelongsToShard(connectionKey model.ConnectionKey, shardIndex, sha
 	_, _ = hasher.Write([]byte{0})
 	binary.LittleEndian.PutUint64(buf[:], uint64(connectionKey.ConnectionID))
 	_, _ = hasher.Write(buf[:])
-	return int(hasher.Sum32()%uint32(shardCount)) == shardIndex
+	return uint64(hasher.Sum32())%uint64(shardCount) == uint64(shardIndex)
 }
 
 func advancePacingClock(previous time.Time, previousSet bool, currentRaw string) (time.Time, bool) {
@@ -1451,6 +1452,14 @@ func (e *Engine) shouldRetryError(err error) bool {
 }
 
 func retryErrorCategory(err error) string {
+	category := transportErrorCategory(err)
+	if category == "connection_refused" {
+		return "network"
+	}
+	return category
+}
+
+func transportErrorCategory(err error) string {
 	if err == nil {
 		return ""
 	}
@@ -1461,43 +1470,41 @@ func retryErrorCategory(err error) string {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return "timeout"
 	}
-	lower := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(lower, "connection reset"):
-		return "connection_reset"
-	case strings.Contains(lower, "tls"):
-		return "tls"
-	case strings.Contains(lower, "dial tcp"), strings.Contains(lower, "no such host"), strings.Contains(lower, "connection refused"):
-		return "network"
-	default:
-		return ""
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "connection_refused"
 	}
+	if errors.Is(err, syscall.ECONNRESET) {
+		return "connection_reset"
+	}
+	var certificateErr *tls.CertificateVerificationError
+	if errors.As(err, &certificateErr) {
+		return "tls"
+	}
+	var recordHeaderErr tls.RecordHeaderError
+	if errors.As(err, &recordHeaderErr) {
+		return "tls"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "network"
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return "network"
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return "network"
+	}
+	return ""
 }
 
 func metricStatusForSendError(err error) string {
-	if err == nil {
+	category := transportErrorCategory(err)
+	if category == "" {
 		return "send_error"
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return "timeout"
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return "timeout"
-	}
-	lower := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(lower, "connection refused"):
-		return "connection_refused"
-	case strings.Contains(lower, "connection reset"):
-		return "connection_reset"
-	case strings.Contains(lower, "tls"):
-		return "tls"
-	case strings.Contains(lower, "dial tcp"), strings.Contains(lower, "no such host"):
-		return "network"
-	default:
-		return "send_error"
-	}
+	return category
 }
 
 func (e *Engine) metricLabelForRequest(requestEvent model.Event) string {

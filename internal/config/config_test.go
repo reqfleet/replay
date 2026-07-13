@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -246,9 +247,105 @@ func TestLoadParsesMaxActiveConnectionsPerEngine(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsEmptyHTTP2Mode(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/cfg.yaml"
+	content := "replay:\n" +
+		"  http2:\n" +
+		"    mode: \"\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := Load(path); err == nil {
+		t.Fatalf("Load(%q) error = nil, want replay.http2.mode validation error", path)
+	}
+}
+
 func TestSampleConfigLoads(t *testing.T) {
 	if _, err := Load("../../config.yaml"); err != nil {
 		t.Fatalf("Load sample config: %v", err)
+	}
+}
+
+func TestValidateRetryConfiguration(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{
+			name: "known values",
+			mutate: func(cfg *Config) {
+				cfg.Replay.Retry.Backoff = "EXPONENTIAL"
+				cfg.Replay.Retry.RetryOnStatuses = []int{100, 599}
+				cfg.Replay.Retry.RetryOnErrors = []string{"TIMEOUT", "connection_reset", "network", "tls"}
+			},
+		},
+		{
+			name: "unknown backoff",
+			mutate: func(cfg *Config) {
+				cfg.Replay.Retry.Backoff = "immediate"
+			},
+			wantErr: true,
+		},
+		{
+			name: "status below HTTP range",
+			mutate: func(cfg *Config) {
+				cfg.Replay.Retry.RetryOnStatuses = []int{99}
+			},
+			wantErr: true,
+		},
+		{
+			name: "status above HTTP range",
+			mutate: func(cfg *Config) {
+				cfg.Replay.Retry.RetryOnStatuses = []int{600}
+			},
+			wantErr: true,
+		},
+		{
+			name: "unknown error category",
+			mutate: func(cfg *Config) {
+				cfg.Replay.Retry.RetryOnErrors = []string{"server_busy"}
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Errorf("Config.Validate() error = %v, want error = %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateShardCountHashRange(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("int cannot represent shard counts above the 32-bit hash space")
+	}
+
+	tests := []struct {
+		name       string
+		shardCount uint64
+		wantErr    bool
+	}{
+		{name: "full hash space", shardCount: uint64(1) << 32},
+		{name: "above hash space", shardCount: uint64(1)<<32 + 1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Replay.Sharding.ShardCount = int(tt.shardCount)
+			err := cfg.Validate()
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Errorf("Config.Validate() with shard_count %d error = %v, want error = %t", tt.shardCount, err, tt.wantErr)
+			}
+		})
 	}
 }
 

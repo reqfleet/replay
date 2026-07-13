@@ -96,6 +96,8 @@ type ShardingConfig struct {
 	ShardCount int `yaml:"shard_count"`
 }
 
+const maxShardCount = uint64(1) << 32
+
 type CheckpointConfig struct {
 	File string `yaml:"file"`
 }
@@ -246,8 +248,11 @@ func (c Config) Validate() error {
 	if c.Replay.Retry.MaxAttempts <= 0 {
 		return errors.New("replay.retry.max_attempts must be > 0")
 	}
+	if err := validateRetryConfig(c.Replay.Retry); err != nil {
+		return err
+	}
 	switch c.Replay.HTTP2.Mode {
-	case "", "serialized", "multiplexed":
+	case "serialized", "multiplexed":
 	default:
 		return errors.New("replay.http2.mode must be one of: serialized, multiplexed")
 	}
@@ -256,6 +261,9 @@ func (c Config) Validate() error {
 	}
 	if c.Replay.Sharding.ShardCount <= 0 {
 		return errors.New("replay.sharding.shard_count must be > 0")
+	}
+	if uint64(c.Replay.Sharding.ShardCount) > maxShardCount {
+		return fmt.Errorf("replay.sharding.shard_count must be <= %d", maxShardCount)
 	}
 	if c.Replay.Sharding.ShardIndex < 0 || c.Replay.Sharding.ShardIndex >= c.Replay.Sharding.ShardCount {
 		return errors.New("replay.sharding.shard_index must be within [0, shard_count)")
@@ -284,6 +292,31 @@ func (c Config) Validate() error {
 		}
 		if c.Metrics.ListenAddress == "" {
 			return errors.New("metrics.listen_address is required")
+		}
+	}
+	return nil
+}
+
+func validateRetryConfig(retry RetryConfig) error {
+	if !strings.EqualFold(retry.Backoff, "none") &&
+		!strings.EqualFold(retry.Backoff, "fixed") &&
+		!strings.EqualFold(retry.Backoff, "exponential") {
+		return fmt.Errorf("replay.retry.backoff %q must be one of: none, fixed, exponential", retry.Backoff)
+	}
+	for _, status := range retry.RetryOnStatuses {
+		if status < 100 || status > 599 {
+			return fmt.Errorf("replay.retry.retry_on_statuses contains invalid HTTP status %d", status)
+		}
+	}
+	for _, category := range retry.RetryOnErrors {
+		if !strings.EqualFold(category, "timeout") &&
+			!strings.EqualFold(category, "connection_reset") &&
+			!strings.EqualFold(category, "network") &&
+			!strings.EqualFold(category, "tls") {
+			return fmt.Errorf(
+				"replay.retry.retry_on_errors category %q must be one of: timeout, connection_reset, network, tls",
+				category,
+			)
 		}
 	}
 	return nil
