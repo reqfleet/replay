@@ -361,6 +361,51 @@ func TestValidateRejectsCaseInsensitiveDuplicateSetHeaders(t *testing.T) {
 	}
 }
 
+func TestValidateHeaderRewrite(t *testing.T) {
+	tests := []struct {
+		name    string
+		rewrite HeaderRewriteConfig
+		wantErr bool
+	}{
+		{name: "ordinary token name", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-!#$%&'*+-.^_`|~": "value"}}},
+		{name: "host", rewrite: HeaderRewriteConfig{Set: map[string]string{"Host": "replay.example.com"}}},
+		{name: "authority", rewrite: HeaderRewriteConfig{Set: map[string]string{":authority": "replay.example.com"}}},
+		{name: "horizontal tab value", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-Test": "one\ttwo"}}},
+		{name: "non ASCII value", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-Test": "café"}}},
+		{name: "empty drop name", rewrite: HeaderRewriteConfig{Drop: []string{""}}, wantErr: true},
+		{name: "space in drop name", rewrite: HeaderRewriteConfig{Drop: []string{"Bad Name"}}, wantErr: true},
+		{name: "unsupported pseudo header", rewrite: HeaderRewriteConfig{Drop: []string{":path"}}, wantErr: true},
+		{name: "space in set name", rewrite: HeaderRewriteConfig{Set: map[string]string{"Bad Name": "value"}}, wantErr: true},
+		{name: "newline in set name", rewrite: HeaderRewriteConfig{Set: map[string]string{"Bad\nName": "value"}}, wantErr: true},
+		{name: "CRLF value", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-Test": "one\r\nInjected: true"}}, wantErr: true},
+		{name: "NUL value", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-Test": "one\x00two"}}, wantErr: true},
+		{name: "control value", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-Test": "one\x01two"}}, wantErr: true},
+		{name: "DEL value", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-Test": "one\x7ftwo"}}, wantErr: true},
+		{
+			name: "host and authority alias",
+			rewrite: HeaderRewriteConfig{Set: map[string]string{
+				"Host":       "first.example.com",
+				":authority": "second.example.com",
+			}},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Header = tt.rewrite
+			err := cfg.Validate()
+			if tt.wantErr && (err == nil || !strings.Contains(err.Error(), "header_rewrite")) {
+				t.Fatalf("Validate(%+v) error = %v, want header_rewrite error", tt.rewrite, err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate(%+v) error: %v", tt.rewrite, err)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsInvalidMetricsNamespace(t *testing.T) {
 	cfg := Default()
 	cfg.Metrics.Namespace = "bad-namespace"

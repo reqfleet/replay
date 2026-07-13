@@ -2374,6 +2374,75 @@ func TestConfiguredHostRewrite(t *testing.T) {
 	}
 }
 
+func TestSpecialAuthorityHeaderRewrite(t *testing.T) {
+	t.Run("normalizes set and drop", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.Header.Set = map[string]string{":authority": "replay.example.com"}
+		eng := New(cfg, metrics.New(cfg.Metrics))
+		headers := eng.effectiveRequestHeaders(http.Header{"Host": {"captured.example.com"}})
+		if got, want := headers.Get("Host"), "replay.example.com"; got != want {
+			t.Fatalf("effective Host = %q, want %q", got, want)
+		}
+		if _, ok := headers[":authority"]; ok {
+			t.Fatalf("effective headers contain ordinary :authority entry: %v", headers)
+		}
+
+		cfg.Header.Set = nil
+		cfg.Header.Drop = []string{":authority"}
+		eng = New(cfg, metrics.New(cfg.Metrics))
+		headers = eng.effectiveRequestHeaders(http.Header{"Host": {"captured.example.com"}})
+		if got := headers.Get("Host"); got != "" {
+			t.Fatalf("effective Host after :authority drop = %q, want empty", got)
+		}
+	})
+
+	t.Run("sets HTTP2 authority", func(t *testing.T) {
+		type observation struct {
+			host       string
+			protoMajor int
+		}
+		observed := make(chan observation, 1)
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			observed <- observation{host: r.Host, protoMajor: r.ProtoMajor}
+			w.WriteHeader(http.StatusOK)
+		}))
+		srv.EnableHTTP2 = true
+		srv.StartTLS()
+		defer srv.Close()
+		target, err := url.Parse(srv.URL)
+		if err != nil {
+			t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+		}
+
+		cfg := config.Default()
+		cfg.Target.OverrideURL = srv.URL
+		cfg.Header.Set = map[string]string{":authority": "replay.example.com"}
+		cfg.Replay.TLS.InsecureSkipVerify = true
+		eng := New(cfg, metrics.New(cfg.Metrics))
+		client, transport := eng.makePerConnectionClient(true)
+		defer transport.CloseIdleConnections()
+		requestEvent := model.Event{HTTP: model.HTTPRequestMeta{
+			Version: "HTTP/2", Method: http.MethodGet,
+			Scheme: target.Scheme, Authority: target.Host, Path: "/",
+		}}
+		if _, err := eng.executeRequest(
+			context.Background(),
+			client,
+			requestEvent,
+			eng.effectiveRequestHeaders(requestEvent.Headers),
+		); err != nil {
+			t.Fatalf("executeRequest() error: %v", err)
+		}
+		got := <-observed
+		if got.protoMajor != 2 {
+			t.Fatalf("server protocol major = %d, want 2", got.protoMajor)
+		}
+		if want := "replay.example.com"; got.host != want {
+			t.Fatalf("server authority = %q, want %q", got.host, want)
+		}
+	})
+}
+
 func TestOverrideURLPreservesQueryString(t *testing.T) {
 	var seenPath string
 	var seenRawQuery string

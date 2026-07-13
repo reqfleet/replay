@@ -266,7 +266,7 @@ func (c Config) Validate() error {
 	if c.Metrics.MaxLabels < 0 {
 		return errors.New("metrics.max_labels must be >= 0")
 	}
-	if err := validateHeaderRewriteSet(c.Header.Set); err != nil {
+	if err := validateHeaderRewrite(c.Header); err != nil {
 		return err
 	}
 	if c.Metrics.Namespace != "" && !isValidMetricLabelName(c.Metrics.Namespace) {
@@ -427,16 +427,72 @@ func validateMetricsPath(path string) error {
 	return nil
 }
 
-func validateHeaderRewriteSet(headers map[string]string) error {
-	seen := make(map[string]string, len(headers))
-	for name := range headers {
-		canonicalName := strings.ToLower(name)
-		if previous, ok := seen[canonicalName]; ok {
-			return fmt.Errorf("header_rewrite.set contains case-insensitive duplicate header names %q and %q", previous, name)
+func validateHeaderRewrite(rewrite HeaderRewriteConfig) error {
+	for _, name := range rewrite.Drop {
+		if !isValidRewriteHeaderName(name) {
+			return fmt.Errorf("header_rewrite.drop contains invalid header name %q", name)
 		}
-		seen[canonicalName] = name
+	}
+
+	seen := make(map[string]string, len(rewrite.Set))
+	for name, value := range rewrite.Set {
+		if !isValidRewriteHeaderName(name) {
+			return fmt.Errorf("header_rewrite.set contains invalid header name %q", name)
+		}
+		identity := rewriteHeaderIdentity(name)
+		if previous, ok := seen[identity]; ok {
+			return fmt.Errorf("header_rewrite.set contains duplicate header names %q and %q", previous, name)
+		}
+		seen[identity] = name
+		if !isValidHeaderFieldValue(value) {
+			return fmt.Errorf("header_rewrite.set contains invalid value for header %q", name)
+		}
 	}
 	return nil
+}
+
+func rewriteHeaderIdentity(name string) string {
+	if strings.EqualFold(name, "host") || strings.EqualFold(name, ":authority") {
+		return "host"
+	}
+	return strings.ToLower(name)
+}
+
+func isValidRewriteHeaderName(name string) bool {
+	if strings.EqualFold(name, ":authority") {
+		return true
+	}
+	if name == "" || strings.HasPrefix(name, ":") {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if !isHeaderTokenByte(name[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isHeaderTokenByte(b byte) bool {
+	if b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' {
+		return true
+	}
+	switch b {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	default:
+		return false
+	}
+}
+
+func isValidHeaderFieldValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if b == '\x7f' || b < ' ' && b != '\t' {
+			return false
+		}
+	}
+	return true
 }
 
 func isReservedMetricLabel(name string) bool {

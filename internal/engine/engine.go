@@ -1256,6 +1256,13 @@ func hasHeaderValue(headers map[string][]string, name string) bool {
 	return false
 }
 
+func requestHeaderRewriteName(name string) string {
+	if strings.EqualFold(name, "host") || strings.EqualFold(name, ":authority") {
+		return "Host"
+	}
+	return name
+}
+
 func (e *Engine) effectiveRequestHeaders(recorded map[string][]string) http.Header {
 	headers := make(http.Header, len(recorded)+len(e.cfg.Header.Set))
 	for key, values := range recorded {
@@ -1267,13 +1274,13 @@ func (e *Engine) effectiveRequestHeaders(recorded map[string][]string) http.Head
 		}
 	}
 	for _, headerName := range e.cfg.Header.Drop {
-		headers.Del(headerName)
+		headers.Del(requestHeaderRewriteName(headerName))
 	}
 	if e.parsedOverrideURL != nil {
 		headers.Set("Host", e.parsedOverrideURL.Host)
 	}
 	for key, value := range e.cfg.Header.Set {
-		headers.Set(key, value)
+		headers.Set(requestHeaderRewriteName(key), value)
 	}
 	return headers
 }
