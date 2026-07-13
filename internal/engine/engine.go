@@ -1341,10 +1341,8 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 
 	req.Header = e.effectiveRequestHeaders(requestEvent.Headers)
 
-	// Automatic Host/:authority rewrite when override_url is set.
-	if e.parsedOverrideURL != nil {
-		// set request Host to override host (preserves path/query in URL)
-		req.Host = e.parsedOverrideURL.Host
+	if host := req.Header.Get("Host"); host != "" {
+		req.Host = host
 	}
 
 	start := time.Now()

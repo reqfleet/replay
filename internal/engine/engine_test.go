@@ -2134,6 +2134,54 @@ func TestOverrideHostRewrite(t *testing.T) {
 	}
 }
 
+func TestConfiguredHostRewrite(t *testing.T) {
+	var seenHost string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHost = r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+
+	cfg := config.Default()
+	cfg.Target.OverrideURL = srv.URL
+	cfg.Header.Set = map[string]string{"Host": "replay.example.com"}
+	cfg.Replay.Idempotency.Enabled = false
+
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: 1,
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    target.Scheme,
+				Authority: target.Host,
+				Path:      "/",
+			},
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("runReplay() error: %v", err)
+	}
+	if got, want := summary.RequestsSent, int64(1); got != want {
+		t.Errorf("runReplay().RequestsSent = %d, want %d", got, want)
+	}
+	if got, want := seenHost, "replay.example.com"; got != want {
+		t.Errorf("server request Host = %q, want %q", got, want)
+	}
+}
+
 func TestOverrideURLPreservesQueryString(t *testing.T) {
 	var seenPath string
 	var seenRawQuery string
