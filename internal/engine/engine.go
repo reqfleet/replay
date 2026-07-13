@@ -694,6 +694,7 @@ func (cs *connState) completeCheckpointSequence(sequence int) int {
 func (e *Engine) finishRequestError(cs *connState, requestEvent model.Event, err error, exec requestExecution) {
 	cs.sendErrors++
 	cs.aborted = true
+	cs.skipValidationForSequence(requestEvent.Sequence)
 	if !exec.attempted {
 		e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
 	}

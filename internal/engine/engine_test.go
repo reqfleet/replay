@@ -663,6 +663,60 @@ func TestReplayTreatsConnectionRefusedAsPartialSuccess(t *testing.T) {
 	}
 }
 
+func TestReplayDoesNotValidateResponseAfterTransportSendError(t *testing.T) {
+	addr := closedLocalAddress(t)
+	cfg := config.Default()
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Status = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: 1,
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method: http.MethodGet, Scheme: "http", Authority: addr, Path: "/transport",
+			},
+		},
+		{
+			Type:         model.EventResponse,
+			ConnectionID: 1,
+			Sequence:     1,
+			Status:       http.StatusOK,
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("runReplay() error: %v", err)
+	}
+	if got, want := summary.SendErrors, int64(1); got != want {
+		t.Fatalf("summary.SendErrors = %d, want %d", got, want)
+	}
+	if got, want := summary.ValidationFailed, int64(0); got != want {
+		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
+	}
+	if got, want := summary.RequestsSent, int64(0); got != want {
+		t.Fatalf("summary.RequestsSent = %d, want %d", got, want)
+	}
+	if got, want := summary.ResponsesReceived, int64(0); got != want {
+		t.Fatalf("summary.ResponsesReceived = %d, want %d", got, want)
+	}
+	if got, want := len(summary.ConnectionResults), 1; got != want {
+		t.Fatalf("len(summary.ConnectionResults) = %d, want %d", got, want)
+	}
+	connection := summary.ConnectionResults[0]
+	if got, want := connection.SendErrors, int64(1); got != want {
+		t.Fatalf("connection.SendErrors = %d, want %d", got, want)
+	}
+	if got, want := connection.ValidationFailed, int64(0); got != want {
+		t.Fatalf("connection.ValidationFailed = %d, want %d", got, want)
+	}
+}
+
 func TestReplayEmitsSyntheticStatusForTransportSendErrors(t *testing.T) {
 	tests := []struct {
 		name       string
