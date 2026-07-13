@@ -1258,7 +1258,7 @@ func hasHeaderValue(headers map[string][]string, name string) bool {
 }
 
 func requestHeaderRewriteName(name string) string {
-	if strings.EqualFold(name, "host") || strings.EqualFold(name, ":authority") {
+	if strings.EqualFold(name, "host") || name == ":authority" {
 		return "Host"
 	}
 	return name
