@@ -246,6 +246,21 @@ func TestLoadParsesMaxActiveConnectionsPerEngine(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsEmptyHTTP2Mode(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/cfg.yaml"
+	content := "replay:\n" +
+		"  http2:\n" +
+		"    mode: \"\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := Load(path); err == nil {
+		t.Fatalf("Load(%q) error = nil, want replay.http2.mode validation error", path)
+	}
+}
+
 func TestSampleConfigLoads(t *testing.T) {
 	if _, err := Load("../../config.yaml"); err != nil {
 		t.Fatalf("Load sample config: %v", err)

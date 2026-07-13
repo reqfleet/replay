@@ -250,7 +250,7 @@ func (c Config) Validate() error {
 		return err
 	}
 	switch c.Replay.HTTP2.Mode {
-	case "", "serialized", "multiplexed":
+	case "serialized", "multiplexed":
 	default:
 		return errors.New("replay.http2.mode must be one of: serialized, multiplexed")
 	}
