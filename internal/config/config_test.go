@@ -1,8 +1,10 @@
 package config
 
 import (
+	"net/http"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -263,6 +265,53 @@ func TestValidateRejectsNegativeMetricsGracefulTerminationPeriod(t *testing.T) {
 	cfg.Metrics.GracefulTerminationPeriod = -1 * time.Second
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for negative metrics graceful termination period")
+	}
+}
+
+func TestValidateMetricsPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{name: "default", path: "/metrics"},
+		{name: "nested", path: "/custom/metrics"},
+		{name: "encoded braces", path: "/metrics/%7Btenant%7D"},
+		{name: "missing leading slash", path: "metrics", wantErr: true},
+		{name: "space", path: "/metrics bad", wantErr: true},
+		{name: "tab", path: "/metrics\tbad", wantErr: true},
+		{name: "wildcard start", path: "/metrics/{", wantErr: true},
+		{name: "wildcard", path: "/metrics/{tenant}", wantErr: true},
+		{name: "duplicate wildcard", path: "/metrics/{tenant}/{tenant}", wantErr: true},
+		{name: "query", path: "/metrics?format=openmetrics", wantErr: true},
+		{name: "empty query", path: "/metrics?", wantErr: true},
+		{name: "fragment", path: "/metrics#fragment", wantErr: true},
+		{name: "bad escape", path: "/metrics%zz", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Metrics.Path = tt.path
+			err := cfg.Validate()
+			if tt.wantErr && (err == nil || !strings.Contains(err.Error(), "metrics.path")) {
+				t.Fatalf("Validate(metrics.path=%q) error = %v, want metrics.path error", tt.path, err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate(metrics.path=%q) error: %v", tt.path, err)
+			}
+			if !tt.wantErr {
+				mux := http.NewServeMux()
+				mux.Handle(tt.path, http.NotFoundHandler())
+			}
+		})
+	}
+
+	cfg := Default()
+	cfg.Metrics.Enabled = false
+	cfg.Metrics.Path = "metrics"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with disabled metrics and malformed path error: %v", err)
 	}
 }
 

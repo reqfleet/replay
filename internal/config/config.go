@@ -279,8 +279,8 @@ func (c Config) Validate() error {
 		if c.Metrics.Namespace == "" {
 			return errors.New("metrics.namespace is required")
 		}
-		if c.Metrics.Path == "" {
-			return errors.New("metrics.path is required")
+		if err := validateMetricsPath(c.Metrics.Path); err != nil {
+			return err
 		}
 		if c.Metrics.ListenAddress == "" {
 			return errors.New("metrics.listen_address is required")
@@ -397,6 +397,32 @@ func validateMetricLabels(labels []MetricLabel) error {
 			return fmt.Errorf("metrics.common_labels contains duplicate label name %q", label.Name)
 		}
 		seen[label.Name] = struct{}{}
+	}
+	return nil
+}
+
+func validateMetricsPath(path string) error {
+	if path == "" {
+		return errors.New("metrics.path is required")
+	}
+	if !strings.HasPrefix(path, "/") {
+		return errors.New("metrics.path must be an absolute URL path")
+	}
+	if strings.ContainsAny(path, "{}") {
+		return errors.New("metrics.path must be a literal URL path without wildcards")
+	}
+	if strings.ContainsAny(path, "?#") {
+		return errors.New("metrics.path must not contain a query or fragment")
+	}
+	if strings.IndexFunc(path, func(r rune) bool { return r <= ' ' || r == '\x7f' }) >= 0 {
+		return errors.New("metrics.path must not contain spaces or control characters")
+	}
+	parsed, err := url.ParseRequestURI(path)
+	if err != nil {
+		return fmt.Errorf("metrics.path must be a valid URL path: %w", err)
+	}
+	if parsed.Scheme != "" || parsed.Host != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return errors.New("metrics.path must not contain a scheme, host, query, or fragment")
 	}
 	return nil
 }
