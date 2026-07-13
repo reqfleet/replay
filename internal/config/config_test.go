@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -318,6 +319,31 @@ func TestValidateRetryConfiguration(t *testing.T) {
 			err := cfg.Validate()
 			if gotErr := err != nil; gotErr != tt.wantErr {
 				t.Errorf("Config.Validate() error = %v, want error = %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateShardCountHashRange(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("int cannot represent shard counts above the 32-bit hash space")
+	}
+
+	tests := []struct {
+		name       string
+		shardCount uint64
+		wantErr    bool
+	}{
+		{name: "full hash space", shardCount: uint64(1) << 32},
+		{name: "above hash space", shardCount: uint64(1)<<32 + 1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Replay.Sharding.ShardCount = int(tt.shardCount)
+			err := cfg.Validate()
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Errorf("Config.Validate() with shard_count %d error = %v, want error = %t", tt.shardCount, err, tt.wantErr)
 			}
 		})
 	}

@@ -96,6 +96,8 @@ type ShardingConfig struct {
 	ShardCount int `yaml:"shard_count"`
 }
 
+const maxShardCount = uint64(1) << 32
+
 type CheckpointConfig struct {
 	File string `yaml:"file"`
 }
@@ -259,6 +261,9 @@ func (c Config) Validate() error {
 	}
 	if c.Replay.Sharding.ShardCount <= 0 {
 		return errors.New("replay.sharding.shard_count must be > 0")
+	}
+	if uint64(c.Replay.Sharding.ShardCount) > maxShardCount {
+		return fmt.Errorf("replay.sharding.shard_count must be <= %d", maxShardCount)
 	}
 	if c.Replay.Sharding.ShardIndex < 0 || c.Replay.Sharding.ShardIndex >= c.Replay.Sharding.ShardCount {
 		return errors.New("replay.sharding.shard_index must be within [0, shard_count)")

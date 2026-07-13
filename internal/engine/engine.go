@@ -1176,7 +1176,7 @@ func connectionBelongsToShard(connectionKey model.ConnectionKey, shardIndex, sha
 	_, _ = hasher.Write([]byte{0})
 	binary.LittleEndian.PutUint64(buf[:], uint64(connectionKey.ConnectionID))
 	_, _ = hasher.Write(buf[:])
-	return int(hasher.Sum32()%uint32(shardCount)) == shardIndex
+	return uint64(hasher.Sum32())%uint64(shardCount) == uint64(shardIndex)
 }
 
 func advancePacingClock(previous time.Time, previousSet bool, currentRaw string) (time.Time, bool) {

@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1520,6 +1521,24 @@ func TestConnectionBelongsToShardUsesNode(t *testing.T) {
 		}
 	}
 	t.Fatal("expected node to affect shard assignment")
+}
+
+func TestConnectionBelongsToShardSupportsFullHashSpace(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("int cannot represent the full 32-bit hash space")
+	}
+
+	const shardIndex = 1803821790
+	shardCount := int(uint64(1) << 32)
+	connectionKey := model.ConnectionKey{ConnectionID: 1}
+	if !connectionBelongsToShard(connectionKey, shardIndex, shardCount) {
+		t.Errorf(
+			"connectionBelongsToShard(%v, %d, %d) = false, want true",
+			connectionKey,
+			shardIndex,
+			shardCount,
+		)
+	}
 }
 
 func TestReplayGroupsSameConnectionIDByNode(t *testing.T) {
