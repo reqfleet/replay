@@ -472,6 +472,7 @@ func TestValidateHeaderRewrite(t *testing.T) {
 		{name: "empty drop name", rewrite: HeaderRewriteConfig{Drop: []string{""}}, wantErr: true},
 		{name: "space in drop name", rewrite: HeaderRewriteConfig{Drop: []string{"Bad Name"}}, wantErr: true},
 		{name: "unsupported pseudo header", rewrite: HeaderRewriteConfig{Drop: []string{":path"}}, wantErr: true},
+		{name: "mixed case authority", rewrite: HeaderRewriteConfig{Drop: []string{":Authority"}}, wantErr: true},
 		{name: "space in set name", rewrite: HeaderRewriteConfig{Set: map[string]string{"Bad Name": "value"}}, wantErr: true},
 		{name: "newline in set name", rewrite: HeaderRewriteConfig{Set: map[string]string{"Bad\nName": "value"}}, wantErr: true},
 		{name: "CRLF value", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-Test": "one\r\nInjected: true"}}, wantErr: true},

@@ -485,14 +485,14 @@ func validateHeaderRewrite(rewrite HeaderRewriteConfig) error {
 }
 
 func rewriteHeaderIdentity(name string) string {
-	if strings.EqualFold(name, "host") || strings.EqualFold(name, ":authority") {
+	if strings.EqualFold(name, "host") || name == ":authority" {
 		return "host"
 	}
 	return strings.ToLower(name)
 }
 
 func isValidRewriteHeaderName(name string) bool {
-	if strings.EqualFold(name, ":authority") {
+	if name == ":authority" {
 		return true
 	}
 	if name == "" || strings.HasPrefix(name, ":") {
