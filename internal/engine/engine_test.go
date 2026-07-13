@@ -2152,6 +2152,24 @@ func TestNewEngineAbsoluteURLValidation(t *testing.T) {
 	}
 }
 
+func TestReplayRejectsInvalidRequiredOverride(t *testing.T) {
+	cfg := config.Default()
+	cfg.Target.OverrideURL = "example.com"
+	cfg.Target.Require = true
+
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := make(chan model.Event)
+	close(events)
+
+	summary, err := eng.ReplayStream(context.Background(), events)
+	if err == nil {
+		t.Fatal("ReplayStream() error = nil, want invalid required target override error")
+	}
+	if got, want := summary.Outcome, RunFailed; got != want {
+		t.Errorf("ReplayStream() outcome = %s, want %s", got, want)
+	}
+}
+
 func TestReplayStreamCancelsInFlightRequestOnRouteError(t *testing.T) {
 	started := make(chan struct{})
 	canceled := make(chan struct{})

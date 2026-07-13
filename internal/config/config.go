@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -119,6 +120,28 @@ type MetricLabel struct {
 type TargetOverrideConfig struct {
 	OverrideURL string `yaml:"override_url"`
 	Require     bool   `yaml:"require_override"`
+}
+
+// ParseURL validates and parses the configured target override.
+func (c TargetOverrideConfig) ParseURL() (*url.URL, error) {
+	if c.OverrideURL == "" {
+		if c.Require {
+			return nil, errors.New("target override required but missing")
+		}
+		return nil, nil
+	}
+
+	parsed, err := url.Parse(c.OverrideURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse target.override_url: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, errors.New("target.override_url scheme must be http or https")
+	}
+	if parsed.Hostname() == "" {
+		return nil, errors.New("target.override_url must include a hostname")
+	}
+	return parsed, nil
 }
 
 type HeaderRewriteConfig struct {

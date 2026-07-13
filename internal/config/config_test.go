@@ -312,3 +312,63 @@ func TestApplyEnvInvalidMetricsNamespaceFailsValidation(t *testing.T) {
 		t.Fatal("Validate() after invalid METRICS_NAMESPACE error = nil, want error")
 	}
 }
+
+func TestValidateTargetOverride(t *testing.T) {
+	tests := []struct {
+		name    string
+		target  TargetOverrideConfig
+		want    string
+		wantErr bool
+	}{
+		{
+			name:   "valid_absolute_url",
+			target: TargetOverrideConfig{OverrideURL: "https://staging.example.com/base", Require: true},
+			want:   "https://staging.example.com/base",
+		},
+		{
+			name:    "required_invalid_url",
+			target:  TargetOverrideConfig{OverrideURL: "example.com", Require: true},
+			wantErr: true,
+		},
+		{
+			name:    "unsupported_scheme",
+			target:  TargetOverrideConfig{OverrideURL: "ftp://staging.example.com", Require: true},
+			wantErr: true,
+		},
+		{
+			name:    "missing_hostname",
+			target:  TargetOverrideConfig{OverrideURL: "https:///base", Require: true},
+			wantErr: true,
+		},
+		{
+			name:    "required_missing_url",
+			target:  TargetOverrideConfig{Require: true},
+			wantErr: true,
+		},
+		{
+			name:   "optional_missing_url",
+			target: TargetOverrideConfig{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.target.ParseURL()
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf("TargetOverrideConfig.ParseURL() error = %v, want error presence = %t", err, tt.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			if got == nil {
+				if tt.want != "" {
+					t.Fatalf("TargetOverrideConfig.ParseURL() = nil, want %q", tt.want)
+				}
+				return
+			}
+			if got.String() != tt.want {
+				t.Errorf("TargetOverrideConfig.ParseURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

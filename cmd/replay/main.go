@@ -135,8 +135,8 @@ func main() {
 		cfg.Replay.Verbose = true
 	}
 
-	if cfg.Target.Require && cfg.Target.OverrideURL == "" {
-		slog.Error("target override required but missing; aborting")
+	if _, err := cfg.Target.ParseURL(); err != nil {
+		slog.Error("validate target override", "error", err)
 		os.Exit(2)
 	}
 	for key, value := range cfg.Env {
