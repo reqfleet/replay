@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -144,51 +145,141 @@ func TestStartMetricsServer(t *testing.T) {
 		}
 		defer occupied.Close()
 
-		listener, err := startMetricsServer(occupied.Addr().String(), http.NotFoundHandler())
+		started, err := startMetricsServer(occupied.Addr().String(), http.NotFoundHandler())
 		if err == nil {
-			if listener != nil {
-				_ = listener.Close()
+			if started != nil {
+				_ = shutdownMetricsServer(started)
 			}
 			t.Fatal("startMetricsServer(occupied address) error = nil, want bind error")
 		}
-		if listener != nil {
-			t.Fatalf("startMetricsServer(occupied address) listener = %v, want nil", listener)
+		if started != nil {
+			t.Fatalf("startMetricsServer(occupied address) server = %v, want nil", started)
 		}
 	})
 
-	t.Run("returns bound listener", func(t *testing.T) {
-		listener, err := startMetricsServer("127.0.0.1:0", http.NotFoundHandler())
+	t.Run("returns bound server", func(t *testing.T) {
+		started, err := startMetricsServer("127.0.0.1:0", http.NotFoundHandler())
 		if err != nil {
 			t.Fatalf("startMetricsServer() error: %v", err)
 		}
-		if listener == nil {
-			t.Fatal("startMetricsServer() listener = nil")
+		if started == nil || started.listener == nil {
+			t.Fatal("startMetricsServer() did not return a bound server")
 		}
-		if err := listener.Close(); err != nil {
-			t.Fatalf("listener.Close() error: %v", err)
+		if err := shutdownMetricsServer(started); err != nil {
+			t.Fatalf("shutdownMetricsServer() error: %v", err)
 		}
 	})
 }
 
 func TestWaitForMetricsGracePeriod(t *testing.T) {
-	t.Run("waits for configured period", func(t *testing.T) {
-		ctx := context.Background()
-		start := time.Now()
-		waitForMetricsGracePeriod(ctx, 40*time.Millisecond)
-		if elapsed := time.Since(start); elapsed < 35*time.Millisecond {
-			t.Fatalf("waitForMetricsGracePeriod returned too early: %v", elapsed)
-		}
-	})
+	start := time.Now()
+	waitForMetricsGracePeriod(40 * time.Millisecond)
+	if elapsed := time.Since(start); elapsed < 35*time.Millisecond {
+		t.Fatalf("waitForMetricsGracePeriod returned too early: %v", elapsed)
+	}
+}
 
-	t.Run("returns on context cancellation", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		start := time.Now()
-		waitForMetricsGracePeriod(ctx, time.Second)
-		if elapsed := time.Since(start); elapsed > 20*time.Millisecond {
-			t.Fatalf("waitForMetricsGracePeriod ignored cancellation: %v", elapsed)
+func TestRunWithMetricsLifecycleHonorsGraceAfterCancellation(t *testing.T) {
+	started, err := startMetricsServer("127.0.0.1:0", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	if err != nil {
+		t.Fatalf("startMetricsServer() error: %v", err)
+	}
+	replayStarted := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	type lifecycleResult struct {
+		summary engine.Summary
+		err     error
+	}
+	resultCh := make(chan lifecycleResult, 1)
+	go func() {
+		summary, runErr := runWithMetricsLifecycle(
+			ctx,
+			func(replayCtx context.Context) (engine.Summary, error) {
+				close(replayStarted)
+				<-replayCtx.Done()
+				return engine.Summary{Outcome: engine.RunFailed}, replayCtx.Err()
+			},
+			started,
+			40*time.Millisecond,
+		)
+		resultCh <- lifecycleResult{summary: summary, err: runErr}
+	}()
+	<-replayStarted
+	cancelledAt := time.Now()
+	cancel()
+	time.Sleep(10 * time.Millisecond)
+
+	resp, err := http.Get("http://" + started.listener.Addr().String())
+	if err != nil {
+		t.Fatalf("GET metrics endpoint during grace period error: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got, want := resp.StatusCode, http.StatusNoContent; got != want {
+		t.Fatalf("metrics endpoint status during grace = %d, want %d", got, want)
+	}
+
+	result := <-resultCh
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("runWithMetricsLifecycle() error = %v, want context cancellation", result.err)
+	}
+	if elapsed := time.Since(cancelledAt); elapsed < 35*time.Millisecond {
+		t.Fatalf("metrics lifecycle returned before full grace period: %v", elapsed)
+	}
+	conn, err := net.DialTimeout("tcp", started.listener.Addr().String(), 50*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("metrics listener still accepts connections after lifecycle shutdown")
+	}
+}
+
+func TestShutdownMetricsServerDrainsInFlightRequest(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseRequest)
 		}
-	})
+	}()
+	started, err := startMetricsServer("127.0.0.1:0", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-releaseRequest
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	if err != nil {
+		t.Fatalf("startMetricsServer() error: %v", err)
+	}
+	requestResult := make(chan error, 1)
+	go func() {
+		resp, requestErr := http.Get("http://" + started.listener.Addr().String())
+		if requestErr == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusNoContent {
+				requestErr = fmt.Errorf("metrics response status = %d", resp.StatusCode)
+			}
+		}
+		requestResult <- requestErr
+	}()
+	<-requestStarted
+	shutdownResult := make(chan error, 1)
+	go func() {
+		shutdownResult <- shutdownMetricsServer(started)
+	}()
+	select {
+	case err := <-shutdownResult:
+		t.Fatalf("shutdown returned before in-flight request completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseRequest)
+	released = true
+	if err := <-requestResult; err != nil {
+		t.Fatalf("in-flight metrics request error: %v", err)
+	}
+	if err := <-shutdownResult; err != nil {
+		t.Fatalf("shutdownMetricsServer() error: %v", err)
+	}
 }
 
 func writeReplayLog(t *testing.T, authority string) string {
