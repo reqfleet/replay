@@ -252,6 +252,62 @@ func TestSampleConfigLoads(t *testing.T) {
 	}
 }
 
+func TestValidateRetryConfiguration(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{
+			name: "known values",
+			mutate: func(cfg *Config) {
+				cfg.Replay.Retry.Backoff = "EXPONENTIAL"
+				cfg.Replay.Retry.RetryOnStatuses = []int{100, 599}
+				cfg.Replay.Retry.RetryOnErrors = []string{"TIMEOUT", "connection_reset", "network", "tls"}
+			},
+		},
+		{
+			name: "unknown backoff",
+			mutate: func(cfg *Config) {
+				cfg.Replay.Retry.Backoff = "immediate"
+			},
+			wantErr: true,
+		},
+		{
+			name: "status below HTTP range",
+			mutate: func(cfg *Config) {
+				cfg.Replay.Retry.RetryOnStatuses = []int{99}
+			},
+			wantErr: true,
+		},
+		{
+			name: "status above HTTP range",
+			mutate: func(cfg *Config) {
+				cfg.Replay.Retry.RetryOnStatuses = []int{600}
+			},
+			wantErr: true,
+		},
+		{
+			name: "unknown error category",
+			mutate: func(cfg *Config) {
+				cfg.Replay.Retry.RetryOnErrors = []string{"server_busy"}
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Errorf("Config.Validate() error = %v, want error = %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsNegativeRampupDuration(t *testing.T) {
 	cfg := Default()
 	cfg.Replay.RampupDuration = -1 * time.Second

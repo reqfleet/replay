@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -340,6 +342,55 @@ func TestSendRequestReturnsAttemptedExecutionWhenRetryBackoffCanceled(t *testing
 	}
 	if got, want := exec.statusCode, http.StatusServiceUnavailable; got != want {
 		t.Errorf("sendRequest(canceled retry backoff).statusCode = %d, want %d", got, want)
+	}
+}
+
+func TestRetryErrorCategoryUsesStructuredErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "timeout",
+			err:  context.DeadlineExceeded,
+			want: "timeout",
+		},
+		{
+			name: "connection reset",
+			err: &net.OpError{
+				Op:  "read",
+				Net: "tcp",
+				Err: syscall.ECONNRESET,
+			},
+			want: "connection_reset",
+		},
+		{
+			name: "TLS",
+			err:  tls.RecordHeaderError{Msg: "invalid record"},
+			want: "tls",
+		},
+		{
+			name: "network",
+			err: &net.DNSError{
+				Err:        "lookup failed",
+				Name:       "example.test",
+				IsNotFound: true,
+			},
+			want: "network",
+		},
+		{
+			name: "unstructured message",
+			err:  errors.New("connection reset during TLS dial tcp"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := retryErrorCategory(tt.err); got != tt.want {
+				t.Errorf("retryErrorCategory(%T) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

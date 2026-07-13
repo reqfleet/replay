@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/reqfleet/replay/internal/config"
@@ -1461,17 +1462,30 @@ func retryErrorCategory(err error) string {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return "timeout"
 	}
-	lower := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(lower, "connection reset"):
+	if errors.Is(err, syscall.ECONNRESET) {
 		return "connection_reset"
-	case strings.Contains(lower, "tls"):
-		return "tls"
-	case strings.Contains(lower, "dial tcp"), strings.Contains(lower, "no such host"), strings.Contains(lower, "connection refused"):
-		return "network"
-	default:
-		return ""
 	}
+	var certificateErr *tls.CertificateVerificationError
+	if errors.As(err, &certificateErr) {
+		return "tls"
+	}
+	var recordHeaderErr tls.RecordHeaderError
+	if errors.As(err, &recordHeaderErr) {
+		return "tls"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "network"
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return "network"
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return "network"
+	}
+	return ""
 }
 
 func metricStatusForSendError(err error) string {

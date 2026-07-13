@@ -246,6 +246,9 @@ func (c Config) Validate() error {
 	if c.Replay.Retry.MaxAttempts <= 0 {
 		return errors.New("replay.retry.max_attempts must be > 0")
 	}
+	if err := validateRetryConfig(c.Replay.Retry); err != nil {
+		return err
+	}
 	switch c.Replay.HTTP2.Mode {
 	case "", "serialized", "multiplexed":
 	default:
@@ -284,6 +287,31 @@ func (c Config) Validate() error {
 		}
 		if c.Metrics.ListenAddress == "" {
 			return errors.New("metrics.listen_address is required")
+		}
+	}
+	return nil
+}
+
+func validateRetryConfig(retry RetryConfig) error {
+	if !strings.EqualFold(retry.Backoff, "none") &&
+		!strings.EqualFold(retry.Backoff, "fixed") &&
+		!strings.EqualFold(retry.Backoff, "exponential") {
+		return fmt.Errorf("replay.retry.backoff %q must be one of: none, fixed, exponential", retry.Backoff)
+	}
+	for _, status := range retry.RetryOnStatuses {
+		if status < 100 || status > 599 {
+			return fmt.Errorf("replay.retry.retry_on_statuses contains invalid HTTP status %d", status)
+		}
+	}
+	for _, category := range retry.RetryOnErrors {
+		if !strings.EqualFold(category, "timeout") &&
+			!strings.EqualFold(category, "connection_reset") &&
+			!strings.EqualFold(category, "network") &&
+			!strings.EqualFold(category, "tls") {
+			return fmt.Errorf(
+				"replay.retry.retry_on_errors category %q must be one of: timeout, connection_reset, network, tls",
+				category,
+			)
 		}
 	}
 	return nil
