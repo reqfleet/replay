@@ -179,14 +179,20 @@ func TestExecuteRequestIncludesResponseHeadersInEgressBytes(t *testing.T) {
 	client, transport := eng.makePerConnectionClient(false)
 	defer transport.CloseIdleConnections()
 
-	exec, err := eng.executeRequest(context.Background(), client, model.Event{
+	requestEvent := model.Event{
 		HTTP: model.HTTPRequestMeta{
 			Method:    http.MethodGet,
 			Scheme:    "http",
 			Authority: authority,
 			Path:      "/",
 		},
-	})
+	}
+	exec, err := eng.executeRequest(
+		context.Background(),
+		client,
+		requestEvent,
+		eng.effectiveRequestHeaders(requestEvent.Headers),
+	)
 	if err != nil {
 		t.Fatalf("executeRequest(raw response) error: %v", err)
 	}
@@ -205,14 +211,20 @@ func TestExecuteRequestIncludesPartialBodyInEgressBytesOnReadError(t *testing.T)
 	client, transport := eng.makePerConnectionClient(false)
 	defer transport.CloseIdleConnections()
 
-	exec, err := eng.executeRequest(context.Background(), client, model.Event{
+	requestEvent := model.Event{
 		HTTP: model.HTTPRequestMeta{
 			Method:    http.MethodGet,
 			Scheme:    "http",
 			Authority: authority,
 			Path:      "/",
 		},
-	})
+	}
+	exec, err := eng.executeRequest(
+		context.Background(),
+		client,
+		requestEvent,
+		eng.effectiveRequestHeaders(requestEvent.Headers),
+	)
 	if err == nil {
 		t.Fatal("executeRequest(partial body response) error = nil, want read error")
 	}
@@ -311,14 +323,15 @@ func TestSendRequestReturnsAttemptedExecutionWhenRetryBackoffCanceled(t *testing
 		}),
 	}
 
-	exec, err := eng.sendRequest(ctx, client, model.Event{
+	requestEvent := model.Event{
 		HTTP: model.HTTPRequestMeta{
 			Method:    http.MethodGet,
 			Scheme:    "http",
 			Authority: "example.test",
 			Path:      "/",
 		},
-	})
+	}
+	exec, err := eng.sendRequest(ctx, client, requestEvent, eng.effectiveRequestHeaders(requestEvent.Headers))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("sendRequest(canceled retry backoff) error = %v, want %v", err, context.Canceled)
 	}
