@@ -60,7 +60,7 @@ Notable CLI flags (also available via env):
 Environment variables for metrics:
 - `METRICS_ENABLED`, `METRICS_NAMESPACE`, `METRICS_LISTEN_ADDRESS`, `METRICS_PATH`, `METRICS_GRACEFUL_TERMINATION_PERIOD`
 
-`metrics.graceful_termination_period` keeps the process alive after replay completes so the metrics endpoint remains scrapeable for a short window before exit. The default is `5s`.
+`metrics.graceful_termination_period` keeps the endpoint scrapeable for the full configured window after replay stops, including signal cancellation, then gracefully drains in-flight scrapes. The default is `5s`. Replay fails startup if the metrics listener cannot bind.
 
 Common Prometheus labels are configured with `metrics.common_labels`:
 - each entry has `name`, literal fallback `value`, and optional `env`
@@ -74,7 +74,7 @@ CLI flags are applied last and take highest precedence for safety-related settin
 - Always run with `--dry-run` first to confirm traffic parsing and pacing without emitting network requests.
 - When replaying against non-production targets, use `--override-url` and consider setting `--disallow-recorded-targets` in operator configs to prevent accidental traffic to recorded destinations.
 - Verify the metrics endpoint (default `http://0.0.0.0:9102/metrics`) is reachable before and during runs.
-- If you need resumable runs, set `checkpoint.file` in the YAML to persist completed sequences per `node` + `connection_id`.
+- If you need resumable runs, set `checkpoint.file` in the YAML. Every acknowledged sequence is durably persisted per `node` + `connection_id`; persistence failures fail the run.
 
 ## Programmatic outcome details
 
@@ -147,7 +147,7 @@ When idempotency safeguards are enabled, mutation methods are skipped unless one
 Lifecycle checks require `connection_open` before each replayed connection. `connection_close` is optional; EOF finalizes any still-open connections.
 Round-robin workers may drive multiple recorded connections. Each recorded connection owns its HTTP transport until `connection_close` or EOF, preserving keep-alive reuse and socket isolation; `max_virtual_users_per_engine` bounds the worker count.
 
-Sharding routes connections by `node` + `connection_id` hash (`shard_index` / `shard_count`) and only replays the local shard.
+Sharding routes connections by `node` + `connection_id` hash (`shard_index` / `shard_count`) and only replays the local shard. With multiple shards, replay isolates checkpoint files using a `.shard-<index>-of-<count>` suffix.
 If `checkpoint.file` is set, completed sequences are persisted and skipped on the next run using the same `node` + `connection_id` identity.
 For HTTP/2 traffic, `serialized` replays requests sequentially, while `multiplexed`
 dispatches requests concurrently on the shared per-connection client and waits for them at `connection_close` or EOF.
