@@ -155,13 +155,14 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 		drainEvents(events)
 		return Summary{Outcome: RunFailed}, fmt.Errorf("validate target override: %w", e.targetOverrideErr)
 	}
-	checkpoints, err := newCheckpointStore(e.cfg.Replay.Checkpoint.File)
+	checkpoints, err := newCheckpointStore(checkpointPath(
+		e.cfg.Replay.Checkpoint.File,
+		e.cfg.Replay.Sharding.ShardIndex,
+		e.cfg.Replay.Sharding.ShardCount,
+	))
 	if err != nil {
 		drainEvents(events)
 		return Summary{Outcome: RunFailed}, err
-	}
-	if checkpoints != nil {
-		defer checkpoints.Close()
 	}
 
 	if e.metrics != nil {
@@ -202,11 +203,22 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	wg.Wait()
 	close(results)
 
+	summary := e.aggregateResults(results)
+	checkpointErr := checkpoints.Close()
 	if routeErr != nil {
+		if checkpointErr != nil {
+			return Summary{Outcome: RunFailed}, errors.Join(
+				routeErr,
+				fmt.Errorf("persist checkpoint: %w", checkpointErr),
+			)
+		}
 		return Summary{Outcome: RunFailed}, routeErr
 	}
+	if checkpointErr != nil {
+		return Summary{Outcome: RunFailed}, fmt.Errorf("persist checkpoint: %w", checkpointErr)
+	}
 
-	return e.aggregateResults(results), nil
+	return summary, nil
 }
 
 const eventChannelDepth = 256
