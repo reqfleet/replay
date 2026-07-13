@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -63,19 +65,82 @@ func runReplayFromFile(ctx context.Context, cfg config.Config, registry *metrics
 	return summary, nil
 }
 
-func waitForMetricsGracePeriod(ctx context.Context, period time.Duration) {
+func waitForMetricsGracePeriod(period time.Duration) {
 	if period <= 0 {
 		return
 	}
 	timer := time.NewTimer(period)
 	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-	case <-timer.C:
+	<-timer.C
+}
+
+const metricsShutdownTimeout = 5 * time.Second
+
+type metricsHTTPServer struct {
+	server   *http.Server
+	listener net.Listener
+	done     chan error
+}
+
+func startMetricsServer(address string, handler http.Handler) (*metricsHTTPServer, error) {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, fmt.Errorf("listen for metrics: %w", err)
 	}
+	server := &http.Server{Handler: handler}
+	started := &metricsHTTPServer{
+		server:   server,
+		listener: listener,
+		done:     make(chan error, 1),
+	}
+	go func() {
+		started.done <- server.Serve(listener)
+	}()
+	return started, nil
+}
+
+func shutdownMetricsServer(started *metricsHTTPServer) error {
+	if started == nil {
+		return nil
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
+	defer cancel()
+	shutdownErr := started.server.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
+		shutdownErr = errors.Join(shutdownErr, started.server.Close())
+	}
+	serveErr := <-started.done
+	if errors.Is(serveErr, http.ErrServerClosed) || errors.Is(serveErr, net.ErrClosed) {
+		serveErr = nil
+	}
+	return errors.Join(shutdownErr, serveErr)
+}
+
+func runWithMetricsLifecycle(
+	ctx context.Context,
+	replay func(context.Context) (engine.Summary, error),
+	started *metricsHTTPServer,
+	gracePeriod time.Duration,
+) (engine.Summary, error) {
+	summary, replayErr := replay(ctx)
+	if started == nil {
+		return summary, replayErr
+	}
+	if gracePeriod > 0 {
+		slog.Info("metrics graceful termination period", "period", gracePeriod)
+	}
+	waitForMetricsGracePeriod(gracePeriod)
+	if shutdownErr := shutdownMetricsServer(started); shutdownErr != nil {
+		replayErr = errors.Join(replayErr, fmt.Errorf("shutdown metrics server: %w", shutdownErr))
+	}
+	return summary, replayErr
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	configPath := flag.String("config", "", "path to config.yaml (optional)")
 	logPath := flag.String("log", "", "path to requests.log NDJSON file")
 	zstdFlag := flag.Bool("zstd", false, "read log file compressed with zstd")
@@ -103,22 +168,22 @@ func main() {
 
 	if *logPath == "" {
 		slog.Error("-log is required")
-		os.Exit(2)
+		return 2
 	}
 	if *zstdFlag && *gzipFlag {
 		slog.Error("cannot specify both -zstd and -gzip")
-		os.Exit(2)
+		return 2
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		slog.Error("load config", "error", err)
-		os.Exit(2)
+		return 2
 	}
 	// Apply environment overrides (env > YAML)
 	cfg.ApplyEnv()
 	if err := cfg.Validate(); err != nil {
 		slog.Error("validate config", "error", err)
-		os.Exit(2)
+		return 2
 	}
 	slog.Info("resolved metric labels", cfg.Metrics.CommonLabelAttrs()...)
 	// Apply CLI overrides with higher precedence for safety-related flags
@@ -137,41 +202,39 @@ func main() {
 
 	if _, err := cfg.Target.ParseURL(); err != nil {
 		slog.Error("validate target override", "error", err)
-		os.Exit(2)
+		return 2
 	}
 	for key, value := range cfg.Env {
 		if setErr := os.Setenv(key, value); setErr != nil {
 			slog.Error("set env failed", "key", key, "error", setErr)
-			os.Exit(2)
+			return 2
 		}
 	}
 
-	// We'll stream the parsed events into the engine to avoid building
-	// a large in-memory slice for big log files.
-
 	registry := metrics.New(cfg.Metrics)
 	metricLabelValues := cfg.Metrics.CommonLabelValues()
-	// seed labels early so collectors and the server can report immediately
 	registry.SeedEngineLabels(metricLabelValues)
-	var stopMetrics func()
+	var startedMetrics *metricsHTTPServer
 	if cfg.Metrics.Enabled {
-		// start runtime collectors (memory/CPU)
-		stopMetrics = registry.StartRuntimeCollection(metricLabelValues, 2*time.Second)
+		stopMetrics := registry.StartRuntimeCollection(metricLabelValues, 2*time.Second)
 		if stopMetrics != nil {
 			defer stopMetrics()
 		}
 		mux := http.NewServeMux()
 		mux.Handle(cfg.Metrics.Path, registry.Handler())
-		go func() {
-			if serveErr := http.ListenAndServe(cfg.Metrics.ListenAddress, mux); serveErr != nil {
-				slog.Error("metrics server stopped", "error", serveErr)
-			}
-		}()
-		slog.Info("metrics endpoint ready", "url", fmt.Sprintf("http://%s%s", cfg.Metrics.ListenAddress, cfg.Metrics.Path))
+		startedMetrics, err = startMetricsServer(cfg.Metrics.ListenAddress, mux)
+		if err != nil {
+			slog.Error("start metrics server", "error", err)
+			return 2
+		}
+		slog.Info(
+			"metrics endpoint ready",
+			"url", fmt.Sprintf("http://%s%s", startedMetrics.listener.Addr(), cfg.Metrics.Path),
+		)
 	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-
 	var format string
 	if *gzipFlag {
 		format = "gzip"
@@ -179,15 +242,17 @@ func main() {
 		format = "zstd"
 	}
 
-	summary, err := runReplayFromFile(ctx, cfg, registry, *logPath, format)
+	summary, err := runWithMetricsLifecycle(
+		ctx,
+		func(replayCtx context.Context) (engine.Summary, error) {
+			return runReplayFromFile(replayCtx, cfg, registry, *logPath, format)
+		},
+		startedMetrics,
+		cfg.Metrics.GracefulTerminationPeriod,
+	)
 	if err != nil {
-		slog.Error("parse log file failed", "error", err)
-		os.Exit(2)
-	}
-
-	if cfg.Metrics.Enabled && cfg.Metrics.GracefulTerminationPeriod > 0 {
-		slog.Info("metrics graceful termination period", "period", cfg.Metrics.GracefulTerminationPeriod)
-		waitForMetricsGracePeriod(ctx, cfg.Metrics.GracefulTerminationPeriod)
+		slog.Error("replay failed", "error", err)
+		return 2
 	}
 
 	slog.Info("replay finished",
@@ -205,5 +270,5 @@ func main() {
 	if exitCode != 0 && summary.Outcome == engine.RunFailed {
 		fmt.Fprintln(os.Stderr, "replay failed")
 	}
-	os.Exit(exitCode)
+	return exitCode
 }

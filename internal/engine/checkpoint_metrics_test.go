@@ -3,11 +3,13 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -63,35 +65,199 @@ func TestCheckpointWrittenOnSuccess(t *testing.T) {
 	}
 }
 
-func TestCheckpointFlushBatchesUntilClose(t *testing.T) {
+func TestCheckpointPersistsEveryAdvance(t *testing.T) {
 	tmp := t.TempDir()
 	ckPath := filepath.Join(tmp, "checkpoint.json")
-	store := newCheckpointStoreWithInterval(ckPath, 24*time.Hour)
-	store.wg.Go(store.flusher)
+	legacyTmpPath := ckPath + ".tmp"
+	if err := os.WriteFile(legacyTmpPath, []byte("sentinel"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", legacyTmpPath, err)
+	}
+	store, err := newCheckpointStore(ckPath)
+	if err != nil {
+		t.Fatalf("newCheckpointStore(%q) error: %v", ckPath, err)
+	}
 
 	key := model.ConnectionKey{Node: "envoy-a", ConnectionID: 1}
-	if err := store.markProcessed(key, 1); err != nil {
-		t.Fatalf("mark initial checkpoint: %v", err)
+	for sequence := 1; sequence <= 3; sequence++ {
+		if err := store.markProcessed(key, sequence); err != nil {
+			t.Fatalf("markProcessed(sequence=%d) error: %v", sequence, err)
+		}
+		if got := readCheckpointSequence(t, ckPath, key); got != sequence {
+			t.Fatalf("checkpoint sequence after mark %d = %d", sequence, got)
+		}
 	}
-	if got := readCheckpointSequence(t, ckPath, key); got != 1 {
-		t.Fatalf("checkpoint sequence after initial write = %d, want 1", got)
-	}
-
-	if err := store.markProcessed(key, 2); err != nil {
-		t.Fatalf("mark second checkpoint: %v", err)
-	}
-	if err := store.markProcessed(key, 3); err != nil {
-		t.Fatalf("mark third checkpoint: %v", err)
-	}
-	if got := readCheckpointSequence(t, ckPath, key); got != 1 {
-		t.Fatalf("checkpoint sequence before batch flush = %d, want 1", got)
-	}
-
 	if err := store.Close(); err != nil {
-		t.Fatalf("close checkpoint store: %v", err)
+		t.Fatalf("store.Close() error: %v", err)
 	}
-	if got := readCheckpointSequence(t, ckPath, key); got != 3 {
-		t.Fatalf("checkpoint sequence after final flush = %d, want 3", got)
+
+	reloaded, err := newCheckpointStore(ckPath)
+	if err != nil {
+		t.Fatalf("reload checkpoint: %v", err)
+	}
+	if !reloaded.alreadyProcessed(key, 3) {
+		t.Fatal("reloaded checkpoint does not contain acknowledged sequence 3")
+	}
+	if err := reloaded.Close(); err != nil {
+		t.Fatalf("reloaded.Close() error: %v", err)
+	}
+	if got, err := os.ReadFile(legacyTmpPath); err != nil || string(got) != "sentinel" {
+		t.Fatalf("legacy temp sentinel = %q, %v; want untouched", got, err)
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("os.ReadDir(%q) error: %v", tmp, err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".checkpoint.json.tmp-") {
+			t.Fatalf("temporary checkpoint file was not cleaned up: %s", entry.Name())
+		}
+	}
+}
+
+func TestCheckpointRejectsUnsupportedVersions(t *testing.T) {
+	tests := []struct {
+		name    string
+		version int
+		wantErr bool
+	}{
+		{name: "current", version: currentCheckpointVersion},
+		{name: "missing", version: 0, wantErr: true},
+		{name: "future", version: currentCheckpointVersion + 1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "checkpoint.json")
+			payload := fmt.Sprintf(`{"version":%d,"connections":{}}`, tt.version)
+			if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
+				t.Fatalf("os.WriteFile(%q) error: %v", path, err)
+			}
+			store, err := newCheckpointStore(path)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "unsupported checkpoint version") {
+					t.Fatalf("newCheckpointStore(version=%d) error = %v", tt.version, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("newCheckpointStore(version=%d) error: %v", tt.version, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatalf("store.Close() error: %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckpointCloseReturnsPersistenceFailure(t *testing.T) {
+	tmp := t.TempDir()
+	parent := filepath.Join(tmp, "not-a-directory")
+	path := filepath.Join(parent, "checkpoint.json")
+	store, err := newCheckpointStore(path)
+	if err != nil {
+		t.Fatalf("newCheckpointStore(%q) error: %v", path, err)
+	}
+	if err := os.WriteFile(parent, []byte("blocking file"), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", parent, err)
+	}
+
+	key := model.ConnectionKey{Node: "envoy-a", ConnectionID: 1}
+	markErr := store.markProcessed(key, 1)
+	if markErr == nil {
+		t.Fatal("markProcessed() error = nil, want persistence failure")
+	}
+	closeErr := store.Close()
+	if closeErr == nil || closeErr.Error() != markErr.Error() {
+		t.Fatalf("store.Close() error = %v, want first error %v", closeErr, markErr)
+	}
+	if secondErr := store.Close(); secondErr == nil || secondErr.Error() != markErr.Error() {
+		t.Fatalf("second store.Close() error = %v, want first error %v", secondErr, markErr)
+	}
+}
+
+func TestCheckpointPathsAreIsolatedByShard(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "checkpoint.json")
+	firstPath := checkpointPath(base, 0, 2)
+	secondPath := checkpointPath(base, 1, 2)
+	if firstPath == secondPath {
+		t.Fatalf("checkpoint paths are equal: %q", firstPath)
+	}
+	if !strings.Contains(firstPath, "shard-0-of-2") || !strings.Contains(secondPath, "shard-1-of-2") {
+		t.Fatalf("shard checkpoint paths = %q, %q", firstPath, secondPath)
+	}
+
+	first, err := newCheckpointStore(firstPath)
+	if err != nil {
+		t.Fatalf("newCheckpointStore(first) error: %v", err)
+	}
+	second, err := newCheckpointStore(secondPath)
+	if err != nil {
+		t.Fatalf("newCheckpointStore(second) error: %v", err)
+	}
+	firstKey := model.ConnectionKey{Node: "envoy-a", ConnectionID: 1}
+	secondKey := model.ConnectionKey{Node: "envoy-b", ConnectionID: 2}
+	if err := first.markProcessed(firstKey, 3); err != nil {
+		t.Fatalf("first.markProcessed() error: %v", err)
+	}
+	if err := second.markProcessed(secondKey, 7); err != nil {
+		t.Fatalf("second.markProcessed() error: %v", err)
+	}
+	if got := readCheckpointSequence(t, firstPath, firstKey); got != 3 {
+		t.Fatalf("first shard sequence = %d, want 3", got)
+	}
+	if got := readCheckpointSequence(t, secondPath, secondKey); got != 7 {
+		t.Fatalf("second shard sequence = %d, want 7", got)
+	}
+}
+
+func TestReplayStreamReturnsCheckpointPersistenceFailure(t *testing.T) {
+	checkpointDir := filepath.Join(t.TempDir(), "checkpoint")
+	if err := os.MkdirAll(checkpointDir, 0o755); err != nil {
+		t.Fatalf("os.MkdirAll(%q) error: %v", checkpointDir, err)
+	}
+	sabotageErr := make(chan error, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := os.RemoveAll(checkpointDir); err != nil {
+			sabotageErr <- err
+			return
+		}
+		if err := os.WriteFile(checkpointDir, []byte("blocking file"), 0o644); err != nil {
+			sabotageErr <- err
+			return
+		}
+		sabotageErr <- nil
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Checkpoint.File = filepath.Join(checkpointDir, "state.json")
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: 1,
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/",
+			},
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+	summary, replayErr := runReplay(eng, events)
+	if err := <-sabotageErr; err != nil {
+		t.Fatalf("checkpoint sabotage error: %v", err)
+	}
+	if replayErr == nil || !strings.Contains(replayErr.Error(), "persist checkpoint") {
+		t.Fatalf("runReplay() error = %v, want checkpoint persistence error", replayErr)
+	}
+	if got, want := summary.Outcome, RunFailed; got != want {
+		t.Fatalf("summary.Outcome = %s, want %s", got, want)
 	}
 }
 

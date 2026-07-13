@@ -1,8 +1,10 @@
 package config
 
 import (
+	"net/http"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -266,6 +268,53 @@ func TestValidateRejectsNegativeMetricsGracefulTerminationPeriod(t *testing.T) {
 	}
 }
 
+func TestValidateMetricsPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{name: "default", path: "/metrics"},
+		{name: "nested", path: "/custom/metrics"},
+		{name: "encoded braces", path: "/metrics/%7Btenant%7D"},
+		{name: "missing leading slash", path: "metrics", wantErr: true},
+		{name: "space", path: "/metrics bad", wantErr: true},
+		{name: "tab", path: "/metrics\tbad", wantErr: true},
+		{name: "wildcard start", path: "/metrics/{", wantErr: true},
+		{name: "wildcard", path: "/metrics/{tenant}", wantErr: true},
+		{name: "duplicate wildcard", path: "/metrics/{tenant}/{tenant}", wantErr: true},
+		{name: "query", path: "/metrics?format=openmetrics", wantErr: true},
+		{name: "empty query", path: "/metrics?", wantErr: true},
+		{name: "fragment", path: "/metrics#fragment", wantErr: true},
+		{name: "bad escape", path: "/metrics%zz", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Metrics.Path = tt.path
+			err := cfg.Validate()
+			if tt.wantErr && (err == nil || !strings.Contains(err.Error(), "metrics.path")) {
+				t.Fatalf("Validate(metrics.path=%q) error = %v, want metrics.path error", tt.path, err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate(metrics.path=%q) error: %v", tt.path, err)
+			}
+			if !tt.wantErr {
+				mux := http.NewServeMux()
+				mux.Handle(tt.path, http.NotFoundHandler())
+			}
+		})
+	}
+
+	cfg := Default()
+	cfg.Metrics.Enabled = false
+	cfg.Metrics.Path = "metrics"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with disabled metrics and malformed path error: %v", err)
+	}
+}
+
 func TestValidateRejectsInvalidMetricCommonLabels(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -309,6 +358,51 @@ func TestValidateRejectsCaseInsensitiveDuplicateSetHeaders(t *testing.T) {
 
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() with case-insensitive duplicate header_rewrite.set keys error = nil, want error")
+	}
+}
+
+func TestValidateHeaderRewrite(t *testing.T) {
+	tests := []struct {
+		name    string
+		rewrite HeaderRewriteConfig
+		wantErr bool
+	}{
+		{name: "ordinary token name", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-!#$%&'*+-.^_`|~": "value"}}},
+		{name: "host", rewrite: HeaderRewriteConfig{Set: map[string]string{"Host": "replay.example.com"}}},
+		{name: "authority", rewrite: HeaderRewriteConfig{Set: map[string]string{":authority": "replay.example.com"}}},
+		{name: "horizontal tab value", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-Test": "one\ttwo"}}},
+		{name: "non ASCII value", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-Test": "café"}}},
+		{name: "empty drop name", rewrite: HeaderRewriteConfig{Drop: []string{""}}, wantErr: true},
+		{name: "space in drop name", rewrite: HeaderRewriteConfig{Drop: []string{"Bad Name"}}, wantErr: true},
+		{name: "unsupported pseudo header", rewrite: HeaderRewriteConfig{Drop: []string{":path"}}, wantErr: true},
+		{name: "space in set name", rewrite: HeaderRewriteConfig{Set: map[string]string{"Bad Name": "value"}}, wantErr: true},
+		{name: "newline in set name", rewrite: HeaderRewriteConfig{Set: map[string]string{"Bad\nName": "value"}}, wantErr: true},
+		{name: "CRLF value", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-Test": "one\r\nInjected: true"}}, wantErr: true},
+		{name: "NUL value", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-Test": "one\x00two"}}, wantErr: true},
+		{name: "control value", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-Test": "one\x01two"}}, wantErr: true},
+		{name: "DEL value", rewrite: HeaderRewriteConfig{Set: map[string]string{"X-Test": "one\x7ftwo"}}, wantErr: true},
+		{
+			name: "host and authority alias",
+			rewrite: HeaderRewriteConfig{Set: map[string]string{
+				"Host":       "first.example.com",
+				":authority": "second.example.com",
+			}},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Header = tt.rewrite
+			err := cfg.Validate()
+			if tt.wantErr && (err == nil || !strings.Contains(err.Error(), "header_rewrite")) {
+				t.Fatalf("Validate(%+v) error = %v, want header_rewrite error", tt.rewrite, err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate(%+v) error: %v", tt.rewrite, err)
+			}
+		})
 	}
 }
 

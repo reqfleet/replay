@@ -36,7 +36,7 @@ type Event struct {
 	TLS                     *TLSInfo            `json:"tls,omitempty"`
 	HTTP                    HTTPRequestMeta     `json:"http"`
 	Headers                 map[string][]string `json:"headers,omitempty"`
-	Body                    Body                `json:"body"`
+	Body                    *Body               `json:"body,omitempty"`
 }
 
 type HTTPRequestMeta struct {

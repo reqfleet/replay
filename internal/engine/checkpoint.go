@@ -12,6 +12,8 @@ import (
 	"github.com/reqfleet/replay/internal/model"
 )
 
+const currentCheckpointVersion = 1
+
 type checkpointData struct {
 	Version     int                         `json:"version"`
 	UpdatedAt   string                      `json:"updated_at,omitempty"`
@@ -19,71 +21,59 @@ type checkpointData struct {
 }
 
 type checkpointStore struct {
-	mu   sync.Mutex
-	path string
-	data checkpointData
+	mu         sync.Mutex
+	persistMu  sync.Mutex
+	closeOnce  sync.Once
+	path       string
+	data       checkpointData
+	dirty      bool
+	generation uint64
+	persistErr error
+}
 
-	persistMu sync.Mutex
-	dirty     bool
-	dirReady  bool
-
-	// Batched persistence
-	closeCh       chan struct{}
-	wg            sync.WaitGroup
-	flushInterval time.Duration
-	stopOnce      sync.Once
-	persistedOnce bool
+func checkpointPath(path string, shardIndex, shardCount int) string {
+	if path == "" || shardCount <= 1 {
+		return path
+	}
+	return fmt.Sprintf("%s.shard-%d-of-%d", path, shardIndex, shardCount)
 }
 
 func newCheckpointStore(path string) (*checkpointStore, error) {
 	if path == "" {
 		return nil, nil
 	}
-	store := newCheckpointStoreWithInterval(path, time.Second)
+	store := &checkpointStore{
+		path: path,
+		data: checkpointData{
+			Version:     currentCheckpointVersion,
+			Connections: map[model.ConnectionKey]int{},
+		},
+	}
 
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// start background flusher even if file doesn't exist yet
-			store.wg.Go(store.flusher)
 			return store, nil
 		}
 		return nil, fmt.Errorf("read checkpoint: %w", err)
 	}
 	if len(b) == 0 {
-		// start background flusher when file is empty
-		store.wg.Go(store.flusher)
 		return store, nil
 	}
 	if err := json.Unmarshal(b, &store.data); err != nil {
 		return nil, fmt.Errorf("parse checkpoint: %w", err)
 	}
-	// mark that we loaded an on-disk checkpoint
-	store.persistedOnce = true
+	if store.data.Version != currentCheckpointVersion {
+		return nil, fmt.Errorf(
+			"unsupported checkpoint version %d (want %d)",
+			store.data.Version,
+			currentCheckpointVersion,
+		)
+	}
 	if store.data.Connections == nil {
 		store.data.Connections = map[model.ConnectionKey]int{}
 	}
-	if store.data.Version == 0 {
-		store.data.Version = 1
-	}
-	// start background flusher
-	store.wg.Go(store.flusher)
 	return store, nil
-}
-
-func newCheckpointStoreWithInterval(path string, flushInterval time.Duration) *checkpointStore {
-	if flushInterval <= 0 {
-		flushInterval = time.Second
-	}
-	return &checkpointStore{
-		path: path,
-		data: checkpointData{
-			Version:     1,
-			Connections: map[model.ConnectionKey]int{},
-		},
-		closeCh:       make(chan struct{}),
-		flushInterval: flushInterval,
-	}
 }
 
 func (c *checkpointStore) alreadyProcessed(connectionKey model.ConnectionKey, sequence int) bool {
@@ -111,30 +101,24 @@ func (c *checkpointStore) markProcessed(connectionKey model.ConnectionKey, seque
 	}
 
 	c.mu.Lock()
-	last := c.data.Connections[connectionKey]
-	if sequence <= last {
+	if c.persistErr != nil {
+		err := c.persistErr
 		c.mu.Unlock()
-		return nil
+		return err
 	}
-	c.data.Connections[connectionKey] = sequence
-	c.data.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	c.dirty = true
-	needsInitialPersist := !c.persistedOnce
-	if needsInitialPersist {
-		c.persistedOnce = true
+	if sequence > c.data.Connections[connectionKey] {
+		c.data.Connections[connectionKey] = sequence
+		c.data.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		c.dirty = true
+		c.generation++
 	}
 	c.mu.Unlock()
 
-	// Persist the first update synchronously so callers that expect immediate
-	// on-disk checkpoints (tests, short-lived runs) see the file.
-	if needsInitialPersist {
-		return c.persist()
-	}
-
-	return nil
+	// A successful return acknowledges that this watermark is on disk. Calling
+	// persist even for an already-seen sequence waits for any concurrent writer.
+	return c.persist()
 }
 
-// persist writes dirty checkpoint data to disk atomically.
 func (c *checkpointStore) persist() error {
 	if c == nil || c.path == "" {
 		return nil
@@ -145,81 +129,97 @@ func (c *checkpointStore) persist() error {
 
 	c.mu.Lock()
 	if !c.dirty {
+		err := c.persistErr
 		c.mu.Unlock()
-		return nil
+		return err
 	}
-	c.dirty = false
+	generation := c.generation
 	copyData := checkpointData{
 		Version:     c.data.Version,
 		UpdatedAt:   c.data.UpdatedAt,
-		Connections: make(map[model.ConnectionKey]int, len(c.data.Connections)),
+		Connections: maps.Clone(c.data.Connections),
 	}
-	maps.Copy(copyData.Connections, c.data.Connections)
-	dirReady := c.dirReady
 	c.mu.Unlock()
 
 	payload, err := json.Marshal(copyData)
 	if err != nil {
-		c.markPersistencePending()
-		return fmt.Errorf("marshal checkpoint: %w", err)
+		return c.recordPersistenceError(fmt.Errorf("marshal checkpoint: %w", err))
+	}
+	if err := writeCheckpointFile(c.path, payload); err != nil {
+		return c.recordPersistenceError(err)
 	}
 
-	if !dirReady {
-		if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
-			c.markPersistencePending()
-			return fmt.Errorf("prepare checkpoint dir: %w", err)
-		}
-		c.mu.Lock()
-		c.dirReady = true
-		c.mu.Unlock()
+	c.mu.Lock()
+	if c.generation == generation {
+		c.dirty = false
+	}
+	err = c.persistErr
+	c.mu.Unlock()
+	return err
+}
+
+func writeCheckpointFile(path string, payload []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("prepare checkpoint dir: %w", err)
 	}
 
-	tmpPath := c.path + ".tmp"
-	if err := os.WriteFile(tmpPath, payload, 0o644); err != nil {
-		c.markPersistencePending()
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create checkpoint tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod checkpoint tmp: %w", err)
+	}
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("write checkpoint tmp: %w", err)
 	}
-	if err := os.Rename(tmpPath, c.path); err != nil {
-		c.markPersistencePending()
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync checkpoint tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close checkpoint tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("replace checkpoint: %w", err)
+	}
+
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open checkpoint dir: %w", err)
+	}
+	defer dirFile.Close()
+	if err := dirFile.Sync(); err != nil {
+		return fmt.Errorf("sync checkpoint dir: %w", err)
 	}
 	return nil
 }
 
-func (c *checkpointStore) markPersistencePending() {
+func (c *checkpointStore) recordPersistenceError(err error) error {
 	c.mu.Lock()
-	c.dirty = true
-	c.mu.Unlock()
-}
-
-// flusher runs in background and periodically persists queued updates.
-func (c *checkpointStore) flusher() {
-	ticker := time.NewTicker(c.flushInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			if err := c.persist(); err != nil {
-				fmt.Fprintf(os.Stderr, "checkpoint persist failed: %v\n", err)
-			}
-		case <-c.closeCh:
-			// final flush before exiting
-			if err := c.persist(); err != nil {
-				fmt.Fprintf(os.Stderr, "checkpoint final persist failed: %v\n", err)
-			}
-			return
-		}
+	if c.persistErr == nil {
+		c.persistErr = err
 	}
+	storedErr := c.persistErr
+	c.mu.Unlock()
+	return storedErr
 }
 
-// Close stops the background flusher and performs a final flush.
+// Close completes any outstanding write and returns the first persistence error.
 func (c *checkpointStore) Close() error {
 	if c == nil {
 		return nil
 	}
-	c.stopOnce.Do(func() {
-		close(c.closeCh)
+	c.closeOnce.Do(func() {
+		_ = c.persist()
 	})
-	c.wg.Wait()
-	return nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.persistErr
 }

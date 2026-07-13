@@ -663,6 +663,60 @@ func TestReplayTreatsConnectionRefusedAsPartialSuccess(t *testing.T) {
 	}
 }
 
+func TestReplayDoesNotValidateResponseAfterTransportSendError(t *testing.T) {
+	addr := closedLocalAddress(t)
+	cfg := config.Default()
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Status = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	events := []model.Event{
+		{Type: model.EventMeta},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		{
+			Type:         model.EventRequest,
+			ConnectionID: 1,
+			Sequence:     1,
+			HTTP: model.HTTPRequestMeta{
+				Method: http.MethodGet, Scheme: "http", Authority: addr, Path: "/transport",
+			},
+		},
+		{
+			Type:         model.EventResponse,
+			ConnectionID: 1,
+			Sequence:     1,
+			Status:       http.StatusOK,
+		},
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("runReplay() error: %v", err)
+	}
+	if got, want := summary.SendErrors, int64(1); got != want {
+		t.Fatalf("summary.SendErrors = %d, want %d", got, want)
+	}
+	if got, want := summary.ValidationFailed, int64(0); got != want {
+		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
+	}
+	if got, want := summary.RequestsSent, int64(0); got != want {
+		t.Fatalf("summary.RequestsSent = %d, want %d", got, want)
+	}
+	if got, want := summary.ResponsesReceived, int64(0); got != want {
+		t.Fatalf("summary.ResponsesReceived = %d, want %d", got, want)
+	}
+	if got, want := len(summary.ConnectionResults), 1; got != want {
+		t.Fatalf("len(summary.ConnectionResults) = %d, want %d", got, want)
+	}
+	connection := summary.ConnectionResults[0]
+	if got, want := connection.SendErrors, int64(1); got != want {
+		t.Fatalf("connection.SendErrors = %d, want %d", got, want)
+	}
+	if got, want := connection.ValidationFailed, int64(0); got != want {
+		t.Fatalf("connection.ValidationFailed = %d, want %d", got, want)
+	}
+}
+
 func TestReplayEmitsSyntheticStatusForTransportSendErrors(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -852,7 +906,7 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 			ConnectionID: 1,
 			Sequence:     1,
 			Status:       http.StatusOK,
-			Body: model.Body{
+			Body: &model.Body{
 				Encoding: "base64",
 				Content:  base64.StdEncoding.EncodeToString([]byte("expected-body")),
 			},
@@ -869,6 +923,131 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 	}
 	if summary.Outcome != RunPartialSuccess {
 		t.Fatalf("summary.Outcome = %s, want %s", summary.Outcome, RunPartialSuccess)
+	}
+}
+
+func TestReplayBodyValidationDistinguishesEmptyFromAbsent(t *testing.T) {
+	tests := []struct {
+		name         string
+		actualBody   string
+		expectedBody *model.Body
+		wantFailures int64
+	}{
+		{
+			name:         "explicit empty body rejects non-empty response",
+			actualBody:   "unexpected",
+			expectedBody: &model.Body{Encoding: "base64"},
+			wantFailures: 1,
+		},
+		{
+			name:         "explicit empty body accepts empty response",
+			expectedBody: &model.Body{Encoding: "base64"},
+		},
+		{
+			name:       "absent body does not assert emptiness",
+			actualBody: "unexpected",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tt.actualBody))
+			}))
+			defer srv.Close()
+
+			target, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+			}
+			cfg := config.Default()
+			cfg.Replay.Validation.Enabled = true
+			cfg.Replay.Validation.Body = true
+			eng := New(cfg, metrics.New(cfg.Metrics))
+			events := []model.Event{
+				{Type: model.EventMeta},
+				{Type: model.EventConnectionOpen, ConnectionID: 1},
+				{
+					Type:         model.EventRequest,
+					ConnectionID: 1,
+					Sequence:     1,
+					HTTP: model.HTTPRequestMeta{
+						Method:    http.MethodGet,
+						Scheme:    target.Scheme,
+						Authority: target.Host,
+						Path:      "/",
+					},
+				},
+				{
+					Type:         model.EventResponse,
+					ConnectionID: 1,
+					Sequence:     1,
+					Status:       http.StatusOK,
+					Body:         tt.expectedBody,
+				},
+				{Type: model.EventConnectionClose, ConnectionID: 1},
+			}
+
+			summary, err := runReplay(eng, events)
+			if err != nil {
+				t.Fatalf("runReplay() error: %v", err)
+			}
+			if got := summary.ValidationFailed; got != tt.wantFailures {
+				t.Fatalf("summary.ValidationFailed = %d, want %d", got, tt.wantFailures)
+			}
+		})
+	}
+}
+
+func TestResponseValidationComparesOversizedBodiesExactly(t *testing.T) {
+	actualBody := append(bytes.Repeat([]byte("x"), maxBodyRead), 'y')
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(actualBody)
+	}))
+	defer srv.Close()
+
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+	cfg := config.Default()
+	cfg.Replay.Validation.Enabled = true
+	cfg.Replay.Validation.Body = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	client, transport := eng.makePerConnectionClient(false)
+	defer transport.CloseIdleConnections()
+	requestEvent := model.Event{HTTP: model.HTTPRequestMeta{
+		Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/",
+	}}
+
+	exec, err := eng.executeRequest(
+		context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil),
+	)
+	if err != nil {
+		t.Fatalf("executeRequest() error: %v", err)
+	}
+	if !exec.bodyTruncated {
+		t.Fatal("executeRequest().bodyTruncated = false, want true")
+	}
+	if got, want := exec.bodySize, int64(len(actualBody)); got != want {
+		t.Fatalf("executeRequest().bodySize = %d, want %d", got, want)
+	}
+
+	prefixOnly := model.Event{Body: &model.Body{
+		Encoding: "base64",
+		Content:  base64.StdEncoding.EncodeToString(actualBody[:maxBodyRead]),
+	}}
+	if !eng.responseValidationFailed(prefixOnly, exec) {
+		t.Fatal("responseValidationFailed(prefix only) = false, want true")
+	}
+	exact := model.Event{Body: &model.Body{
+		Encoding: "base64",
+		Content:  base64.StdEncoding.EncodeToString(actualBody),
+	}}
+	if eng.responseValidationFailed(exact, exec) {
+		t.Fatal("responseValidationFailed(exact oversized body) = true, want false")
 	}
 }
 
@@ -2195,6 +2374,75 @@ func TestConfiguredHostRewrite(t *testing.T) {
 	}
 }
 
+func TestSpecialAuthorityHeaderRewrite(t *testing.T) {
+	t.Run("normalizes set and drop", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.Header.Set = map[string]string{":authority": "replay.example.com"}
+		eng := New(cfg, metrics.New(cfg.Metrics))
+		headers := eng.effectiveRequestHeaders(http.Header{"Host": {"captured.example.com"}})
+		if got, want := headers.Get("Host"), "replay.example.com"; got != want {
+			t.Fatalf("effective Host = %q, want %q", got, want)
+		}
+		if _, ok := headers[":authority"]; ok {
+			t.Fatalf("effective headers contain ordinary :authority entry: %v", headers)
+		}
+
+		cfg.Header.Set = nil
+		cfg.Header.Drop = []string{":authority"}
+		eng = New(cfg, metrics.New(cfg.Metrics))
+		headers = eng.effectiveRequestHeaders(http.Header{"Host": {"captured.example.com"}})
+		if got := headers.Get("Host"); got != "" {
+			t.Fatalf("effective Host after :authority drop = %q, want empty", got)
+		}
+	})
+
+	t.Run("sets HTTP2 authority", func(t *testing.T) {
+		type observation struct {
+			host       string
+			protoMajor int
+		}
+		observed := make(chan observation, 1)
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			observed <- observation{host: r.Host, protoMajor: r.ProtoMajor}
+			w.WriteHeader(http.StatusOK)
+		}))
+		srv.EnableHTTP2 = true
+		srv.StartTLS()
+		defer srv.Close()
+		target, err := url.Parse(srv.URL)
+		if err != nil {
+			t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+		}
+
+		cfg := config.Default()
+		cfg.Target.OverrideURL = srv.URL
+		cfg.Header.Set = map[string]string{":authority": "replay.example.com"}
+		cfg.Replay.TLS.InsecureSkipVerify = true
+		eng := New(cfg, metrics.New(cfg.Metrics))
+		client, transport := eng.makePerConnectionClient(true)
+		defer transport.CloseIdleConnections()
+		requestEvent := model.Event{HTTP: model.HTTPRequestMeta{
+			Version: "HTTP/2", Method: http.MethodGet,
+			Scheme: target.Scheme, Authority: target.Host, Path: "/",
+		}}
+		if _, err := eng.executeRequest(
+			context.Background(),
+			client,
+			requestEvent,
+			eng.effectiveRequestHeaders(requestEvent.Headers),
+		); err != nil {
+			t.Fatalf("executeRequest() error: %v", err)
+		}
+		got := <-observed
+		if got.protoMajor != 2 {
+			t.Fatalf("server protocol major = %d, want 2", got.protoMajor)
+		}
+		if want := "replay.example.com"; got.host != want {
+			t.Fatalf("server authority = %q, want %q", got.host, want)
+		}
+	})
+}
+
 func TestOverrideURLPreservesQueryString(t *testing.T) {
 	var seenPath string
 	var seenRawQuery string
@@ -2240,6 +2488,49 @@ func TestOverrideURLPreservesQueryString(t *testing.T) {
 	}
 	if seenRawQuery != "redirect=/home" {
 		t.Fatalf("seen raw query = %q, want %q", seenRawQuery, "redirect=/home")
+	}
+}
+
+func TestBuildRequestURLOverridePreservesCapturedRequestTarget(t *testing.T) {
+	tests := []struct {
+		name        string
+		overrideURL string
+		requestPath string
+		want        string
+	}{
+		{
+			name:        "ignore override path query and fragment",
+			overrideURL: "https://staging.example.com/base?override=1#override",
+			requestPath: "/api/v1?captured=1",
+			want:        "https://staging.example.com/api/v1?captured=1",
+		},
+		{
+			name:        "preserve encoded path and query",
+			overrideURL: "https://staging.example.com/base",
+			requestPath: "/files/a%2Fb?next=%2F",
+			want:        "https://staging.example.com/files/a%2Fb?next=%2F",
+		},
+		{
+			name:        "preserve empty query marker",
+			overrideURL: "https://staging.example.com/base",
+			requestPath: "/path?",
+			want:        "https://staging.example.com/path?",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Target.OverrideURL = tt.overrideURL
+			eng := New(cfg, metrics.New(cfg.Metrics))
+			got, err := eng.buildRequestURL(model.Event{HTTP: model.HTTPRequestMeta{Path: tt.requestPath}})
+			if err != nil {
+				t.Fatalf("buildRequestURL(%q) error: %v", tt.requestPath, err)
+			}
+			if got != tt.want {
+				t.Fatalf("buildRequestURL(%q) = %q, want %q", tt.requestPath, got, tt.want)
+			}
+		})
 	}
 }
 
