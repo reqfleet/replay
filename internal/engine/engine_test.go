@@ -2422,6 +2422,49 @@ func TestOverrideURLPreservesQueryString(t *testing.T) {
 	}
 }
 
+func TestBuildRequestURLOverridePreservesCapturedRequestTarget(t *testing.T) {
+	tests := []struct {
+		name        string
+		overrideURL string
+		requestPath string
+		want        string
+	}{
+		{
+			name:        "ignore override path query and fragment",
+			overrideURL: "https://staging.example.com/base?override=1#override",
+			requestPath: "/api/v1?captured=1",
+			want:        "https://staging.example.com/api/v1?captured=1",
+		},
+		{
+			name:        "preserve encoded path and query",
+			overrideURL: "https://staging.example.com/base",
+			requestPath: "/files/a%2Fb?next=%2F",
+			want:        "https://staging.example.com/files/a%2Fb?next=%2F",
+		},
+		{
+			name:        "preserve empty query marker",
+			overrideURL: "https://staging.example.com/base",
+			requestPath: "/path?",
+			want:        "https://staging.example.com/path?",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Target.OverrideURL = tt.overrideURL
+			eng := New(cfg, metrics.New(cfg.Metrics))
+			got, err := eng.buildRequestURL(model.Event{HTTP: model.HTTPRequestMeta{Path: tt.requestPath}})
+			if err != nil {
+				t.Fatalf("buildRequestURL(%q) error: %v", tt.requestPath, err)
+			}
+			if got != tt.want {
+				t.Fatalf("buildRequestURL(%q) = %q, want %q", tt.requestPath, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNewEngineAbsoluteURLValidation(t *testing.T) {
 	tests := []struct {
 		name        string

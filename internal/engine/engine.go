@@ -1623,8 +1623,15 @@ func (e *Engine) buildRequestURL(event model.Event) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("parse request path: %w", err)
 		}
-		u := e.parsedOverrideURL.JoinPath(parsedPath.Path)
-		u.RawQuery = parsedPath.RawQuery
+		u := &url.URL{
+			Scheme:     e.parsedOverrideURL.Scheme,
+			User:       e.parsedOverrideURL.User,
+			Host:       e.parsedOverrideURL.Host,
+			Path:       parsedPath.Path,
+			RawPath:    parsedPath.RawPath,
+			RawQuery:   parsedPath.RawQuery,
+			ForceQuery: parsedPath.ForceQuery,
+		}
 		return u.String(), nil
 	}
 
