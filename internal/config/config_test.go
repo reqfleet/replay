@@ -75,6 +75,7 @@ func TestConfigPrecedence(t *testing.T) {
 
 	// env should override YAML
 	t.Setenv("REPLAY_OVERRIDE_URL", "http://fromenv")
+	t.Setenv("REPLAY_DISALLOW_RECORDED_TARGETS", "true")
 	t.Setenv("REPLAY_DRY_RUN", "true")
 	t.Setenv("METRICS_ENABLED", "true")
 	t.Setenv("TENANT_ID_FROM_ENV", "tenant-from-config-env")
@@ -86,6 +87,9 @@ func TestConfigPrecedence(t *testing.T) {
 
 	if cfg.Target.OverrideURL != "http://fromenv" {
 		t.Fatalf("override url not taken from env: %v", cfg.Target.OverrideURL)
+	}
+	if !cfg.Target.DisallowRecordedTargets {
+		t.Fatal("cfg.Target.DisallowRecordedTargets = false, want true")
 	}
 	if cfg.Replay.DryRun != true {
 		t.Fatalf("dry run not taken from env: %v", cfg.Replay.DryRun)
@@ -322,27 +326,27 @@ func TestValidateTargetOverride(t *testing.T) {
 	}{
 		{
 			name:   "valid_absolute_url",
-			target: TargetOverrideConfig{OverrideURL: "https://staging.example.com/base", Require: true},
+			target: TargetOverrideConfig{OverrideURL: "https://staging.example.com/base", DisallowRecordedTargets: true},
 			want:   "https://staging.example.com/base",
 		},
 		{
-			name:    "required_invalid_url",
-			target:  TargetOverrideConfig{OverrideURL: "example.com", Require: true},
+			name:    "invalid_url",
+			target:  TargetOverrideConfig{OverrideURL: "example.com"},
 			wantErr: true,
 		},
 		{
 			name:    "unsupported_scheme",
-			target:  TargetOverrideConfig{OverrideURL: "ftp://staging.example.com", Require: true},
+			target:  TargetOverrideConfig{OverrideURL: "ftp://staging.example.com"},
 			wantErr: true,
 		},
 		{
 			name:    "missing_hostname",
-			target:  TargetOverrideConfig{OverrideURL: "https:///base", Require: true},
+			target:  TargetOverrideConfig{OverrideURL: "https:///base"},
 			wantErr: true,
 		},
 		{
-			name:    "required_missing_url",
-			target:  TargetOverrideConfig{Require: true},
+			name:    "recorded_targets_disallowed_without_override",
+			target:  TargetOverrideConfig{DisallowRecordedTargets: true},
 			wantErr: true,
 		},
 		{

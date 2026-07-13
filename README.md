@@ -54,7 +54,7 @@ Configuration precedence (highest → lowest): CLI flags > environment variables
 Notable CLI flags (also available via env):
 - `--dry-run` / `REPLAY_DRY_RUN`: do not send network requests.
 - `--override-url` / `REPLAY_OVERRIDE_URL`: rewrite target host and URL.
-- `--require-override` / `REPLAY_REQUIRE_OVERRIDE`: fail if override missing.
+- `--disallow-recorded-targets` / `REPLAY_DISALLOW_RECORDED_TARGETS`: fail if no override is configured.
 - `--config` path: YAML config file (loaded before env and CLI overrides).
 
 Environment variables for metrics:
@@ -72,7 +72,7 @@ CLI flags are applied last and take highest precedence for safety-related settin
 ## Operator checklist (safe run)
 
 - Always run with `--dry-run` first to confirm traffic parsing and pacing without emitting network requests.
-- When replaying against non-production targets, use `--override-url` to direct traffic and consider setting `--require-override` in operators' configs to avoid accidental live traffic.
+- When replaying against non-production targets, use `--override-url` and consider setting `--disallow-recorded-targets` in operator configs to prevent accidental traffic to recorded destinations.
 - Verify the metrics endpoint (default `http://0.0.0.0:9102/metrics`) is reachable before and during runs.
 - If you need resumable runs, set `checkpoint.file` in the YAML to persist completed sequences per `node` + `connection_id`.
 

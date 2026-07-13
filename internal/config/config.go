@@ -118,15 +118,15 @@ type MetricLabel struct {
 }
 
 type TargetOverrideConfig struct {
-	OverrideURL string `yaml:"override_url"`
-	Require     bool   `yaml:"require_override"`
+	OverrideURL             string `yaml:"override_url"`
+	DisallowRecordedTargets bool   `yaml:"disallow_recorded_targets"`
 }
 
 // ParseURL validates and parses the configured target override.
 func (c TargetOverrideConfig) ParseURL() (*url.URL, error) {
 	if c.OverrideURL == "" {
-		if c.Require {
-			return nil, errors.New("target override required but missing")
+		if c.DisallowRecordedTargets {
+			return nil, errors.New("recorded targets are disallowed but target.override_url is empty")
 		}
 		return nil, nil
 	}
@@ -303,9 +303,9 @@ func (c *Config) ApplyEnv() {
 	if v, ok := os.LookupEnv("REPLAY_OVERRIDE_URL"); ok && v != "" {
 		c.Target.OverrideURL = v
 	}
-	if v, ok := os.LookupEnv("REPLAY_REQUIRE_OVERRIDE"); ok {
+	if v, ok := os.LookupEnv("REPLAY_DISALLOW_RECORDED_TARGETS"); ok {
 		if b, err := strconv.ParseBool(v); err == nil {
-			c.Target.Require = b
+			c.Target.DisallowRecordedTargets = b
 		}
 	}
 	if v, ok := os.LookupEnv("METRICS_ENABLED"); ok {

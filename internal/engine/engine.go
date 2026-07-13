@@ -140,8 +140,8 @@ func New(cfg config.Config, registry *metrics.Registry) *Engine {
 // synchronously as they arrive. HTTP/2 multiplexed requests are dispatched
 // concurrently on the shared per-connection client and joined at close/EOF.
 func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (Summary, error) {
-	if e.cfg.Target.Require && e.targetOverrideErr != nil {
-		return Summary{Outcome: RunFailed}, fmt.Errorf("validate required target override: %w", e.targetOverrideErr)
+	if e.targetOverrideErr != nil {
+		return Summary{Outcome: RunFailed}, fmt.Errorf("validate target override: %w", e.targetOverrideErr)
 	}
 	checkpoints, err := newCheckpointStore(e.cfg.Replay.Checkpoint.File)
 	if err != nil {
