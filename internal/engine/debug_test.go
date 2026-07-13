@@ -23,7 +23,7 @@ func TestIdempotencyPolicyInfersPostForBodyHeaders(t *testing.T) {
 		Headers: map[string][]string{"content-type": {"text/plain"}},
 	}
 
-	if got := eng.shouldSkipByIdempotencyPolicy(req); !got {
+	if got := eng.shouldSkipByIdempotencyPolicy(req, eng.effectiveRequestHeaders(req.Headers)); !got {
 		t.Fatalf("shouldSkipByIdempotencyPolicy(%+v) = %t, want true", req, got)
 	}
 }

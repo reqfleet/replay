@@ -504,12 +504,12 @@ func (e *Engine) processRequest(ctx context.Context, cs *connState, requestEvent
 		return true
 	}
 
-	reqKey, handled, abort := e.prepareRequest(cs, requestEvent, checkpoints)
+	reqKey, effectiveHeaders, handled, abort := e.prepareRequest(cs, requestEvent, checkpoints)
 	if handled {
 		return abort
 	}
 
-	exec, err := e.sendRequest(ctx, cs.client, requestEvent)
+	exec, err := e.sendRequest(ctx, cs.client, requestEvent, effectiveHeaders)
 	if err != nil {
 		e.finishRequestError(cs, requestEvent, err, exec)
 		return true
@@ -532,7 +532,7 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 	}
 
 	cs.h2Mu.Lock()
-	reqKey, handled, commitSequence := e.prepareConcurrentRequest(cs, requestEvent, checkpoints)
+	reqKey, effectiveHeaders, handled, commitSequence := e.prepareConcurrentRequest(cs, requestEvent, checkpoints)
 	cs.h2Mu.Unlock()
 	if commitSequence > 0 {
 		if err := checkpoints.markProcessed(reqKey, commitSequence); err != nil {
@@ -546,7 +546,7 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 	}
 
 	cs.h2WG.Go(func() {
-		exec, err := e.sendRequest(ctx, cs.client, requestEvent)
+		exec, err := e.sendRequest(ctx, cs.client, requestEvent, effectiveHeaders)
 		if err != nil {
 			cs.h2Mu.Lock()
 			e.finishRequestError(cs, requestEvent, err, exec)
@@ -588,58 +588,60 @@ func (e *Engine) paceRequest(ctx context.Context, cs *connState, requestEvent mo
 	return nil
 }
 
-func (e *Engine) prepareRequest(cs *connState, requestEvent model.Event, checkpoints *checkpointStore) (model.ConnectionKey, bool, bool) {
+func (e *Engine) prepareRequest(cs *connState, requestEvent model.Event, checkpoints *checkpointStore) (model.ConnectionKey, http.Header, bool, bool) {
 	reqKey := model.ConnectionKey{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID}
 
 	if checkpoints.alreadyProcessed(reqKey, requestEvent.Sequence) {
 		cs.skipped++
 		cs.skipValidationForSequence(requestEvent.Sequence)
-		return reqKey, true, false
+		return reqKey, nil, true, false
 	}
 
-	if e.shouldSkipByIdempotencyPolicy(requestEvent) {
+	effectiveHeaders := e.effectiveRequestHeaders(requestEvent.Headers)
+	if e.shouldSkipByIdempotencyPolicy(requestEvent, effectiveHeaders) {
 		cs.skipped++
 		cs.skipValidationForSequence(requestEvent.Sequence)
 		if err := checkpoints.markProcessed(reqKey, requestEvent.Sequence); err != nil {
 			cs.aborted = true
-			return reqKey, true, true
+			return reqKey, nil, true, true
 		}
-		return reqKey, true, false
+		return reqKey, nil, true, false
 	}
 
 	if e.cfg.Replay.DryRun {
 		cs.skipped++
 		cs.skipValidationForSequence(requestEvent.Sequence)
-		return reqKey, true, false
+		return reqKey, nil, true, false
 	}
 
-	return reqKey, false, false
+	return reqKey, effectiveHeaders, false, false
 }
 
-func (e *Engine) prepareConcurrentRequest(cs *connState, requestEvent model.Event, checkpoints *checkpointStore) (model.ConnectionKey, bool, int) {
+func (e *Engine) prepareConcurrentRequest(cs *connState, requestEvent model.Event, checkpoints *checkpointStore) (model.ConnectionKey, http.Header, bool, int) {
 	reqKey := model.ConnectionKey{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID}
 
 	if checkpoints.alreadyProcessed(reqKey, requestEvent.Sequence) {
 		cs.skipped++
 		cs.skipValidationForSequence(requestEvent.Sequence)
-		return reqKey, true, 0
+		return reqKey, nil, true, 0
 	}
 
-	if e.shouldSkipByIdempotencyPolicy(requestEvent) {
+	effectiveHeaders := e.effectiveRequestHeaders(requestEvent.Headers)
+	if e.shouldSkipByIdempotencyPolicy(requestEvent, effectiveHeaders) {
 		cs.skipped++
 		cs.skipValidationForSequence(requestEvent.Sequence)
 		cs.trackCheckpointSequence(requestEvent.Sequence)
-		return reqKey, true, cs.completeCheckpointSequence(requestEvent.Sequence)
+		return reqKey, nil, true, cs.completeCheckpointSequence(requestEvent.Sequence)
 	}
 
 	if e.cfg.Replay.DryRun {
 		cs.skipped++
 		cs.skipValidationForSequence(requestEvent.Sequence)
-		return reqKey, true, 0
+		return reqKey, nil, true, 0
 	}
 
 	cs.trackCheckpointSequence(requestEvent.Sequence)
-	return reqKey, false, 0
+	return reqKey, effectiveHeaders, false, 0
 }
 
 func (cs *connState) trackCheckpointSequence(sequence int) {
@@ -957,7 +959,8 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			continue
 		}
 
-		if e.shouldSkipByIdempotencyPolicy(requestEvent) {
+		effectiveHeaders := e.effectiveRequestHeaders(requestEvent.Headers)
+		if e.shouldSkipByIdempotencyPolicy(requestEvent, effectiveHeaders) {
 			result.Skipped++
 			delete(pendingResponses, requestEvent.Sequence)
 			if err := checkpoints.markProcessed(requestKey, requestEvent.Sequence); err != nil {
@@ -975,7 +978,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 			continue
 		}
 
-		exec, err := e.sendRequest(ctx, client, requestEvent)
+		exec, err := e.sendRequest(ctx, client, requestEvent, effectiveHeaders)
 
 		if err != nil {
 			result.SendErrors++
@@ -1191,7 +1194,7 @@ func (e *Engine) sleepForPacing(ctx context.Context, previous time.Time, previou
 
 // timestamp parsing moved to internal/model/ for reuse across packages
 
-func (e *Engine) shouldSkipByIdempotencyPolicy(request model.Event) bool {
+func (e *Engine) shouldSkipByIdempotencyPolicy(request model.Event, effectiveHeaders http.Header) bool {
 	policy := e.cfg.Replay.Idempotency
 	if !policy.Enabled {
 		return false
@@ -1211,7 +1214,7 @@ func (e *Engine) shouldSkipByIdempotencyPolicy(request model.Event) bool {
 		return true
 	}
 	for _, headerName := range policy.RequireHeaderForAllow {
-		if hasHeaderValue(request.Headers, headerName) {
+		if hasHeaderValue(effectiveHeaders, headerName) {
 			return false
 		}
 	}
@@ -1236,7 +1239,29 @@ func hasHeaderValue(headers map[string][]string, name string) bool {
 	return false
 }
 
-func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEvent model.Event) (requestExecution, error) {
+func (e *Engine) effectiveRequestHeaders(recorded map[string][]string) http.Header {
+	headers := make(http.Header, len(recorded)+len(e.cfg.Header.Set))
+	for key, values := range recorded {
+		if strings.HasPrefix(key, ":") {
+			continue
+		}
+		for _, value := range values {
+			headers.Add(key, value)
+		}
+	}
+	for _, headerName := range e.cfg.Header.Drop {
+		headers.Del(headerName)
+	}
+	if e.parsedOverrideURL != nil {
+		headers.Set("Host", e.parsedOverrideURL.Host)
+	}
+	for key, value := range e.cfg.Header.Set {
+		headers.Set(key, value)
+	}
+	return headers
+}
+
+func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEvent model.Event, effectiveHeaders http.Header) (requestExecution, error) {
 	maxAttempts := e.cfg.Replay.Retry.MaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 1
@@ -1245,7 +1270,7 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 	var lastExec requestExecution
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		exec, err := e.executeRequest(ctx, client, requestEvent)
+		exec, err := e.executeRequest(ctx, client, requestEvent, effectiveHeaders)
 		if err != nil {
 			lastErr = err
 			if exec.attempted {
@@ -1295,7 +1320,7 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 	return lastExec, nil
 }
 
-func (e *Engine) executeRequest(ctx context.Context, client *http.Client, requestEvent model.Event) (requestExecution, error) {
+func (e *Engine) executeRequest(ctx context.Context, client *http.Client, requestEvent model.Event, effectiveHeaders http.Header) (requestExecution, error) {
 	requestURL, err := e.buildRequestURL(requestEvent)
 	if err != nil {
 		return requestExecution{}, err
@@ -1316,28 +1341,10 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 		return requestExecution{}, err
 	}
 
-	for key, values := range requestEvent.Headers {
-		if strings.HasPrefix(key, ":") {
-			continue
-		}
-		for _, value := range values {
-			req.Header.Add(key, value)
-		}
-	}
-	for _, headerName := range e.cfg.Header.Drop {
-		req.Header.Del(headerName)
-	}
+	req.Header = effectiveHeaders
 
-	// Automatic Host/:authority rewrite when override_url is set.
-	if e.parsedOverrideURL != nil {
-		// set request Host to override host (preserves path/query in URL)
-		req.Host = e.parsedOverrideURL.Host
-		// also set Host header explicitly for clarity
-		req.Header.Set("Host", e.parsedOverrideURL.Host)
-	}
-
-	for key, value := range e.cfg.Header.Set {
-		req.Header.Set(key, value)
+	if host := req.Header.Get("Host"); host != "" {
+		req.Host = host
 	}
 
 	start := time.Now()
