@@ -395,6 +395,69 @@ func TestRetryErrorCategoryUsesStructuredErrors(t *testing.T) {
 	}
 }
 
+func TestMetricStatusForSendErrorUsesStructuredErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "nil",
+			want: "send_error",
+		},
+		{
+			name: "timeout",
+			err:  context.DeadlineExceeded,
+			want: "timeout",
+		},
+		{
+			name: "connection refused",
+			err: &net.OpError{
+				Op:  "dial",
+				Net: "tcp",
+				Err: syscall.ECONNREFUSED,
+			},
+			want: "connection_refused",
+		},
+		{
+			name: "connection reset",
+			err: &net.OpError{
+				Op:  "read",
+				Net: "tcp",
+				Err: syscall.ECONNRESET,
+			},
+			want: "connection_reset",
+		},
+		{
+			name: "TLS",
+			err:  tls.RecordHeaderError{Msg: "invalid record"},
+			want: "tls",
+		},
+		{
+			name: "network",
+			err: &net.DNSError{
+				Err:        "lookup failed",
+				Name:       "example.test",
+				IsNotFound: true,
+			},
+			want: "network",
+		},
+		{
+			name: "unstructured message",
+			err:  errors.New("connection reset during TLS dial tcp"),
+			want: "send_error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := metricStatusForSendError(tt.err); got != tt.want {
+				t.Errorf("metricStatusForSendError(%T) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestReplayMarksValidationFailedOnStatusMismatch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

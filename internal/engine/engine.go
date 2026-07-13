@@ -1452,6 +1452,14 @@ func (e *Engine) shouldRetryError(err error) bool {
 }
 
 func retryErrorCategory(err error) string {
+	category := transportErrorCategory(err)
+	if category == "connection_refused" {
+		return "network"
+	}
+	return category
+}
+
+func transportErrorCategory(err error) string {
 	if err == nil {
 		return ""
 	}
@@ -1461,6 +1469,9 @@ func retryErrorCategory(err error) string {
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return "timeout"
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "connection_refused"
 	}
 	if errors.Is(err, syscall.ECONNRESET) {
 		return "connection_reset"
@@ -1489,29 +1500,11 @@ func retryErrorCategory(err error) string {
 }
 
 func metricStatusForSendError(err error) string {
-	if err == nil {
+	category := transportErrorCategory(err)
+	if category == "" {
 		return "send_error"
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return "timeout"
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return "timeout"
-	}
-	lower := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(lower, "connection refused"):
-		return "connection_refused"
-	case strings.Contains(lower, "connection reset"):
-		return "connection_reset"
-	case strings.Contains(lower, "tls"):
-		return "tls"
-	case strings.Contains(lower, "dial tcp"), strings.Contains(lower, "no such host"):
-		return "network"
-	default:
-		return "send_error"
-	}
+	return category
 }
 
 func (e *Engine) metricLabelForRequest(requestEvent model.Event) string {
