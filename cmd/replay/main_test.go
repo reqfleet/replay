@@ -136,6 +136,40 @@ func TestRunReplayFromFile_TransportFailures(t *testing.T) {
 	}
 }
 
+func TestStartMetricsServer(t *testing.T) {
+	t.Run("returns bind failure synchronously", func(t *testing.T) {
+		occupied, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("net.Listen() error: %v", err)
+		}
+		defer occupied.Close()
+
+		listener, err := startMetricsServer(occupied.Addr().String(), http.NotFoundHandler())
+		if err == nil {
+			if listener != nil {
+				_ = listener.Close()
+			}
+			t.Fatal("startMetricsServer(occupied address) error = nil, want bind error")
+		}
+		if listener != nil {
+			t.Fatalf("startMetricsServer(occupied address) listener = %v, want nil", listener)
+		}
+	})
+
+	t.Run("returns bound listener", func(t *testing.T) {
+		listener, err := startMetricsServer("127.0.0.1:0", http.NotFoundHandler())
+		if err != nil {
+			t.Fatalf("startMetricsServer() error: %v", err)
+		}
+		if listener == nil {
+			t.Fatal("startMetricsServer() listener = nil")
+		}
+		if err := listener.Close(); err != nil {
+			t.Fatalf("listener.Close() error: %v", err)
+		}
+	})
+}
+
 func TestWaitForMetricsGracePeriod(t *testing.T) {
 	t.Run("waits for configured period", func(t *testing.T) {
 		ctx := context.Background()

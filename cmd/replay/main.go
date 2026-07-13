@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -73,6 +75,19 @@ func waitForMetricsGracePeriod(ctx context.Context, period time.Duration) {
 	case <-ctx.Done():
 	case <-timer.C:
 	}
+}
+
+func startMetricsServer(address string, handler http.Handler) (net.Listener, error) {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, fmt.Errorf("listen for metrics: %w", err)
+	}
+	go func() {
+		if serveErr := http.Serve(listener, handler); serveErr != nil && !errors.Is(serveErr, net.ErrClosed) {
+			slog.Error("metrics server stopped", "error", serveErr)
+		}
+	}()
+	return listener, nil
 }
 
 func main() {
@@ -162,12 +177,12 @@ func main() {
 		}
 		mux := http.NewServeMux()
 		mux.Handle(cfg.Metrics.Path, registry.Handler())
-		go func() {
-			if serveErr := http.ListenAndServe(cfg.Metrics.ListenAddress, mux); serveErr != nil {
-				slog.Error("metrics server stopped", "error", serveErr)
-			}
-		}()
-		slog.Info("metrics endpoint ready", "url", fmt.Sprintf("http://%s%s", cfg.Metrics.ListenAddress, cfg.Metrics.Path))
+		listener, listenErr := startMetricsServer(cfg.Metrics.ListenAddress, mux)
+		if listenErr != nil {
+			slog.Error("start metrics server", "error", listenErr)
+			os.Exit(2)
+		}
+		slog.Info("metrics endpoint ready", "url", fmt.Sprintf("http://%s%s", listener.Addr(), cfg.Metrics.Path))
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
