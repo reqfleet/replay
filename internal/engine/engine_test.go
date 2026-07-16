@@ -1264,10 +1264,10 @@ func TestReplayIdempotencyPolicyUsesRewrittenHeaders(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var attempts int64
+			var attempts atomic.Int64
 			var receivedHeader string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				atomic.AddInt64(&attempts, 1)
+				attempts.Add(1)
 				receivedHeader = r.Header.Get("Idempotency-Key")
 				w.WriteHeader(http.StatusOK)
 			}))
@@ -1310,7 +1310,7 @@ func TestReplayIdempotencyPolicyUsesRewrittenHeaders(t *testing.T) {
 			if got := summary.RequestsSent; got != tt.wantSent {
 				t.Errorf("summary.RequestsSent = %d, want %d", got, tt.wantSent)
 			}
-			if got := atomic.LoadInt64(&attempts); got != tt.wantAttempts {
+			if got := attempts.Load(); got != tt.wantAttempts {
 				t.Errorf("attempts = %d, want %d", got, tt.wantAttempts)
 			}
 			if receivedHeader != tt.wantHeader {
@@ -1752,7 +1752,7 @@ func TestReplayHTTP2SerializedMode(t *testing.T) {
 }
 
 func TestReplayHTTP2MultiplexedMode(t *testing.T) {
-	var maxInFlight int64
+	var maxInFlight atomic.Int64
 	var inFlight atomic.Int64
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		negotiatedProto := ""
@@ -1762,8 +1762,8 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 		t.Logf("Test server received request: %s Proto: %s NegotiatedProtocol: %q", r.URL.Path, r.Proto, negotiatedProto)
 		current := inFlight.Add(1)
 		for {
-			previous := atomic.LoadInt64(&maxInFlight)
-			if current <= previous || atomic.CompareAndSwapInt64(&maxInFlight, previous, current) {
+			previous := maxInFlight.Load()
+			if current <= previous || maxInFlight.CompareAndSwap(previous, current) {
 				break
 			}
 		}
@@ -1802,7 +1802,7 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 	// With InsecureSkipVerify set to true and a TLS server, true HTTP/2 multiplexing
 	// is enabled. Both requests will be processed concurrently over a single connection,
 	// so the maximum concurrent in-flight requests should be exactly 2.
-	if got := atomic.LoadInt64(&maxInFlight); got != 2 {
+	if got := maxInFlight.Load(); got != 2 {
 		t.Fatalf("max in-flight = %d, want exactly 2 for HTTP/2 multiplexed mode", got)
 	}
 }

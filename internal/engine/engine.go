@@ -12,6 +12,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -929,9 +930,7 @@ func cloneResponsesBySequence(responses map[int]model.Event) map[int]model.Event
 		return nil
 	}
 	cloned := make(map[int]model.Event, len(responses))
-	for sequence, response := range responses {
-		cloned[sequence] = response
-	}
+	maps.Copy(cloned, responses)
 	return cloned
 }
 
