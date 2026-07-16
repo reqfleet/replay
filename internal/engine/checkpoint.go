@@ -21,14 +21,15 @@ type checkpointData struct {
 }
 
 type checkpointStore struct {
-	mu         sync.Mutex
-	persistMu  sync.Mutex
-	closeOnce  sync.Once
-	path       string
-	data       checkpointData
-	dirty      bool
-	generation uint64
-	persistErr error
+	mu                  sync.Mutex
+	persistCond         *sync.Cond
+	closeOnce           sync.Once
+	path                string
+	data                checkpointData
+	persisting          bool
+	generation          uint64
+	persistedGeneration uint64
+	persistErr          error
 }
 
 func checkpointPath(path string, shardIndex, shardCount int) string {
@@ -49,6 +50,7 @@ func newCheckpointStore(path string) (*checkpointStore, error) {
 			Connections: map[model.ConnectionKey]int{},
 		},
 	}
+	store.persistCond = sync.NewCond(&store.mu)
 
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -109,53 +111,65 @@ func (c *checkpointStore) markProcessed(connectionKey model.ConnectionKey, seque
 	if sequence > c.data.Connections[connectionKey] {
 		c.data.Connections[connectionKey] = sequence
 		c.data.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		c.dirty = true
 		c.generation++
 	}
+	targetGeneration := c.generation
 	c.mu.Unlock()
 
-	// A successful return acknowledges that this watermark is on disk. Calling
-	// persist even for an already-seen sequence waits for any concurrent writer.
-	return c.persist()
+	// A successful return acknowledges that this caller's observed generation
+	// is on disk. Calls covered by the same snapshot return together instead of
+	// serially persisting generations that are already durable.
+	return c.persistThrough(targetGeneration)
 }
 
-func (c *checkpointStore) persist() error {
+func (c *checkpointStore) persistThrough(targetGeneration uint64) error {
 	if c == nil || c.path == "" {
 		return nil
 	}
 
-	c.persistMu.Lock()
-	defer c.persistMu.Unlock()
-
 	c.mu.Lock()
-	if !c.dirty {
-		err := c.persistErr
+	defer c.mu.Unlock()
+	for {
+		if c.persistErr != nil {
+			return c.persistErr
+		}
+		if c.persistedGeneration >= targetGeneration {
+			return nil
+		}
+		if c.persisting {
+			c.persistCond.Wait()
+			continue
+		}
+
+		generation := c.generation
+		copyData := checkpointData{
+			Version:     c.data.Version,
+			UpdatedAt:   c.data.UpdatedAt,
+			Connections: maps.Clone(c.data.Connections),
+		}
+		c.persisting = true
 		c.mu.Unlock()
-		return err
-	}
-	generation := c.generation
-	copyData := checkpointData{
-		Version:     c.data.Version,
-		UpdatedAt:   c.data.UpdatedAt,
-		Connections: maps.Clone(c.data.Connections),
-	}
-	c.mu.Unlock()
 
-	payload, err := json.Marshal(copyData)
+		err := persistCheckpointData(c.path, copyData)
+
+		c.mu.Lock()
+		if err != nil && c.persistErr == nil {
+			c.persistErr = err
+		}
+		if err == nil {
+			c.persistedGeneration = generation
+		}
+		c.persisting = false
+		c.persistCond.Broadcast()
+	}
+}
+
+func persistCheckpointData(path string, data checkpointData) error {
+	payload, err := json.Marshal(data)
 	if err != nil {
-		return c.recordPersistenceError(fmt.Errorf("marshal checkpoint: %w", err))
+		return fmt.Errorf("marshal checkpoint: %w", err)
 	}
-	if err := writeCheckpointFile(c.path, payload); err != nil {
-		return c.recordPersistenceError(err)
-	}
-
-	c.mu.Lock()
-	if c.generation == generation {
-		c.dirty = false
-	}
-	err = c.persistErr
-	c.mu.Unlock()
-	return err
+	return writeCheckpointFile(path, payload)
 }
 
 func writeCheckpointFile(path string, payload []byte) error {
@@ -201,23 +215,16 @@ func writeCheckpointFile(path string, payload []byte) error {
 	return nil
 }
 
-func (c *checkpointStore) recordPersistenceError(err error) error {
-	c.mu.Lock()
-	if c.persistErr == nil {
-		c.persistErr = err
-	}
-	storedErr := c.persistErr
-	c.mu.Unlock()
-	return storedErr
-}
-
 // Close completes any outstanding write and returns the first persistence error.
 func (c *checkpointStore) Close() error {
 	if c == nil {
 		return nil
 	}
 	c.closeOnce.Do(func() {
-		_ = c.persist()
+		c.mu.Lock()
+		targetGeneration := c.generation
+		c.mu.Unlock()
+		_ = c.persistThrough(targetGeneration)
 	})
 	c.mu.Lock()
 	defer c.mu.Unlock()
