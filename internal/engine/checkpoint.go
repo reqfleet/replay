@@ -128,12 +128,14 @@ func (c *checkpointStore) persistThrough(targetGeneration uint64) error {
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	for {
 		if c.persistErr != nil {
-			return c.persistErr
+			err := c.persistErr
+			c.mu.Unlock()
+			return err
 		}
 		if c.persistedGeneration >= targetGeneration {
+			c.mu.Unlock()
 			return nil
 		}
 		if c.persisting {
