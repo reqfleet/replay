@@ -114,6 +114,60 @@ func TestCheckpointPersistsEveryAdvance(t *testing.T) {
 	}
 }
 
+func TestCheckpointConcurrentMarksAreDurableOnReturn(t *testing.T) {
+	const marks = 32
+
+	path := filepath.Join(t.TempDir(), "checkpoint.json")
+	store, err := newCheckpointStore(path)
+	if err != nil {
+		t.Fatalf("newCheckpointStore(%q) error: %v", path, err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, marks)
+	var wg sync.WaitGroup
+	wg.Add(marks)
+	for connectionID := 1; connectionID <= marks; connectionID++ {
+		go func() {
+			defer wg.Done()
+			<-start
+
+			key := model.ConnectionKey{Node: "envoy-a", ConnectionID: connectionID}
+			if err := store.markProcessed(key, 1); err != nil {
+				results <- fmt.Errorf("markProcessed(%v, 1): %w", key, err)
+				return
+			}
+			payload, err := os.ReadFile(path)
+			if err != nil {
+				results <- fmt.Errorf("os.ReadFile(%q) after markProcessed(%v, 1): %w", path, key, err)
+				return
+			}
+			var data checkpointData
+			if err := json.Unmarshal(payload, &data); err != nil {
+				results <- fmt.Errorf("json.Unmarshal(checkpoint) after markProcessed(%v, 1): %w", key, err)
+				return
+			}
+			if got := data.Connections[key]; got != 1 {
+				results <- fmt.Errorf("checkpoint sequence after markProcessed(%v, 1) = %d, want 1", key, got)
+				return
+			}
+			results <- nil
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	for err := range results {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Errorf("store.Close() error: %v", err)
+	}
+}
+
 func TestCheckpointRejectsUnsupportedVersions(t *testing.T) {
 	tests := []struct {
 		name    string
