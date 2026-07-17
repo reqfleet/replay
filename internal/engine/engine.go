@@ -1393,8 +1393,8 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	if bodyTruncated {
 		body = body[:maxBodyRead]
 	}
-	var drainedBytes int64
-	if err == nil {
+	if err == nil && bodyTruncated {
+		var drainedBytes int64
 		drainedBytes, err = io.Copy(bodyHasher, resp.Body)
 		bodySize += drainedBytes
 	}
