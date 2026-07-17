@@ -62,6 +62,7 @@ Each line in the NDJSON file represents one event.
 {
   "type": "meta",
   "format_version": "1.0",
+  "response_expectations": "response_events",
   "generator": "envoy-sidecar-recorder",
   "created_at": "2026-02-27T03:10:21.123Z",
   "node": "pod-abc-123",
@@ -74,6 +75,25 @@ Purpose:
 * Enables schema evolution
 * Identifies recording environment
 * Prevents incompatible replay
+* Declares whether historical response expectations exist
+
+`response_expectations` SHOULD be present in format `1.0`. It accepts:
+
+| Value | Recording contract |
+| --- | --- |
+| `none` | The recording contains no historical response expectations. |
+| `request_status` | Completed request events carry expected response status in `status`. |
+| `response_events` | Separate `response` events carry expected status, headers, or body. |
+
+Replay rejects unknown values. Recordings that omit the field preserve the
+legacy validation behavior for compatibility.
+
+When `response_expectations` is `none`, replay bypasses historical response
+validation and its rendezvous state. If response validation is enabled in the
+runtime configuration, replay emits a warning and disables it for that run.
+Target status metrics, retries, transfer-error detection, response body
+consumption, egress byte accounting, latency measurement, and connection reuse
+remain active.
 
 ---
 

@@ -197,6 +197,138 @@ func TestResponseHeaderBytes(t *testing.T) {
 	}
 }
 
+func TestExecuteRequestRetainsResponseHeadersOnlyForValidation(t *testing.T) {
+	tests := []struct {
+		name              string
+		validationEnabled bool
+		headerValidation  bool
+		wantHeaders       bool
+	}{
+		{
+			name:              "validation_disabled",
+			validationEnabled: false,
+			headerValidation:  true,
+			wantHeaders:       false,
+		},
+		{
+			name:              "status_validation_only",
+			validationEnabled: true,
+			headerValidation:  false,
+			wantHeaders:       false,
+		},
+		{
+			name:              "header_validation",
+			validationEnabled: true,
+			headerValidation:  true,
+			wantHeaders:       true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			responseHeaders := http.Header{"X-Test": {"one", "two"}}
+			client := &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     responseHeaders,
+						Body:       io.NopCloser(strings.NewReader("ok")),
+						Request:    req,
+					}, nil
+				}),
+			}
+			cfg := config.Default()
+			cfg.Replay.Validation.Enabled = tt.validationEnabled
+			cfg.Replay.Validation.Headers = tt.headerValidation
+			eng := New(cfg, metrics.New(cfg.Metrics))
+			requestEvent := model.Event{HTTP: model.HTTPRequestMeta{
+				Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/",
+			}}
+
+			exec, err := eng.executeRequest(
+				context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil),
+			)
+			if err != nil {
+				t.Fatalf("executeRequest(validation enabled=%t, headers=%t) error: %v", tt.validationEnabled, tt.headerValidation, err)
+			}
+			wantEgressBytes := int64(len("ok")) + responseHeaderBytes(responseHeaders)
+			if got := exec.egressBytes; got != wantEgressBytes {
+				t.Errorf("executeRequest(validation enabled=%t, headers=%t).egressBytes = %d, want %d", tt.validationEnabled, tt.headerValidation, got, wantEgressBytes)
+			}
+			if !tt.wantHeaders {
+				if exec.headers != nil {
+					t.Errorf("executeRequest(validation enabled=%t, headers=%t).headers = %v, want nil", tt.validationEnabled, tt.headerValidation, exec.headers)
+				}
+				return
+			}
+			values, ok := exec.headers["x-test"]
+			if !ok || len(values) != 2 || values[0] != "one" || values[1] != "two" {
+				t.Errorf("executeRequest(validation enabled=%t, headers=%t).headers[x-test] = %v, want [one two]", tt.validationEnabled, tt.headerValidation, values)
+			}
+			if _, ok := exec.headers["X-Test"]; ok {
+				t.Errorf("executeRequest(validation enabled=%t, headers=%t).headers contains non-normalized key X-Test", tt.validationEnabled, tt.headerValidation)
+			}
+			responseHeaders["X-Test"][0] = "changed"
+			if got := exec.headers["x-test"][0]; got != "one" {
+				t.Errorf("executeRequest(validation enabled=%t, headers=%t).headers[x-test][0] after source mutation = %q, want %q", tt.validationEnabled, tt.headerValidation, got, "one")
+			}
+		})
+	}
+}
+
+func TestConfigureValidationForExpectationFreeRecording(t *testing.T) {
+	var logOutput bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logOutput, nil)))
+	t.Cleanup(func() {
+		slog.SetDefault(previousLogger)
+	})
+
+	cfg := config.Default()
+	cfg.Replay.Validation.Status = true
+	cfg.Replay.Validation.Headers = true
+	cfg.Replay.Validation.Body = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	eng.configureValidationForRecording(context.Background(), model.ResponseExpectationsNone)
+
+	if eng.cfg.Replay.Validation.Enabled {
+		t.Error("configureValidationForRecording(none) left validation enabled, want disabled")
+	}
+	cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
+	if cs.pendingActual != nil || cs.pendingExpected != nil || cs.pendingInlineExpected != nil {
+		t.Errorf("newConnState(none) validation maps = (%v, %v, %v), want all nil", cs.pendingActual, cs.pendingExpected, cs.pendingInlineExpected)
+	}
+	cs.skipValidationForSequence(1)
+	if cs.skippedValidation != nil {
+		t.Errorf("skipValidationForSequence(1).skippedValidation = %v, want nil for expectation-free recording", cs.skippedValidation)
+	}
+	if got := logOutput.String(); !strings.Contains(got, "response validation disabled for expectation-free recording") {
+		t.Errorf("configureValidationForRecording(none) log output = %q, want warning", got)
+	}
+}
+
+func TestConfigureValidationPreservesDeclaredExpectations(t *testing.T) {
+	modes := []model.ResponseExpectationMode{
+		"",
+		model.ResponseExpectationsRequestStatus,
+		model.ResponseExpectationsResponseEvents,
+	}
+	for _, mode := range modes {
+		t.Run(string(mode), func(t *testing.T) {
+			cfg := config.Default()
+			eng := New(cfg, metrics.New(cfg.Metrics))
+			eng.configureValidationForRecording(context.Background(), mode)
+
+			if !eng.cfg.Replay.Validation.Enabled {
+				t.Errorf("configureValidationForRecording(%q) disabled validation, want enabled", mode)
+			}
+			cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
+			if cs.pendingActual == nil || cs.pendingExpected == nil || cs.pendingInlineExpected == nil {
+				t.Errorf("newConnState(%q) validation maps = (%v, %v, %v), want all initialized", mode, cs.pendingActual, cs.pendingExpected, cs.pendingInlineExpected)
+			}
+		})
+	}
+}
+
 func TestExecuteRequestDoesNotReadAfterResponseEOF(t *testing.T) {
 	tests := []struct {
 		name string
@@ -427,6 +559,112 @@ func TestReplayRetriesOnConfiguredStatus(t *testing.T) {
 	}
 	if got, want := latencySampleCount(t, reg, commonLabelValues, "/"), uint64(2); got != want {
 		t.Fatalf("latency sample count = %d, want %d", got, want)
+	}
+}
+
+func TestExpectationFreeRecordingPreservesResponseProcessing(t *testing.T) {
+	var attempts atomic.Int64
+	var remoteMu sync.Mutex
+	remoteAddresses := make(map[string]struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remoteMu.Lock()
+		remoteAddresses[r.RemoteAddr] = struct{}{}
+		remoteMu.Unlock()
+
+		current := attempts.Add(1)
+		w.Header().Set("X-Test", "response")
+		if current == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("retry"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(srv.Close)
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+
+	cfg := config.Default()
+	cfg.Replay.Validation.Status = true
+	cfg.Replay.Validation.Headers = true
+	cfg.Replay.Validation.Body = true
+	cfg.Replay.Retry.MaxAttempts = 2
+	cfg.Replay.Retry.Backoff = "none"
+	cfg.Replay.Retry.RetryOnStatuses = []int{http.StatusServiceUnavailable}
+	reg := metrics.New(cfg.Metrics)
+	eng := New(cfg, reg)
+	requestEvent := func(sequence int) model.Event {
+		return model.Event{
+			Type:          model.EventRequest,
+			AccessLogType: model.AccessLogTypeDownstreamStart,
+			ConnectionID:  1,
+			Sequence:      sequence,
+			HTTP: model.HTTPRequestMeta{
+				Method:    http.MethodGet,
+				Scheme:    target.Scheme,
+				Authority: target.Host,
+				Path:      "/",
+			},
+		}
+	}
+	events := []model.Event{
+		{
+			Type:                 model.EventMeta,
+			ResponseExpectations: model.ResponseExpectationsNone,
+		},
+		{Type: model.EventConnectionOpen, ConnectionID: 1},
+		requestEvent(1),
+		requestEvent(2),
+		{Type: model.EventConnectionClose, ConnectionID: 1},
+	}
+
+	summary, err := runReplay(eng, events)
+	if err != nil {
+		t.Fatalf("ReplayStream(expectation-free recording) error: %v", err)
+	}
+	if got, want := summary.RequestsSent, int64(2); got != want {
+		t.Errorf("ReplayStream(expectation-free recording).RequestsSent = %d, want %d", got, want)
+	}
+	if got, want := summary.ResponsesReceived, int64(2); got != want {
+		t.Errorf("ReplayStream(expectation-free recording).ResponsesReceived = %d, want %d", got, want)
+	}
+	if got := summary.ValidationFailed; got != 0 {
+		t.Errorf("ReplayStream(expectation-free recording).ValidationFailed = %d, want 0", got)
+	}
+	if got, want := summary.Outcome, RunSuccess; got != want {
+		t.Errorf("ReplayStream(expectation-free recording).Outcome = %q, want %q", got, want)
+	}
+	if got, want := attempts.Load(), int64(3); got != want {
+		t.Errorf("ReplayStream(expectation-free recording) attempts = %d, want %d", got, want)
+	}
+	remoteMu.Lock()
+	connectionCount := len(remoteAddresses)
+	remoteMu.Unlock()
+	if connectionCount != 1 {
+		t.Errorf("ReplayStream(expectation-free recording) target connections = %d, want 1", connectionCount)
+	}
+	if !eng.cfg.Replay.Validation.Enabled {
+		t.Error("ReplayStream(expectation-free recording) mutated engine validation config, want per-run override")
+	}
+
+	commonLabelValues := cfg.Metrics.CommonLabelValues()
+	status503 := reg.StatusCounter.WithLabelValues(append(commonLabelValues, "/", "503")...)
+	if got, want := testutil.ToFloat64(status503), float64(1); got != want {
+		t.Errorf("expectation-free 503 status counter = %v, want %v", got, want)
+	}
+	status200 := reg.StatusCounter.WithLabelValues(append(commonLabelValues, "/", "200")...)
+	if got, want := testutil.ToFloat64(status200), float64(2); got != want {
+		t.Errorf("expectation-free 200 status counter = %v, want %v", got, want)
+	}
+	if got, want := latencySampleCount(t, reg, commonLabelValues, "/"), uint64(3); got != want {
+		t.Errorf("expectation-free latency sample count = %d, want %d", got, want)
+	}
+	egress := reg.EgressCounter.WithLabelValues(append(commonLabelValues, "/")...)
+	if got, minimum := testutil.ToFloat64(egress), float64(len("retryokok")); got <= minimum {
+		t.Errorf("expectation-free egress counter = %v, want more than body bytes %v", got, minimum)
 	}
 }
 

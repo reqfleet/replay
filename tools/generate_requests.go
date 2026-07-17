@@ -38,6 +38,13 @@ func generatedAccessLogType(raw string) (model.AccessLogType, error) {
 	}
 }
 
+func generatedResponseExpectations(logType model.AccessLogType) model.ResponseExpectationMode {
+	if logType == model.AccessLogTypeDownstreamStart {
+		return model.ResponseExpectationsNone
+	}
+	return model.ResponseExpectationsRequestStatus
+}
+
 func generatedRequestEvent(logType model.AccessLogType, connID int, ts time.Time, authority, scheme, port, apiKey, requestPath string, status int, durationMS float64) model.Event {
 	req := model.Event{
 		Type:          model.EventRequest,
@@ -69,8 +76,9 @@ func generatedRequestEvent(logType model.AccessLogType, connID int, ts time.Time
 
 func emitGeneratedEvents(logType model.AccessLogType, reqs, conns int, now time.Time, authority, scheme, port, apiKey, requestPath string, status int, durationMS float64, emit func(model.Event) error) error {
 	if err := emit(model.Event{
-		Type:          model.EventMeta,
-		FormatVersion: "1.0",
+		Type:                 model.EventMeta,
+		FormatVersion:        "1.0",
+		ResponseExpectations: generatedResponseExpectations(logType),
 	}); err != nil {
 		return err
 	}

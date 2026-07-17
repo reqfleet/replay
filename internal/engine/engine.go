@@ -157,6 +157,8 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 		drainEvents(events)
 		return Summary{Outcome: RunFailed}, fmt.Errorf("validate target override: %w", e.targetOverrideErr)
 	}
+	runtimeEngine := *e
+	e = &runtimeEngine
 	checkpoints, err := newCheckpointStore(checkpointPath(
 		e.cfg.Replay.Checkpoint.File,
 		e.cfg.Replay.Sharding.ShardIndex,
@@ -261,15 +263,19 @@ type connState struct {
 }
 
 func (e *Engine) newConnState(connKey model.ConnectionKey) *connState {
-	return &connState{
-		connKey:               connKey,
-		pendingActual:         make(map[int]requestExecution),
-		pendingExpected:       make(map[int]model.Event),
-		pendingInlineExpected: make(map[int]model.Event),
+	cs := &connState{connKey: connKey}
+	if e.shouldRetainResponseForValidation() {
+		cs.pendingActual = make(map[int]requestExecution)
+		cs.pendingExpected = make(map[int]model.Event)
+		cs.pendingInlineExpected = make(map[int]model.Event)
 	}
+	return cs
 }
 
 func (cs *connState) skipValidationForSequence(sequence int) {
+	if cs.pendingActual == nil {
+		return
+	}
 	if sequence <= 0 {
 		return
 	}
@@ -311,11 +317,20 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 	connWorker := make(map[model.ConnectionKey]int)
 	vus := len(workerChs)
 	nextWorker := 0
-
+	seenEvent := false
 	for ev := range events {
 		if ev.Type == model.EventMeta {
+			if seenEvent {
+				return errors.New("meta event must be first")
+			}
+			seenEvent = true
+			if !ev.ResponseExpectations.Valid() {
+				return fmt.Errorf("invalid response_expectations: %q", ev.ResponseExpectations)
+			}
+			e.configureValidationForRecording(ctx, ev.ResponseExpectations)
 			continue
 		}
+		seenEvent = true
 
 		connKey := model.ConnectionKey{Node: ev.Node, ConnectionID: ev.ConnectionID}
 		if !connectionBelongsToShard(connKey, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
@@ -354,6 +369,21 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 	}
 
 	return nil
+}
+
+func (e *Engine) configureValidationForRecording(ctx context.Context, expectations model.ResponseExpectationMode) {
+	if expectations != model.ResponseExpectationsNone {
+		return
+	}
+	if e.cfg.Replay.Validation.Enabled {
+		slog.WarnContext(
+			ctx,
+			"response validation disabled for expectation-free recording",
+			"response_expectations",
+			expectations,
+		)
+	}
+	e.cfg.Replay.Validation.Enabled = false
 }
 
 // runEventWorker processes events from its channel using per-connection state.
@@ -1422,11 +1452,12 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 		}, err
 	}
 
-	headers := make(map[string][]string, len(resp.Header))
-	for key, values := range resp.Header {
-		copied := make([]string, len(values))
-		copy(copied, values)
-		headers[strings.ToLower(key)] = copied
+	var headers map[string][]string
+	if validation.Enabled && validation.Headers {
+		headers = make(map[string][]string, len(resp.Header))
+		for key, values := range resp.Header {
+			headers[strings.ToLower(key)] = slices.Clone(values)
+		}
 	}
 
 	return requestExecution{

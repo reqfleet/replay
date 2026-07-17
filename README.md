@@ -85,7 +85,25 @@ In addition to the summary printed to stdout, the engine maintains aggregate out
 
 ## Migration note
 
-The parser is stricter now: the NDJSON meta header and format version are validated by default. Older logs that relied on permissive parsing may need normalizing or an intermediate conversion step.
+When an NDJSON meta header is present, its format version and declared response-expectation capability are validated. Older logs without the optional capability retain legacy validation behavior.
+
+## Recording response expectations
+
+Format `1.0` recordings SHOULD declare their historical response shape in the
+first `meta` event:
+
+```json
+{"type":"meta","format_version":"1.0","response_expectations":"none"}
+```
+
+Allowed capabilities are `none`, `request_status`, and `response_events`.
+`none` is appropriate for request-start-only recordings such as
+`DownstreamStart`: replay warns if response validation is configured, disables
+historical validation for that run, and does not allocate response-validation
+rendezvous maps. Target response status metrics, retries, transfer errors, body
+draining, byte accounting, latency, and connection reuse continue unchanged.
+Use `request_status` when each completed request event carries its expected
+`status`, and `response_events` when the log contains separate `response` events.
 
 ## Example config (replay/config.yaml)
 
