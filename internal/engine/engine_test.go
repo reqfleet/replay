@@ -226,6 +226,7 @@ func TestExecuteRequestDoesNotReadAfterResponseEOF(t *testing.T) {
 				}),
 			}
 			cfg := config.Default()
+			cfg.Replay.Validation.Body = true
 			eng := New(cfg, metrics.New(cfg.Metrics))
 			requestEvent := model.Event{HTTP: model.HTTPRequestMeta{
 				Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/",
@@ -276,6 +277,7 @@ func TestExecuteRequestIncludesDrainedBodyInEgressBytesOnReadError(t *testing.T)
 		}),
 	}
 	cfg := config.Default()
+	cfg.Replay.Validation.Body = true
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	requestEvent := model.Event{HTTP: model.HTTPRequestMeta{
 		Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/",
