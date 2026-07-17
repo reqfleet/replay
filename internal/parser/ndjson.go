@@ -201,9 +201,6 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			if parts[0] != "1" {
 				return fmt.Errorf("line %d: unsupported format_version: %s", line, fv)
 			}
-			if !event.ResponseExpectations.Valid() {
-				return fmt.Errorf("line %d: invalid response_expectations: %q", line, event.ResponseExpectations)
-			}
 		}
 
 		// Basic timestamp validation when present

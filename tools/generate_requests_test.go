@@ -39,33 +39,10 @@ func TestGeneratedAccessLogTypeRejectsUnknown(t *testing.T) {
 	}
 }
 
-func TestGeneratedEventsDeclareResponseExpectations(t *testing.T) {
-	tests := []struct {
-		name    string
-		logType model.AccessLogType
-		want    model.ResponseExpectationMode
-	}{
-		{
-			name:    "downstream_start",
-			logType: model.AccessLogTypeDownstreamStart,
-			want:    model.ResponseExpectationsNone,
-		},
-		{
-			name:    "downstream_end",
-			logType: model.AccessLogTypeDownstreamEnd,
-			want:    model.ResponseExpectationsRequestStatus,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			events := generatedEvents(tt.logType, 1, 1, time.Unix(100, 0).UTC(), "example.com", "http", "80", "key", "/resource", 200, 16)
-			if got, want := events[0].FormatVersion, "1.0"; got != want {
-				t.Errorf("generatedEvents(%q)[0].FormatVersion = %q, want %q", tt.logType, got, want)
-			}
-			if got := events[0].ResponseExpectations; got != tt.want {
-				t.Errorf("generatedEvents(%q)[0].ResponseExpectations = %q, want %q", tt.logType, got, tt.want)
-			}
-		})
+func TestGeneratedEventsDeclareFormatVersion(t *testing.T) {
+	events := generatedEvents(model.AccessLogTypeDownstreamEnd, 1, 1, time.Unix(100, 0).UTC(), "example.com", "http", "80", "key", "/resource", 200, 16)
+	if got, want := events[0].FormatVersion, "1.0"; got != want {
+		t.Errorf("generatedEvents()[0].FormatVersion = %q, want %q", got, want)
 	}
 }
 

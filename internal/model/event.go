@@ -17,36 +17,18 @@ const (
 	AccessLogTypeDownstreamEnd   AccessLogType = "DownstreamEnd"
 )
 
-type ResponseExpectationMode string
-
-const (
-	ResponseExpectationsNone           ResponseExpectationMode = "none"
-	ResponseExpectationsRequestStatus  ResponseExpectationMode = "request_status"
-	ResponseExpectationsResponseEvents ResponseExpectationMode = "response_events"
-)
-
-func (m ResponseExpectationMode) Valid() bool {
-	switch m {
-	case "", ResponseExpectationsNone, ResponseExpectationsRequestStatus, ResponseExpectationsResponseEvents:
-		return true
-	default:
-		return false
-	}
-}
-
 type Event struct {
-	Type                 EventType               `json:"type"`
-	FormatVersion        string                  `json:"format_version,omitempty"`
-	ResponseExpectations ResponseExpectationMode `json:"response_expectations,omitempty"`
-	Node                 string                  `json:"node,omitempty"`
-	ConnectionID         int                     `json:"connection_id"`
-	StreamID             int                     `json:"stream_id,omitempty"`
-	Sequence             int                     `json:"sequence,omitempty"`
-	Timestamp            string                  `json:"timestamp,omitempty"`
-	Status               int                     `json:"status,omitempty"`
-	DurationMS           float64                 `json:"duration_ms,omitempty"`
-	Reason               string                  `json:"reason,omitempty"`
-	AccessLogType        AccessLogType           `json:"log_type,omitempty"`
+	Type          EventType     `json:"type"`
+	FormatVersion string        `json:"format_version,omitempty"`
+	Node          string        `json:"node,omitempty"`
+	ConnectionID  int           `json:"connection_id"`
+	StreamID      int           `json:"stream_id,omitempty"`
+	Sequence      int           `json:"sequence,omitempty"`
+	Timestamp     string        `json:"timestamp,omitempty"`
+	Status        int           `json:"status,omitempty"`
+	DurationMS    float64       `json:"duration_ms,omitempty"`
+	Reason        string        `json:"reason,omitempty"`
+	AccessLogType AccessLogType `json:"log_type,omitempty"`
 	// Connection open metadata
 	DownstreamRemoteAddress string              `json:"downstream_remote_address,omitempty"`
 	DownstreamLocalAddress  string              `json:"downstream_local_address,omitempty"`

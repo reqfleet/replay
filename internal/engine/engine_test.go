@@ -275,90 +275,6 @@ func TestExecuteRequestRetainsResponseHeadersOnlyForHeaderValidation(t *testing.
 	}
 }
 
-func TestValidateRecordingExpectations(t *testing.T) {
-	tests := []struct {
-		name         string
-		expectations model.ResponseExpectationMode
-		status       bool
-		headers      bool
-		body         bool
-		wantErr      bool
-	}{
-		{
-			name:         "none_without_checks",
-			expectations: model.ResponseExpectationsNone,
-		},
-		{
-			name:         "none_with_status",
-			expectations: model.ResponseExpectationsNone,
-			status:       true,
-			wantErr:      true,
-		},
-		{
-			name:         "none_with_headers",
-			expectations: model.ResponseExpectationsNone,
-			headers:      true,
-			wantErr:      true,
-		},
-		{
-			name:         "none_with_body",
-			expectations: model.ResponseExpectationsNone,
-			body:         true,
-			wantErr:      true,
-		},
-		{
-			name:         "request_status_with_status",
-			expectations: model.ResponseExpectationsRequestStatus,
-			status:       true,
-		},
-		{
-			name:         "request_status_with_headers",
-			expectations: model.ResponseExpectationsRequestStatus,
-			headers:      true,
-			wantErr:      true,
-		},
-		{
-			name:         "request_status_with_body",
-			expectations: model.ResponseExpectationsRequestStatus,
-			body:         true,
-			wantErr:      true,
-		},
-		{
-			name:         "response_events_with_all_checks",
-			expectations: model.ResponseExpectationsResponseEvents,
-			status:       true,
-			headers:      true,
-			body:         true,
-		},
-		{
-			name:         "legacy_unspecified_with_all_checks",
-			expectations: "",
-			status:       true,
-			headers:      true,
-			body:         true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := config.Default()
-			cfg.Replay.Validation.Status = tt.status
-			cfg.Replay.Validation.Headers = tt.headers
-			cfg.Replay.Validation.Body = tt.body
-			eng := New(cfg, metrics.New(cfg.Metrics))
-
-			err := eng.validateRecordingExpectations(tt.expectations)
-			if gotErr := err != nil; gotErr != tt.wantErr {
-				t.Errorf(
-					"validateRecordingExpectations(%q) error = %v, want error presence %t",
-					tt.expectations,
-					err,
-					tt.wantErr,
-				)
-			}
-		})
-	}
-}
-
 func TestExecuteRequestDoesNotReadAfterResponseEOF(t *testing.T) {
 	tests := []struct {
 		name string
@@ -641,10 +557,7 @@ func TestExpectationFreeRecordingPreservesResponseProcessing(t *testing.T) {
 		}
 	}
 	events := []model.Event{
-		{
-			Type:                 model.EventMeta,
-			ResponseExpectations: model.ResponseExpectationsNone,
-		},
+		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		requestEvent(1),
 		requestEvent(2),

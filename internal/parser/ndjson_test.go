@@ -30,46 +30,6 @@ func TestParseSuccess(t *testing.T) {
 	}
 }
 
-func TestParseResponseExpectationModes(t *testing.T) {
-	modes := []model.ResponseExpectationMode{
-		model.ResponseExpectationsNone,
-		model.ResponseExpectationsRequestStatus,
-		model.ResponseExpectationsResponseEvents,
-	}
-	for _, want := range modes {
-		t.Run(string(want), func(t *testing.T) {
-			input := strings.NewReader(
-				`{"type":"meta","format_version":"1.0","response_expectations":"` +
-					string(want) +
-					`"}` + "\n",
-			)
-			var events []model.Event
-			if err := ParseStream(input, func(event model.Event) error {
-				events = append(events, event)
-				return nil
-			}); err != nil {
-				t.Fatalf("ParseStream(response_expectations=%q) error: %v", want, err)
-			}
-			if got := events[0].ResponseExpectations; got != want {
-				t.Errorf("ParseStream(response_expectations=%q) = %q, want %q", want, got, want)
-			}
-		})
-	}
-}
-
-func TestParseRejectsInvalidResponseExpectations(t *testing.T) {
-	input := strings.NewReader(
-		`{"type":"meta","format_version":"1.0","response_expectations":"sideways"}` + "\n",
-	)
-	err := ParseStream(input, func(model.Event) error { return nil })
-	if err == nil {
-		t.Fatal("ParseStream(response_expectations=\"sideways\") error = nil, want error")
-	}
-	if !strings.Contains(err.Error(), `invalid response_expectations: "sideways"`) {
-		t.Errorf("ParseStream(response_expectations=\"sideways\") error = %q, want invalid response_expectations", err)
-	}
-}
-
 func TestParseDownstreamStartAccessLogAsRequest(t *testing.T) {
 	input := strings.NewReader("{" +
 		`"type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z","http":{"method":"GET","authority":"example.com","path":"/start"}` +

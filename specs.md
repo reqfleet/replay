@@ -62,7 +62,6 @@ Each line in the NDJSON file represents one event.
 {
   "type": "meta",
   "format_version": "1.0",
-  "response_expectations": "response_events",
   "generator": "envoy-sidecar-recorder",
   "created_at": "2026-02-27T03:10:21.123Z",
   "node": "pod-abc-123",
@@ -75,26 +74,7 @@ Purpose:
 * Enables schema evolution
 * Identifies recording environment
 * Prevents incompatible replay
-* Declares whether historical response expectations exist
 
-`response_expectations` SHOULD be present in format `1.0`. It accepts:
-
-| Value | Recording contract |
-| --- | --- |
-| `none` | The recording contains no historical response expectations. |
-| `request_status` | Completed request events carry expected response status in `status`. |
-| `response_events` | Separate `response` events carry expected status, headers, or body. |
-
-Replay rejects unknown values. Recordings that omit the field preserve the
-legacy validation behavior for compatibility.
-
-Each `validation.status`, `validation.headers`, and `validation.body` field
-directly enables that check; there is no aggregate validation toggle.
-`response_expectations: none` requires all three checks to be disabled.
-`request_status` permits only status validation because request events contain
-no expected response headers or body. Header or body validation requires
-`response_events`. Replay rejects incompatible configurations before routing
-requests and does not allocate unnecessary validation rendezvous state.
 
 ---
 
@@ -513,6 +493,9 @@ env:
   TARGET_ENV: "staging"
   AUTH_MODE: "token-rewrite"
 ```
+
+Each `validation.status`, `validation.headers`, and `validation.body` field
+directly enables that check; there is no aggregate validation toggle.
 
 POST and mutation requests may cause side effects if replayed against production systems.
 

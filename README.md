@@ -85,29 +85,7 @@ In addition to the summary printed to stdout, the engine maintains aggregate out
 
 ## Migration note
 
-When an NDJSON meta header is present, its format version and declared response-expectation capability are validated. Older logs without the optional capability retain legacy validation behavior.
-
-## Recording response expectations
-
-Format `1.0` recordings SHOULD declare their historical response shape in the
-first `meta` event:
-
-```json
-{"type":"meta","format_version":"1.0","response_expectations":"none"}
-```
-
-Allowed capabilities are `none`, `request_status`, and `response_events`.
-Each `validation.status`, `validation.headers`, and `validation.body` field
-directly enables that check; there is no aggregate validation toggle.
-
-`none` is appropriate for request-start-only recordings such as
-`DownstreamStart` and requires all three checks to be `false`. `request_status`
-supports only status validation because completed request events do not carry
-expected response headers or bodies; replay rejects header or body checks for
-this mode. Use `response_events` when validating status, headers, or body from
-separate `response` events. Target response metrics, retries, transfer errors,
-body draining, byte accounting, latency, and connection reuse remain unchanged
-when all validation checks are disabled.
+When present, the NDJSON meta header's format version is validated. Recordings without a meta event continue to use the legacy event format.
 
 ## Example config (replay/config.yaml)
 
@@ -116,6 +94,8 @@ See `config.yaml` in this directory for a ready-to-use example demonstrating saf
 ## Retry and validation config
 
 Use `config.yaml` to control retry, response validation, pacing, lifecycle, and idempotency safeguards.
+Each `validation.status`, `validation.headers`, and `validation.body` field
+directly enables that check; there is no aggregate validation toggle.
 
 ```yaml
 replay:

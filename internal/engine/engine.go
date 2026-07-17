@@ -315,22 +315,10 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 	connWorker := make(map[model.ConnectionKey]int)
 	vus := len(workerChs)
 	nextWorker := 0
-	seenEvent := false
 	for ev := range events {
 		if ev.Type == model.EventMeta {
-			if seenEvent {
-				return errors.New("meta event must be first")
-			}
-			seenEvent = true
-			if !ev.ResponseExpectations.Valid() {
-				return fmt.Errorf("invalid response_expectations: %q", ev.ResponseExpectations)
-			}
-			if err := e.validateRecordingExpectations(ev.ResponseExpectations); err != nil {
-				return err
-			}
 			continue
 		}
-		seenEvent = true
 
 		connKey := model.ConnectionKey{Node: ev.Node, ConnectionID: ev.ConnectionID}
 		if !connectionBelongsToShard(connKey, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
@@ -368,21 +356,6 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 		}
 	}
 
-	return nil
-}
-
-func (e *Engine) validateRecordingExpectations(expectations model.ResponseExpectationMode) error {
-	validation := e.cfg.Replay.Validation
-	switch expectations {
-	case model.ResponseExpectationsNone:
-		if validation.Status || validation.Headers || validation.Body {
-			return errors.New(`recording declares response_expectations "none" but response validation checks are configured`)
-		}
-	case model.ResponseExpectationsRequestStatus:
-		if validation.Headers || validation.Body {
-			return errors.New(`recording declares response_expectations "request_status" but header or body validation is configured; use "response_events"`)
-		}
-	}
 	return nil
 }
 
