@@ -372,8 +372,16 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 }
 
 func (e *Engine) validateRecordingExpectations(expectations model.ResponseExpectationMode) error {
-	if expectations == model.ResponseExpectationsNone && e.cfg.Replay.Validation.Enabled {
-		return errors.New("response validation is enabled but recording declares no response expectations")
+	validation := e.cfg.Replay.Validation
+	switch expectations {
+	case model.ResponseExpectationsNone:
+		if validation.Status || validation.Headers || validation.Body {
+			return errors.New(`recording declares response_expectations "none" but response validation checks are configured`)
+		}
+	case model.ResponseExpectationsRequestStatus:
+		if validation.Headers || validation.Body {
+			return errors.New(`recording declares response_expectations "request_status" but header or body validation is configured; use "response_events"`)
+		}
 	}
 	return nil
 }
@@ -812,7 +820,7 @@ func (e *Engine) handleResponseEvent(cs *connState, ev model.Event) {
 
 func (e *Engine) shouldRetainResponseForValidation() bool {
 	validation := e.cfg.Replay.Validation
-	return validation.Enabled && (validation.Status || validation.Headers || validation.Body)
+	return validation.Status || validation.Headers || validation.Body
 }
 
 func (e *Engine) recordAttemptMetrics(requestEvent model.Event, exec requestExecution, status string) {
@@ -1412,7 +1420,7 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 		bodyTruncated bool
 	)
 	validation := e.cfg.Replay.Validation
-	if validation.Enabled && validation.Body {
+	if validation.Body {
 		// Retain a bounded response body for validation while hashing and
 		// draining the complete body so oversized responses compare exactly.
 		bodyHasher := sha256.New()
@@ -1445,7 +1453,7 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	}
 
 	var headers map[string][]string
-	if validation.Enabled && validation.Headers {
+	if validation.Headers {
 		headers = make(map[string][]string, len(resp.Header))
 		for key, values := range resp.Header {
 			headers[strings.ToLower(key)] = slices.Clone(values)
@@ -1605,9 +1613,6 @@ func backoffDuration(strategy string, attempt int) time.Duration {
 
 func (e *Engine) responseValidationFailed(expected model.Event, actual requestExecution) bool {
 	validation := e.cfg.Replay.Validation
-	if !validation.Enabled {
-		return false
-	}
 	if validation.Status && expected.Status > 0 && expected.Status != actual.statusCode {
 		return true
 	}

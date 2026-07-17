@@ -69,7 +69,6 @@ type RetryConfig struct {
 }
 
 type ValidationConfig struct {
-	Enabled       bool     `yaml:"enabled"`
 	Status        bool     `yaml:"status"`
 	Headers       bool     `yaml:"headers"`
 	Body          bool     `yaml:"body"`
@@ -175,8 +174,7 @@ func Default() Config {
 				Backoff:     "none",
 			},
 			Validation: ValidationConfig{
-				Enabled: true,
-				Status:  true,
+				Status: true,
 			},
 			Pacing: PacingConfig{
 				Enabled:       false,

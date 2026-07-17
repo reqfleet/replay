@@ -88,11 +88,13 @@ Purpose:
 Replay rejects unknown values. Recordings that omit the field preserve the
 legacy validation behavior for compatibility.
 
-When `response_expectations` is `none`, response validation MUST be disabled in
-the runtime configuration. Replay rejects a conflicting configuration and does
-not allocate historical-validation rendezvous state. Target status metrics,
-retries, transfer-error detection, response body consumption, egress byte
-accounting, latency measurement, and connection reuse remain active.
+Each `validation.status`, `validation.headers`, and `validation.body` field
+directly enables that check; there is no aggregate validation toggle.
+`response_expectations: none` requires all three checks to be disabled.
+`request_status` permits only status validation because request events contain
+no expected response headers or body. Header or body validation requires
+`response_events`. Replay rejects incompatible configurations before routing
+requests and does not allocate unnecessary validation rendezvous state.
 
 ---
 
@@ -474,7 +476,6 @@ replay:
     retry_on_statuses: [429, 502, 503, 504]
     retry_on_errors: [timeout, connection_reset, network, tls]
   validation:
-    enabled: true
     status: true
     headers: false
     body: false

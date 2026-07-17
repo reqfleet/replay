@@ -14,8 +14,7 @@ replay:
     retry_on_statuses: [429, 502, 503, 504]
     retry_on_errors: [timeout, connection_reset, network, tls]
   validation:
-    enabled: false
-    status: true
+    status: false
     headers: false
     body: false
     ignore_headers: [x-request-id, date]

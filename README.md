@@ -97,13 +97,17 @@ first `meta` event:
 ```
 
 Allowed capabilities are `none`, `request_status`, and `response_events`.
+Each `validation.status`, `validation.headers`, and `validation.body` field
+directly enables that check; there is no aggregate validation toggle.
+
 `none` is appropriate for request-start-only recordings such as
-`DownstreamStart`. Response validation must be disabled for these recordings;
-replay rejects a conflicting configuration and does not allocate validation
-rendezvous maps. Target response status metrics, retries, transfer errors, body
-draining, byte accounting, latency, and connection reuse continue unchanged.
-Use `request_status` when each completed request event carries its expected
-`status`, and `response_events` when the log contains separate `response` events.
+`DownstreamStart` and requires all three checks to be `false`. `request_status`
+supports only status validation because completed request events do not carry
+expected response headers or bodies; replay rejects header or body checks for
+this mode. Use `response_events` when validating status, headers, or body from
+separate `response` events. Target response metrics, retries, transfer errors,
+body draining, byte accounting, latency, and connection reuse remain unchanged
+when all validation checks are disabled.
 
 ## Example config (replay/config.yaml)
 
@@ -124,7 +128,6 @@ replay:
     retry_on_statuses: [429, 502, 503, 504]
     retry_on_errors: [timeout, connection_reset, network, tls]
   validation:
-    enabled: true
     status: true
     headers: false
     body: false

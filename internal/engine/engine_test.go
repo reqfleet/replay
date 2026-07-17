@@ -197,30 +197,30 @@ func TestResponseHeaderBytes(t *testing.T) {
 	}
 }
 
-func TestExecuteRequestRetainsResponseHeadersOnlyForValidation(t *testing.T) {
+func TestExecuteRequestRetainsResponseHeadersOnlyForHeaderValidation(t *testing.T) {
 	tests := []struct {
-		name              string
-		validationEnabled bool
-		headerValidation  bool
-		wantHeaders       bool
+		name             string
+		statusValidation bool
+		headerValidation bool
+		wantHeaders      bool
 	}{
 		{
-			name:              "validation_disabled",
-			validationEnabled: false,
-			headerValidation:  true,
-			wantHeaders:       false,
+			name:             "all_checks_disabled",
+			statusValidation: false,
+			headerValidation: false,
+			wantHeaders:      false,
 		},
 		{
-			name:              "status_validation_only",
-			validationEnabled: true,
-			headerValidation:  false,
-			wantHeaders:       false,
+			name:             "status_validation_only",
+			statusValidation: true,
+			headerValidation: false,
+			wantHeaders:      false,
 		},
 		{
-			name:              "header_validation",
-			validationEnabled: true,
-			headerValidation:  true,
-			wantHeaders:       true,
+			name:             "header_validation",
+			statusValidation: false,
+			headerValidation: true,
+			wantHeaders:      true,
 		},
 	}
 	for _, tt := range tests {
@@ -237,7 +237,7 @@ func TestExecuteRequestRetainsResponseHeadersOnlyForValidation(t *testing.T) {
 				}),
 			}
 			cfg := config.Default()
-			cfg.Replay.Validation.Enabled = tt.validationEnabled
+			cfg.Replay.Validation.Status = tt.statusValidation
 			cfg.Replay.Validation.Headers = tt.headerValidation
 			eng := New(cfg, metrics.New(cfg.Metrics))
 			requestEvent := model.Event{HTTP: model.HTTPRequestMeta{
@@ -248,81 +248,112 @@ func TestExecuteRequestRetainsResponseHeadersOnlyForValidation(t *testing.T) {
 				context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil),
 			)
 			if err != nil {
-				t.Fatalf("executeRequest(validation enabled=%t, headers=%t) error: %v", tt.validationEnabled, tt.headerValidation, err)
+				t.Fatalf("executeRequest(status=%t, headers=%t) error: %v", tt.statusValidation, tt.headerValidation, err)
 			}
 			wantEgressBytes := int64(len("ok")) + responseHeaderBytes(responseHeaders)
 			if got := exec.egressBytes; got != wantEgressBytes {
-				t.Errorf("executeRequest(validation enabled=%t, headers=%t).egressBytes = %d, want %d", tt.validationEnabled, tt.headerValidation, got, wantEgressBytes)
+				t.Errorf("executeRequest(status=%t, headers=%t).egressBytes = %d, want %d", tt.statusValidation, tt.headerValidation, got, wantEgressBytes)
 			}
 			if !tt.wantHeaders {
 				if exec.headers != nil {
-					t.Errorf("executeRequest(validation enabled=%t, headers=%t).headers = %v, want nil", tt.validationEnabled, tt.headerValidation, exec.headers)
+					t.Errorf("executeRequest(status=%t, headers=%t).headers = %v, want nil", tt.statusValidation, tt.headerValidation, exec.headers)
 				}
 				return
 			}
 			values, ok := exec.headers["x-test"]
 			if !ok || len(values) != 2 || values[0] != "one" || values[1] != "two" {
-				t.Errorf("executeRequest(validation enabled=%t, headers=%t).headers[x-test] = %v, want [one two]", tt.validationEnabled, tt.headerValidation, values)
+				t.Errorf("executeRequest(status=%t, headers=%t).headers[x-test] = %v, want [one two]", tt.statusValidation, tt.headerValidation, values)
 			}
 			if _, ok := exec.headers["X-Test"]; ok {
-				t.Errorf("executeRequest(validation enabled=%t, headers=%t).headers contains non-normalized key X-Test", tt.validationEnabled, tt.headerValidation)
+				t.Errorf("executeRequest(status=%t, headers=%t).headers contains non-normalized key X-Test", tt.statusValidation, tt.headerValidation)
 			}
 			responseHeaders["X-Test"][0] = "changed"
 			if got := exec.headers["x-test"][0]; got != "one" {
-				t.Errorf("executeRequest(validation enabled=%t, headers=%t).headers[x-test][0] after source mutation = %q, want %q", tt.validationEnabled, tt.headerValidation, got, "one")
+				t.Errorf("executeRequest(status=%t, headers=%t).headers[x-test][0] after source mutation = %q, want %q", tt.statusValidation, tt.headerValidation, got, "one")
 			}
 		})
 	}
 }
 
-func TestValidateRecordingExpectationsRejectsEnabledValidationForNone(t *testing.T) {
-	cfg := config.Default()
-	eng := New(cfg, metrics.New(cfg.Metrics))
-
-	err := eng.validateRecordingExpectations(model.ResponseExpectationsNone)
-	if err == nil {
-		t.Fatal("validateRecordingExpectations(none) error = nil, want error when validation is enabled")
-	}
-	if !eng.cfg.Replay.Validation.Enabled {
-		t.Error("validateRecordingExpectations(none) mutated validation config")
-	}
-}
-
-func TestValidateRecordingExpectationsAllowsCompatibleConfiguration(t *testing.T) {
+func TestValidateRecordingExpectations(t *testing.T) {
 	tests := []struct {
-		name              string
-		expectations      model.ResponseExpectationMode
-		validationEnabled bool
+		name         string
+		expectations model.ResponseExpectationMode
+		status       bool
+		headers      bool
+		body         bool
+		wantErr      bool
 	}{
 		{
-			name:              "none_with_validation_disabled",
-			expectations:      model.ResponseExpectationsNone,
-			validationEnabled: false,
+			name:         "none_without_checks",
+			expectations: model.ResponseExpectationsNone,
 		},
 		{
-			name:              "request_status",
-			expectations:      model.ResponseExpectationsRequestStatus,
-			validationEnabled: true,
+			name:         "none_with_status",
+			expectations: model.ResponseExpectationsNone,
+			status:       true,
+			wantErr:      true,
 		},
 		{
-			name:              "response_events",
-			expectations:      model.ResponseExpectationsResponseEvents,
-			validationEnabled: true,
+			name:         "none_with_headers",
+			expectations: model.ResponseExpectationsNone,
+			headers:      true,
+			wantErr:      true,
 		},
 		{
-			name:              "legacy_unspecified",
-			expectations:      "",
-			validationEnabled: true,
+			name:         "none_with_body",
+			expectations: model.ResponseExpectationsNone,
+			body:         true,
+			wantErr:      true,
+		},
+		{
+			name:         "request_status_with_status",
+			expectations: model.ResponseExpectationsRequestStatus,
+			status:       true,
+		},
+		{
+			name:         "request_status_with_headers",
+			expectations: model.ResponseExpectationsRequestStatus,
+			headers:      true,
+			wantErr:      true,
+		},
+		{
+			name:         "request_status_with_body",
+			expectations: model.ResponseExpectationsRequestStatus,
+			body:         true,
+			wantErr:      true,
+		},
+		{
+			name:         "response_events_with_all_checks",
+			expectations: model.ResponseExpectationsResponseEvents,
+			status:       true,
+			headers:      true,
+			body:         true,
+		},
+		{
+			name:         "legacy_unspecified_with_all_checks",
+			expectations: "",
+			status:       true,
+			headers:      true,
+			body:         true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.Default()
-			cfg.Replay.Validation.Enabled = tt.validationEnabled
+			cfg.Replay.Validation.Status = tt.status
+			cfg.Replay.Validation.Headers = tt.headers
+			cfg.Replay.Validation.Body = tt.body
 			eng := New(cfg, metrics.New(cfg.Metrics))
 
-			if err := eng.validateRecordingExpectations(tt.expectations); err != nil {
-				t.Errorf("validateRecordingExpectations(%q) error: %v", tt.expectations, err)
+			err := eng.validateRecordingExpectations(tt.expectations)
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Errorf(
+					"validateRecordingExpectations(%q) error = %v, want error presence %t",
+					tt.expectations,
+					err,
+					tt.wantErr,
+				)
 			}
 		})
 	}
@@ -587,9 +618,9 @@ func TestExpectationFreeRecordingPreservesResponseProcessing(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.Replay.Validation.Enabled = false
-	cfg.Replay.Validation.Headers = true
-	cfg.Replay.Validation.Body = true
+	cfg.Replay.Validation.Status = false
+	cfg.Replay.Validation.Headers = false
+	cfg.Replay.Validation.Body = false
 	cfg.Replay.Retry.MaxAttempts = 2
 	cfg.Replay.Retry.Backoff = "none"
 	cfg.Replay.Retry.RetryOnStatuses = []int{http.StatusServiceUnavailable}
@@ -829,7 +860,7 @@ func TestReplayMarksValidationFailedOnStatusMismatch(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.Replay.Validation.Enabled = true
+
 	cfg.Replay.Validation.Status = true
 
 	eng := New(cfg, metrics.New(cfg.Metrics))
@@ -880,7 +911,7 @@ func TestDownstreamStartRequestSkipsInlineResponseValidation(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.Replay.Validation.Enabled = true
+
 	cfg.Replay.Validation.Status = true
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
@@ -926,7 +957,7 @@ func TestDownstreamEndRequestValidatesInlineResponseStatus(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.Replay.Validation.Enabled = true
+
 	cfg.Replay.Validation.Status = true
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
@@ -972,7 +1003,7 @@ func TestDownstreamEndRequestPreservesLaterResponseValidation(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.Replay.Validation.Enabled = true
+
 	cfg.Replay.Validation.Status = true
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
@@ -1024,7 +1055,7 @@ func TestReplayMarksUnmatchedExpectedResponseAsValidationFailed(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.Replay.Validation.Enabled = true
+
 	cfg.Replay.Validation.Status = true
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
@@ -1062,7 +1093,7 @@ func TestReplayMarksUnmatchedExpectedResponseAsValidationFailed(t *testing.T) {
 func TestReplaySkipsValidationForSkippedRequestResponse(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.DryRun = true
-	cfg.Replay.Validation.Enabled = true
+
 	cfg.Replay.Validation.Status = true
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
@@ -1140,7 +1171,7 @@ func TestReplayTreatsConnectionRefusedAsPartialSuccess(t *testing.T) {
 func TestReplayDoesNotValidateResponseAfterTransportSendError(t *testing.T) {
 	addr := closedLocalAddress(t)
 	cfg := config.Default()
-	cfg.Replay.Validation.Enabled = true
+
 	cfg.Replay.Validation.Status = true
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
@@ -1285,7 +1316,7 @@ func TestReplayHeaderValidationIgnoresConfiguredHeaders(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.Replay.Validation.Enabled = true
+
 	cfg.Replay.Validation.Status = true
 	cfg.Replay.Validation.Headers = true
 	cfg.Replay.Validation.IgnoreHeaders = []string{"x-request-id"}
@@ -1356,7 +1387,7 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.Replay.Validation.Enabled = true
+
 	cfg.Replay.Validation.Status = true
 	cfg.Replay.Validation.Body = true
 
@@ -1436,7 +1467,7 @@ func TestReplayBodyValidationDistinguishesEmptyFromAbsent(t *testing.T) {
 				t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
 			}
 			cfg := config.Default()
-			cfg.Replay.Validation.Enabled = true
+
 			cfg.Replay.Validation.Body = true
 			eng := New(cfg, metrics.New(cfg.Metrics))
 			events := []model.Event{
@@ -1503,7 +1534,7 @@ func TestResponseValidationComparesOversizedBodiesExactly(t *testing.T) {
 				t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
 			}
 			cfg := config.Default()
-			cfg.Replay.Validation.Enabled = true
+
 			cfg.Replay.Validation.Body = true
 			eng := New(cfg, metrics.New(cfg.Metrics))
 			client, transport := eng.makePerConnectionClient(false)
@@ -1551,7 +1582,7 @@ func TestResponseValidationComparesOversizedBodiesExactly(t *testing.T) {
 
 func TestFinishRequestSuccessDoesNotRetainDetailsWhenValidationDisabled(t *testing.T) {
 	cfg := config.Default()
-	cfg.Replay.Validation.Enabled = false
+	cfg.Replay.Validation.Status = false
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
 	req := model.Event{Type: model.EventRequest, ConnectionID: 1, Sequence: 1}
