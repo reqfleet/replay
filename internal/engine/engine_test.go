@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -62,6 +64,27 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type readAfterEOFTrackingBody struct {
+	reader        *bytes.Reader
+	sawEOF        bool
+	readsAfterEOF int
+}
+
+func (b *readAfterEOFTrackingBody) Read(p []byte) (int, error) {
+	if b.sawEOF {
+		b.readsAfterEOF++
+	}
+	n, err := b.reader.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.sawEOF = true
+	}
+	return n, err
+}
+
+func (*readAfterEOFTrackingBody) Close() error {
+	return nil
 }
 
 func runReplayAsync(eng *Engine, events []model.Event) <-chan replayResult {
@@ -171,6 +194,108 @@ func TestResponseHeaderBytes(t *testing.T) {
 
 	if got := responseHeaderBytes(headers); got != want {
 		t.Errorf("responseHeaderBytes(%v) = %d, want %d", headers, got, want)
+	}
+}
+
+func TestExecuteRequestDoesNotReadAfterResponseEOF(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{
+			name: "below_limit",
+			body: []byte("response body"),
+		},
+		{
+			name: "at_limit",
+			body: bytes.Repeat([]byte("x"), maxBodyRead),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trackedBody := &readAfterEOFTrackingBody{reader: bytes.NewReader(tt.body)}
+			client := &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       trackedBody,
+						Request:    req,
+					}, nil
+				}),
+			}
+			cfg := config.Default()
+			cfg.Replay.Validation.Body = true
+			eng := New(cfg, metrics.New(cfg.Metrics))
+			requestEvent := model.Event{HTTP: model.HTTPRequestMeta{
+				Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/",
+			}}
+
+			exec, err := eng.executeRequest(
+				context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil),
+			)
+			if err != nil {
+				t.Fatalf("executeRequest(body size %d) error: %v", len(tt.body), err)
+			}
+			if !trackedBody.sawEOF {
+				t.Errorf("executeRequest(body size %d) did not read response EOF", len(tt.body))
+			}
+			if got := trackedBody.readsAfterEOF; got != 0 {
+				t.Errorf("executeRequest(body size %d) reads after EOF = %d, want 0", len(tt.body), got)
+			}
+			if exec.bodyTruncated {
+				t.Errorf("executeRequest(body size %d).bodyTruncated = true, want false", len(tt.body))
+			}
+			if got, want := exec.bodySize, int64(len(tt.body)); got != want {
+				t.Errorf("executeRequest(body size %d).bodySize = %d, want %d", len(tt.body), got, want)
+			}
+			if !bytes.Equal(exec.body, tt.body) {
+				t.Errorf("executeRequest(body size %d).body does not match response body", len(tt.body))
+			}
+			if got, want := exec.bodyDigest, sha256.Sum256(tt.body); got != want {
+				t.Errorf("executeRequest(body size %d).bodyDigest = %x, want %x", len(tt.body), got, want)
+			}
+		})
+	}
+}
+
+func TestExecuteRequestIncludesDrainedBodyInEgressBytesOnReadError(t *testing.T) {
+	bodyErr := errors.New("body read failed")
+	responseBody := bytes.Repeat([]byte("x"), maxBodyRead+32*1024)
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(io.MultiReader(
+					bytes.NewReader(responseBody),
+					iotest.ErrReader(bodyErr),
+				)),
+				Request: req,
+			}, nil
+		}),
+	}
+	cfg := config.Default()
+	cfg.Replay.Validation.Body = true
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	requestEvent := model.Event{HTTP: model.HTTPRequestMeta{
+		Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/",
+	}}
+
+	exec, err := eng.executeRequest(
+		context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil),
+	)
+	if !errors.Is(err, bodyErr) {
+		t.Fatalf("executeRequest(truncated body with read error) error = %v, want %v", err, bodyErr)
+	}
+	wantEgressBytes := int64(len(responseBody)) + responseHeaderBytes(make(http.Header))
+	if got := exec.egressBytes; got != wantEgressBytes {
+		t.Errorf(
+			"executeRequest(truncated body with read error).egressBytes = %d, want %d",
+			got,
+			wantEgressBytes,
+		)
 	}
 }
 
@@ -1116,53 +1241,77 @@ func TestReplayBodyValidationDistinguishesEmptyFromAbsent(t *testing.T) {
 }
 
 func TestResponseValidationComparesOversizedBodiesExactly(t *testing.T) {
-	actualBody := append(bytes.Repeat([]byte("x"), maxBodyRead), 'y')
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(actualBody)
-	}))
-	defer srv.Close()
-
-	target, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
-	}
-	cfg := config.Default()
-	cfg.Replay.Validation.Enabled = true
-	cfg.Replay.Validation.Body = true
-	eng := New(cfg, metrics.New(cfg.Metrics))
-	client, transport := eng.makePerConnectionClient(false)
-	defer transport.CloseIdleConnections()
-	requestEvent := model.Event{HTTP: model.HTTPRequestMeta{
-		Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/",
-	}}
-
-	exec, err := eng.executeRequest(
-		context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil),
-	)
-	if err != nil {
-		t.Fatalf("executeRequest() error: %v", err)
-	}
-	if !exec.bodyTruncated {
-		t.Fatal("executeRequest().bodyTruncated = false, want true")
-	}
-	if got, want := exec.bodySize, int64(len(actualBody)); got != want {
-		t.Fatalf("executeRequest().bodySize = %d, want %d", got, want)
+	tests := []struct {
+		name       string
+		extraBytes int
+	}{
+		{
+			name:       "one_byte_over_limit",
+			extraBytes: 1,
+		},
+		{
+			name:       "much_larger_than_limit",
+			extraBytes: 1024 * 1024,
+		},
 	}
 
-	prefixOnly := model.Event{Body: &model.Body{
-		Encoding: "base64",
-		Content:  base64.StdEncoding.EncodeToString(actualBody[:maxBodyRead]),
-	}}
-	if !eng.responseValidationFailed(prefixOnly, exec) {
-		t.Fatal("responseValidationFailed(prefix only) = false, want true")
-	}
-	exact := model.Event{Body: &model.Body{
-		Encoding: "base64",
-		Content:  base64.StdEncoding.EncodeToString(actualBody),
-	}}
-	if eng.responseValidationFailed(exact, exec) {
-		t.Fatal("responseValidationFailed(exact oversized body) = true, want false")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actualBody := bytes.Repeat([]byte("x"), maxBodyRead+tt.extraBytes)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(actualBody)
+			}))
+			t.Cleanup(srv.Close)
+
+			target, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+			}
+			cfg := config.Default()
+			cfg.Replay.Validation.Enabled = true
+			cfg.Replay.Validation.Body = true
+			eng := New(cfg, metrics.New(cfg.Metrics))
+			client, transport := eng.makePerConnectionClient(false)
+			t.Cleanup(transport.CloseIdleConnections)
+			requestEvent := model.Event{HTTP: model.HTTPRequestMeta{
+				Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/",
+			}}
+
+			exec, err := eng.executeRequest(
+				context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil),
+			)
+			if err != nil {
+				t.Fatalf("executeRequest(body size %d) error: %v", len(actualBody), err)
+			}
+			if !exec.bodyTruncated {
+				t.Errorf("executeRequest(body size %d).bodyTruncated = false, want true", len(actualBody))
+			}
+			if got, want := exec.bodySize, int64(len(actualBody)); got != want {
+				t.Errorf("executeRequest(body size %d).bodySize = %d, want %d", len(actualBody), got, want)
+			}
+			if !bytes.Equal(exec.body, actualBody[:maxBodyRead]) {
+				t.Errorf("executeRequest(body size %d).body does not match retained prefix", len(actualBody))
+			}
+			if got, want := exec.bodyDigest, sha256.Sum256(actualBody); got != want {
+				t.Errorf("executeRequest(body size %d).bodyDigest = %x, want %x", len(actualBody), got, want)
+			}
+
+			prefixOnly := model.Event{Body: &model.Body{
+				Encoding: "base64",
+				Content:  base64.StdEncoding.EncodeToString(actualBody[:maxBodyRead]),
+			}}
+			if !eng.responseValidationFailed(prefixOnly, exec) {
+				t.Errorf("responseValidationFailed(prefix only, body size %d) = false, want true", len(actualBody))
+			}
+			exact := model.Event{Body: &model.Body{
+				Encoding: "base64",
+				Content:  base64.StdEncoding.EncodeToString(actualBody),
+			}}
+			if eng.responseValidationFailed(exact, exec) {
+				t.Errorf("responseValidationFailed(exact body, body size %d) = true, want false", len(actualBody))
+			}
+		})
 	}
 }
 

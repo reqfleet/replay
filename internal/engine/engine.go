@@ -1383,23 +1383,35 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 		}, err
 	}
 	defer resp.Body.Close()
-	// Retain a bounded response body for validation while hashing and draining
-	// the complete body so oversized responses can still be compared exactly.
-	bodyHasher := sha256.New()
-	lr := io.LimitReader(io.TeeReader(resp.Body, bodyHasher), maxBodyRead+1)
-	body, err := io.ReadAll(lr)
-	bodySize := int64(len(body))
-	bodyTruncated := len(body) > maxBodyRead
-	if bodyTruncated {
-		body = body[:maxBodyRead]
+	var (
+		body          []byte
+		bodySize      int64
+		bodyDigest    [sha256.Size]byte
+		bodyTruncated bool
+	)
+	validation := e.cfg.Replay.Validation
+	if validation.Enabled && validation.Body {
+		// Retain a bounded response body for validation while hashing and
+		// draining the complete body so oversized responses compare exactly.
+		bodyHasher := sha256.New()
+		lr := io.LimitReader(io.TeeReader(resp.Body, bodyHasher), maxBodyRead+1)
+		body, err = io.ReadAll(lr)
+		bodySize = int64(len(body))
+		bodyTruncated = len(body) > maxBodyRead
+		if bodyTruncated {
+			body = body[:maxBodyRead]
+		}
+		if err == nil && bodyTruncated {
+			var drainedBytes int64
+			drainedBytes, err = io.Copy(bodyHasher, resp.Body)
+			bodySize += drainedBytes
+		}
+		bodyHasher.Sum(bodyDigest[:0])
+	} else {
+		// Consume the body for connection reuse and count it for metrics without
+		// retaining or hashing bytes that will not be validated.
+		bodySize, err = io.Copy(io.Discard, resp.Body)
 	}
-	var drainedBytes int64
-	if err == nil {
-		drainedBytes, err = io.Copy(bodyHasher, resp.Body)
-		bodySize += drainedBytes
-	}
-	var bodyDigest [sha256.Size]byte
-	bodyHasher.Sum(bodyDigest[:0])
 	headerBytes := responseHeaderBytes(resp.Header)
 	if err != nil {
 		return requestExecution{
