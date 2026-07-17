@@ -88,12 +88,11 @@ Purpose:
 Replay rejects unknown values. Recordings that omit the field preserve the
 legacy validation behavior for compatibility.
 
-When `response_expectations` is `none`, replay bypasses historical response
-validation and its rendezvous state. If response validation is enabled in the
-runtime configuration, replay emits a warning and disables it for that run.
-Target status metrics, retries, transfer-error detection, response body
-consumption, egress byte accounting, latency measurement, and connection reuse
-remain active.
+When `response_expectations` is `none`, response validation MUST be disabled in
+the runtime configuration. Replay rejects a conflicting configuration and does
+not allocate historical-validation rendezvous state. Target status metrics,
+retries, transfer-error detection, response body consumption, egress byte
+accounting, latency measurement, and connection reuse remain active.
 
 ---
 

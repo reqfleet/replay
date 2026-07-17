@@ -139,18 +139,6 @@ func New(cfg config.Config, registry *metrics.Registry) *Engine {
 	}
 }
 
-func (e *Engine) newRunEngine() *Engine {
-	runConfig := e.cfg
-	return &Engine{
-		cfg:                 runConfig,
-		metrics:             e.metrics,
-		metricLabelValues:   e.metricLabelValues,
-		parsedPathTemplates: e.parsedPathTemplates,
-		parsedOverrideURL:   e.parsedOverrideURL,
-		targetOverrideErr:   e.targetOverrideErr,
-	}
-}
-
 func drainEvents(events <-chan model.Event) {
 	go func() {
 		for range events {
@@ -169,25 +157,24 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 		drainEvents(events)
 		return Summary{Outcome: RunFailed}, fmt.Errorf("validate target override: %w", e.targetOverrideErr)
 	}
-	runEngine := e.newRunEngine()
 	checkpoints, err := newCheckpointStore(checkpointPath(
-		runEngine.cfg.Replay.Checkpoint.File,
-		runEngine.cfg.Replay.Sharding.ShardIndex,
-		runEngine.cfg.Replay.Sharding.ShardCount,
+		e.cfg.Replay.Checkpoint.File,
+		e.cfg.Replay.Sharding.ShardIndex,
+		e.cfg.Replay.Sharding.ShardCount,
 	))
 	if err != nil {
 		drainEvents(events)
 		return Summary{Outcome: RunFailed}, err
 	}
 
-	if runEngine.metrics != nil {
-		runEngine.metrics.SeedEngineLabels(runEngine.metricLabelValues)
+	if e.metrics != nil {
+		e.metrics.SeedEngineLabels(e.metricLabelValues)
 	}
 
 	replayCtx, cancelReplay := context.WithCancel(ctx)
 	defer cancelReplay()
 
-	vus := max(runEngine.cfg.Replay.MaxVirtualUsersPerEngine, 1)
+	vus := max(e.cfg.Replay.MaxVirtualUsersPerEngine, 1)
 
 	workerChs := make([]chan model.Event, vus)
 	for i := range workerChs {
@@ -198,13 +185,13 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	var wg sync.WaitGroup
 
 	for i := range workerChs {
-		activationDelay := workerActivationDelay(i, vus, runEngine.cfg.Replay.RampupDuration)
+		activationDelay := workerActivationDelay(i, vus, e.cfg.Replay.RampupDuration)
 		wg.Go(func() {
-			results <- runEngine.runEventWorker(replayCtx, workerChs[i], activationDelay, checkpoints)
+			results <- e.runEventWorker(replayCtx, workerChs[i], activationDelay, checkpoints)
 		})
 	}
 
-	routeErr := runEngine.routeEvents(replayCtx, events, workerChs)
+	routeErr := e.routeEvents(replayCtx, events, workerChs)
 
 	if routeErr != nil {
 		cancelReplay()
@@ -218,7 +205,7 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	wg.Wait()
 	close(results)
 
-	summary := runEngine.aggregateResults(results)
+	summary := e.aggregateResults(results)
 	checkpointErr := checkpoints.Close()
 	if routeErr != nil {
 		if checkpointErr != nil {
@@ -338,7 +325,9 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 			if !ev.ResponseExpectations.Valid() {
 				return fmt.Errorf("invalid response_expectations: %q", ev.ResponseExpectations)
 			}
-			e.configureValidationForRecording(ctx, ev.ResponseExpectations)
+			if err := e.validateRecordingExpectations(ev.ResponseExpectations); err != nil {
+				return err
+			}
 			continue
 		}
 		seenEvent = true
@@ -382,19 +371,11 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 	return nil
 }
 
-func (e *Engine) configureValidationForRecording(ctx context.Context, expectations model.ResponseExpectationMode) {
-	if expectations != model.ResponseExpectationsNone {
-		return
+func (e *Engine) validateRecordingExpectations(expectations model.ResponseExpectationMode) error {
+	if expectations == model.ResponseExpectationsNone && e.cfg.Replay.Validation.Enabled {
+		return errors.New("response validation is enabled but recording declares no response expectations")
 	}
-	if e.cfg.Replay.Validation.Enabled {
-		slog.WarnContext(
-			ctx,
-			"response validation disabled for expectation-free recording",
-			"response_expectations",
-			expectations,
-		)
-	}
-	e.cfg.Replay.Validation.Enabled = false
+	return nil
 }
 
 // runEventWorker processes events from its channel using per-connection state.

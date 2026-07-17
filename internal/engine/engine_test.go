@@ -275,55 +275,54 @@ func TestExecuteRequestRetainsResponseHeadersOnlyForValidation(t *testing.T) {
 	}
 }
 
-func TestConfigureValidationForExpectationFreeRecording(t *testing.T) {
-	var logOutput bytes.Buffer
-	previousLogger := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logOutput, nil)))
-	t.Cleanup(func() {
-		slog.SetDefault(previousLogger)
-	})
-
+func TestValidateRecordingExpectationsRejectsEnabledValidationForNone(t *testing.T) {
 	cfg := config.Default()
-	cfg.Replay.Validation.Status = true
-	cfg.Replay.Validation.Headers = true
-	cfg.Replay.Validation.Body = true
 	eng := New(cfg, metrics.New(cfg.Metrics))
-	eng.configureValidationForRecording(context.Background(), model.ResponseExpectationsNone)
 
-	if eng.cfg.Replay.Validation.Enabled {
-		t.Error("configureValidationForRecording(none) left validation enabled, want disabled")
+	err := eng.validateRecordingExpectations(model.ResponseExpectationsNone)
+	if err == nil {
+		t.Fatal("validateRecordingExpectations(none) error = nil, want error when validation is enabled")
 	}
-	cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
-	if cs.pendingActual != nil || cs.pendingExpected != nil || cs.pendingInlineExpected != nil {
-		t.Errorf("newConnState(none) validation maps = (%v, %v, %v), want all nil", cs.pendingActual, cs.pendingExpected, cs.pendingInlineExpected)
-	}
-	cs.skipValidationForSequence(1)
-	if cs.skippedValidation != nil {
-		t.Errorf("skipValidationForSequence(1).skippedValidation = %v, want nil for expectation-free recording", cs.skippedValidation)
-	}
-	if got := logOutput.String(); !strings.Contains(got, "response validation disabled for expectation-free recording") {
-		t.Errorf("configureValidationForRecording(none) log output = %q, want warning", got)
+	if !eng.cfg.Replay.Validation.Enabled {
+		t.Error("validateRecordingExpectations(none) mutated validation config")
 	}
 }
 
-func TestConfigureValidationPreservesDeclaredExpectations(t *testing.T) {
-	modes := []model.ResponseExpectationMode{
-		"",
-		model.ResponseExpectationsRequestStatus,
-		model.ResponseExpectationsResponseEvents,
+func TestValidateRecordingExpectationsAllowsCompatibleConfiguration(t *testing.T) {
+	tests := []struct {
+		name              string
+		expectations      model.ResponseExpectationMode
+		validationEnabled bool
+	}{
+		{
+			name:              "none_with_validation_disabled",
+			expectations:      model.ResponseExpectationsNone,
+			validationEnabled: false,
+		},
+		{
+			name:              "request_status",
+			expectations:      model.ResponseExpectationsRequestStatus,
+			validationEnabled: true,
+		},
+		{
+			name:              "response_events",
+			expectations:      model.ResponseExpectationsResponseEvents,
+			validationEnabled: true,
+		},
+		{
+			name:              "legacy_unspecified",
+			expectations:      "",
+			validationEnabled: true,
+		},
 	}
-	for _, mode := range modes {
-		t.Run(string(mode), func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.Default()
+			cfg.Replay.Validation.Enabled = tt.validationEnabled
 			eng := New(cfg, metrics.New(cfg.Metrics))
-			eng.configureValidationForRecording(context.Background(), mode)
 
-			if !eng.cfg.Replay.Validation.Enabled {
-				t.Errorf("configureValidationForRecording(%q) disabled validation, want enabled", mode)
-			}
-			cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
-			if cs.pendingActual == nil || cs.pendingExpected == nil || cs.pendingInlineExpected == nil {
-				t.Errorf("newConnState(%q) validation maps = (%v, %v, %v), want all initialized", mode, cs.pendingActual, cs.pendingExpected, cs.pendingInlineExpected)
+			if err := eng.validateRecordingExpectations(tt.expectations); err != nil {
+				t.Errorf("validateRecordingExpectations(%q) error: %v", tt.expectations, err)
 			}
 		})
 	}
@@ -588,7 +587,7 @@ func TestExpectationFreeRecordingPreservesResponseProcessing(t *testing.T) {
 	}
 
 	cfg := config.Default()
-	cfg.Replay.Validation.Status = true
+	cfg.Replay.Validation.Enabled = false
 	cfg.Replay.Validation.Headers = true
 	cfg.Replay.Validation.Body = true
 	cfg.Replay.Retry.MaxAttempts = 2
@@ -645,9 +644,6 @@ func TestExpectationFreeRecordingPreservesResponseProcessing(t *testing.T) {
 	remoteMu.Unlock()
 	if connectionCount != 1 {
 		t.Errorf("ReplayStream(expectation-free recording) target connections = %d, want 1", connectionCount)
-	}
-	if !eng.cfg.Replay.Validation.Enabled {
-		t.Error("ReplayStream(expectation-free recording) mutated engine validation config, want per-run override")
 	}
 
 	commonLabelValues := cfg.Metrics.CommonLabelValues()

@@ -98,8 +98,8 @@ first `meta` event:
 
 Allowed capabilities are `none`, `request_status`, and `response_events`.
 `none` is appropriate for request-start-only recordings such as
-`DownstreamStart`: replay warns if response validation is configured, disables
-historical validation for that run, and does not allocate response-validation
+`DownstreamStart`. Response validation must be disabled for these recordings;
+replay rejects a conflicting configuration and does not allocate validation
 rendezvous maps. Target response status metrics, retries, transfer errors, body
 draining, byte accounting, latency, and connection reuse continue unchanged.
 Use `request_status` when each completed request event carries its expected
