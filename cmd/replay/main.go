@@ -204,12 +204,6 @@ func run() int {
 		slog.Error("validate target override", "error", err)
 		return 2
 	}
-	for key, value := range cfg.Env {
-		if setErr := os.Setenv(key, value); setErr != nil {
-			slog.Error("set env failed", "key", key, "error", setErr)
-			return 2
-		}
-	}
 
 	registry := metrics.New(cfg.Metrics)
 	metricLabelValues := cfg.Metrics.CommonLabelValues()

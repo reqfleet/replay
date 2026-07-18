@@ -5,7 +5,7 @@ Go-based HTTP replay engine that consumes NDJSON traffic logs and exposes Promet
 ## Inputs
 
 - Required: `requests.log` (NDJSON traffic file)
-- Optional: `config.yaml` (timeouts, retry, env vars, override target, metrics settings)
+- Optional: `config.yaml` (timeouts, retry, target override, and metrics settings)
 
 ## Run
 
@@ -65,7 +65,7 @@ Environment variables for metrics:
 Common Prometheus labels are configured with `metrics.common_labels`:
 - each entry has `name`, literal fallback `value`, and optional `env`
 - if the configured env var is unset or empty, replay falls back to the literal `value`
-- replay resolves these env-ref keys from the process environment first and from the YAML `env:` map second
+- replay resolves these env-ref keys from the process environment
 
 CLI flags are applied last and take highest precedence for safety-related settings.
 
