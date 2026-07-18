@@ -14,30 +14,30 @@ import (
 )
 
 type Config struct {
-	Replay  ReplayConfig         `yaml:"replay"`
-	Metrics MetricsConfig        `yaml:"metrics"`
+	Header  HeaderRewriteConfig  `yaml:"header_rewrite"`
 	Target  TargetOverrideConfig `yaml:"target"`
-
-	Header HeaderRewriteConfig `yaml:"header_rewrite"`
+	Metrics MetricsConfig        `yaml:"metrics"`
+	Replay  ReplayConfig         `yaml:"replay"`
 }
 
 type ReplayConfig struct {
-	Retry       RetryConfig       `yaml:"retry"`
-	Timeout     TimeoutConfig     `yaml:"timeout"`
-	HTTP2       HTTP2Config       `yaml:"http2"`
-	TLS         TLSConfig         `yaml:"tls"`
-	Idempotency IdempotencyConfig `yaml:"idempotency"`
-
+	HTTP2      HTTP2Config      `yaml:"http2"`
 	Checkpoint CheckpointConfig `yaml:"checkpoint"`
-	Pacing     PacingConfig     `yaml:"pacing"`
-	Sharding   ShardingConfig   `yaml:"sharding"`
-	Validation ValidationConfig `yaml:"validation"`
+
+	Retry       RetryConfig       `yaml:"retry"`
+	Idempotency IdempotencyConfig `yaml:"idempotency"`
+	Validation  ValidationConfig  `yaml:"validation"`
+
+	Timeout  TimeoutConfig  `yaml:"timeout"`
+	Pacing   PacingConfig   `yaml:"pacing"`
+	Sharding ShardingConfig `yaml:"sharding"`
 
 	MaxVirtualUsersPerEngine int `yaml:"max_virtual_users_per_engine"`
 	// MaxActiveConnectionsPerEngine is reserved for connection admission; 0 means unlimited.
 	MaxActiveConnectionsPerEngine int           `yaml:"max_active_connections_per_engine"`
 	RampupDuration                time.Duration `yaml:"rampup_duration"`
 
+	TLS       TLSConfig       `yaml:"tls"`
 	Lifecycle LifecycleConfig `yaml:"lifecycle"`
 
 	DryRun                 bool `yaml:"dry_run"`
@@ -60,17 +60,17 @@ type HTTP2Config struct {
 }
 
 type RetryConfig struct {
-	MaxAttempts     int      `yaml:"max_attempts"`
 	Backoff         string   `yaml:"backoff"`
 	RetryOnStatuses []int    `yaml:"retry_on_statuses"`
 	RetryOnErrors   []string `yaml:"retry_on_errors"`
+	MaxAttempts     int      `yaml:"max_attempts"`
 }
 
 type ValidationConfig struct {
+	IgnoreHeaders []string `yaml:"ignore_headers"`
 	Status        bool     `yaml:"status"`
 	Headers       bool     `yaml:"headers"`
 	Body          bool     `yaml:"body"`
-	IgnoreHeaders []string `yaml:"ignore_headers"`
 }
 
 type PacingConfig struct {
@@ -83,9 +83,9 @@ type LifecycleConfig struct {
 }
 
 type IdempotencyConfig struct {
-	Enabled               bool     `yaml:"enabled"`
 	BlockMethods          []string `yaml:"block_methods"`
 	RequireHeaderForAllow []string `yaml:"require_header_for_allow"`
+	Enabled               bool     `yaml:"enabled"`
 }
 
 type ShardingConfig struct {
@@ -100,14 +100,14 @@ type CheckpointConfig struct {
 }
 
 type MetricsConfig struct {
-	Enabled                   bool          `yaml:"enabled"`
 	Namespace                 string        `yaml:"namespace"`
 	ListenAddress             string        `yaml:"listen_address"`
 	Path                      string        `yaml:"path"`
 	PathTemplates             []string      `yaml:"path_templates"`
-	MaxLabels                 int           `yaml:"max_labels"`
 	CommonLabels              []MetricLabel `yaml:"common_labels"`
+	MaxLabels                 int           `yaml:"max_labels"`
 	GracefulTerminationPeriod time.Duration `yaml:"graceful_termination_period"`
+	Enabled                   bool          `yaml:"enabled"`
 }
 
 type MetricLabel struct {
@@ -144,8 +144,8 @@ func (c TargetOverrideConfig) ParseURL() (*url.URL, error) {
 }
 
 type HeaderRewriteConfig struct {
-	Drop []string          `yaml:"drop"`
 	Set  map[string]string `yaml:"set"`
+	Drop []string          `yaml:"drop"`
 }
 
 func Default() Config {
