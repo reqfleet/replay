@@ -316,9 +316,6 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 	vus := len(workerChs)
 	nextWorker := 0
 	for ev := range events {
-		if ev.Type == model.EventMeta {
-			continue
-		}
 
 		connKey := model.ConnectionKey{Node: ev.Node, ConnectionID: ev.ConnectionID}
 		if !connectionBelongsToShard(connKey, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {

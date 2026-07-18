@@ -39,13 +39,6 @@ func TestGeneratedAccessLogTypeRejectsUnknown(t *testing.T) {
 	}
 }
 
-func TestGeneratedEventsDeclareFormatVersion(t *testing.T) {
-	events := generatedEvents(model.AccessLogTypeDownstreamEnd, 1, 1, time.Unix(100, 0).UTC(), "example.com", "http", "80", "key", "/resource", 200, 16)
-	if got, want := events[0].FormatVersion, "1.0"; got != want {
-		t.Errorf("generatedEvents()[0].FormatVersion = %q, want %q", got, want)
-	}
-}
-
 func TestGeneratedDownstreamStartRequestOmitsResponseFields(t *testing.T) {
 	req := generatedRequestEvent(model.AccessLogTypeDownstreamStart, 7, time.Unix(100, 0).UTC(), "example.com", "http", "80", "key", "/resource", 503, 16)
 
@@ -90,7 +83,6 @@ func TestGeneratedEventsInterleaveConnectionsByRequestStep(t *testing.T) {
 	events := generatedEvents(model.AccessLogTypeDownstreamStart, 2, 3, now, "example.com", "http", "80", "key", "api/v1/resource", 200, 16)
 
 	wantTypes := []model.EventType{
-		model.EventMeta,
 		model.EventConnectionOpen,
 		model.EventConnectionOpen,
 		model.EventConnectionOpen,

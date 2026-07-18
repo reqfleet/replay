@@ -68,12 +68,6 @@ func generatedRequestEvent(logType model.AccessLogType, connID int, ts time.Time
 }
 
 func emitGeneratedEvents(logType model.AccessLogType, reqs, conns int, now time.Time, authority, scheme, port, apiKey, requestPath string, status int, durationMS float64, emit func(model.Event) error) error {
-	if err := emit(model.Event{
-		Type:          model.EventMeta,
-		FormatVersion: "1.0",
-	}); err != nil {
-		return err
-	}
 
 	for c := 1; c <= conns; c++ {
 		if err := emit(model.Event{
