@@ -75,6 +75,7 @@ Purpose:
 * Identifies recording environment
 * Prevents incompatible replay
 
+
 ---
 
 ## 5. Connection Open Event
@@ -455,7 +456,6 @@ replay:
     retry_on_statuses: [429, 502, 503, 504]
     retry_on_errors: [timeout, connection_reset, network, tls]
   validation:
-    enabled: true
     status: true
     headers: false
     body: false
@@ -493,6 +493,9 @@ env:
   TARGET_ENV: "staging"
   AUTH_MODE: "token-rewrite"
 ```
+
+Each `validation.status`, `validation.headers`, and `validation.body` field
+directly enables that check; there is no aggregate validation toggle.
 
 POST and mutation requests may cause side effects if replayed against production systems.
 

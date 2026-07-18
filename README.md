@@ -85,7 +85,7 @@ In addition to the summary printed to stdout, the engine maintains aggregate out
 
 ## Migration note
 
-The parser is stricter now: the NDJSON meta header and format version are validated by default. Older logs that relied on permissive parsing may need normalizing or an intermediate conversion step.
+When present, the NDJSON meta header's format version is validated. Recordings without a meta event continue to use the legacy event format.
 
 ## Example config (replay/config.yaml)
 
@@ -94,6 +94,8 @@ See `config.yaml` in this directory for a ready-to-use example demonstrating saf
 ## Retry and validation config
 
 Use `config.yaml` to control retry, response validation, pacing, lifecycle, and idempotency safeguards.
+Each `validation.status`, `validation.headers`, and `validation.body` field
+directly enables that check; there is no aggregate validation toggle.
 
 ```yaml
 replay:
@@ -106,7 +108,6 @@ replay:
     retry_on_statuses: [429, 502, 503, 504]
     retry_on_errors: [timeout, connection_reset, network, tls]
   validation:
-    enabled: true
     status: true
     headers: false
     body: false

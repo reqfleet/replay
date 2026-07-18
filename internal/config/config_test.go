@@ -17,6 +17,28 @@ func TestDefaultValidate(t *testing.T) {
 	}
 }
 
+func TestLoadValidationChecksIndependently(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	content := []byte("replay:\n  validation:\n    status: false\n    headers: true\n    body: true\n")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", path, err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%q) error: %v", path, err)
+	}
+	if cfg.Replay.Validation.Status {
+		t.Error("Load(validation.status=false).Replay.Validation.Status = true, want false")
+	}
+	if !cfg.Replay.Validation.Headers {
+		t.Error("Load(validation.headers=true).Replay.Validation.Headers = false, want true")
+	}
+	if !cfg.Replay.Validation.Body {
+		t.Error("Load(validation.body=true).Replay.Validation.Body = false, want true")
+	}
+}
+
 func TestDefaultMetricsGracefulTerminationPeriod(t *testing.T) {
 	cfg := Default()
 	if got, want := cfg.Metrics.GracefulTerminationPeriod, 5*time.Second; got != want {

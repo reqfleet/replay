@@ -69,7 +69,7 @@ func TestOutcomeAggregation_DryRunSerialized(t *testing.T) {
 func TestOutcomeAggregation_ValidationFailure(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Lifecycle.RequireOpen = false
-	cfg.Replay.Validation.Enabled = true
+
 	cfg.Replay.Validation.Status = true
 
 	reg := metrics.New(cfg.Metrics)
@@ -116,7 +116,7 @@ func TestOutcomeAggregation_ValidationFailure(t *testing.T) {
 func TestOutcomeAggregation_UnmatchedResponseSerialized(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Lifecycle.RequireOpen = false
-	cfg.Replay.Validation.Enabled = true
+
 	cfg.Replay.Validation.Status = true
 
 	reg := metrics.New(cfg.Metrics)
@@ -159,7 +159,7 @@ func TestOutcomeAggregation_SkippedSerializedResponseValidation(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.DryRun = true
 	cfg.Replay.Lifecycle.RequireOpen = false
-	cfg.Replay.Validation.Enabled = true
+
 	cfg.Replay.Validation.Status = true
 
 	reg := metrics.New(cfg.Metrics)

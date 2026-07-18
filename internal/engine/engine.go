@@ -261,15 +261,19 @@ type connState struct {
 }
 
 func (e *Engine) newConnState(connKey model.ConnectionKey) *connState {
-	return &connState{
-		connKey:               connKey,
-		pendingActual:         make(map[int]requestExecution),
-		pendingExpected:       make(map[int]model.Event),
-		pendingInlineExpected: make(map[int]model.Event),
+	cs := &connState{connKey: connKey}
+	if e.shouldRetainResponseForValidation() {
+		cs.pendingActual = make(map[int]requestExecution)
+		cs.pendingExpected = make(map[int]model.Event)
+		cs.pendingInlineExpected = make(map[int]model.Event)
 	}
+	return cs
 }
 
 func (cs *connState) skipValidationForSequence(sequence int) {
+	if cs.pendingActual == nil {
+		return
+	}
 	if sequence <= 0 {
 		return
 	}
@@ -311,7 +315,6 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 	connWorker := make(map[model.ConnectionKey]int)
 	vus := len(workerChs)
 	nextWorker := 0
-
 	for ev := range events {
 		if ev.Type == model.EventMeta {
 			continue
@@ -790,7 +793,7 @@ func (e *Engine) handleResponseEvent(cs *connState, ev model.Event) {
 
 func (e *Engine) shouldRetainResponseForValidation() bool {
 	validation := e.cfg.Replay.Validation
-	return validation.Enabled && (validation.Status || validation.Headers || validation.Body)
+	return validation.Status || validation.Headers || validation.Body
 }
 
 func (e *Engine) recordAttemptMetrics(requestEvent model.Event, exec requestExecution, status string) {
@@ -1390,7 +1393,7 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 		bodyTruncated bool
 	)
 	validation := e.cfg.Replay.Validation
-	if validation.Enabled && validation.Body {
+	if validation.Body {
 		// Retain a bounded response body for validation while hashing and
 		// draining the complete body so oversized responses compare exactly.
 		bodyHasher := sha256.New()
@@ -1422,11 +1425,12 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 		}, err
 	}
 
-	headers := make(map[string][]string, len(resp.Header))
-	for key, values := range resp.Header {
-		copied := make([]string, len(values))
-		copy(copied, values)
-		headers[strings.ToLower(key)] = copied
+	var headers map[string][]string
+	if validation.Headers {
+		headers = make(map[string][]string, len(resp.Header))
+		for key, values := range resp.Header {
+			headers[strings.ToLower(key)] = slices.Clone(values)
+		}
 	}
 
 	return requestExecution{
@@ -1582,9 +1586,6 @@ func backoffDuration(strategy string, attempt int) time.Duration {
 
 func (e *Engine) responseValidationFailed(expected model.Event, actual requestExecution) bool {
 	validation := e.cfg.Replay.Validation
-	if !validation.Enabled {
-		return false
-	}
 	if validation.Status && expected.Status > 0 && expected.Status != actual.statusCode {
 		return true
 	}
