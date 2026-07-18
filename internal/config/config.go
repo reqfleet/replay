@@ -382,7 +382,7 @@ func (c *Config) resolveLabelValue(currentValue, envKey string) string {
 	if envKey == "" {
 		return currentValue
 	}
-	if value, ok := os.LookupEnv(envKey); ok && value != "" {
+	if value := os.Getenv(envKey); value != "" {
 		return value
 	}
 	return currentValue
