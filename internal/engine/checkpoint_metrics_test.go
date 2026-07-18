@@ -291,7 +291,6 @@ func TestReplayStreamReturnsCheckpointPersistenceFailure(t *testing.T) {
 	cfg.Replay.Checkpoint.File = filepath.Join(checkpointDir, "state.json")
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
-		{Type: model.EventMeta},
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
 			Type:         model.EventRequest,

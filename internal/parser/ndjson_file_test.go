@@ -12,7 +12,7 @@ import (
 )
 
 func TestParseFileStream(t *testing.T) {
-	content := []byte("{\"type\":\"meta\",\"format_version\":\"1.0\"}\n{\"type\":\"request\",\"connection_id\":1,\"http\":{\"method\":\"GET\",\"scheme\":\"http\",\"authority\":\"example.com\",\"path\":\"/\"}}\n")
+	content := []byte("{\"type\":\"request\",\"connection_id\":1,\"http\":{\"method\":\"GET\",\"scheme\":\"http\",\"authority\":\"example.com\",\"path\":\"/\"}}\n")
 
 	t.Run("plain", func(t *testing.T) {
 		dir := t.TempDir()
@@ -28,8 +28,8 @@ func TestParseFileStream(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(events) != 2 {
-			t.Fatalf("expected 2 events, got %d", len(events))
+		if len(events) != 1 {
+			t.Fatalf("expected 1 event, got %d", len(events))
 		}
 	})
 
@@ -53,8 +53,8 @@ func TestParseFileStream(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(events) != 2 {
-			t.Fatalf("expected 2 events, got %d", len(events))
+		if len(events) != 1 {
+			t.Fatalf("expected 1 event, got %d", len(events))
 		}
 	})
 
@@ -78,8 +78,8 @@ func TestParseFileStream(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(events) != 2 {
-			t.Fatalf("expected 2 events, got %d", len(events))
+		if len(events) != 1 {
+			t.Fatalf("expected 1 event, got %d", len(events))
 		}
 	})
 }

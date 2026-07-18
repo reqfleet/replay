@@ -48,7 +48,6 @@ Each line in the NDJSON file represents one event.
 
 | Type             | Required               | Purpose                         |
 | ---------------- | ---------------------- | ------------------------------- |
-| meta             | Yes (first line)       | Format metadata                 |
 | connection_open  | Yes                    | TCP lifecycle start             |
 | request          | Yes                    | Replayable HTTP request         |
 | response         | Optional (recommended) | Validation and latency analysis |
@@ -56,29 +55,7 @@ Each line in the NDJSON file represents one event.
 
 ---
 
-## 4. File Header (First Line Only)
-
-```json
-{
-  "type": "meta",
-  "format_version": "1.0",
-  "generator": "envoy-sidecar-recorder",
-  "created_at": "2026-02-27T03:10:21.123Z",
-  "node": "pod-abc-123",
-  "cluster": "prod-us-east-1"
-}
-```
-
-Purpose:
-
-* Enables schema evolution
-* Identifies recording environment
-* Prevents incompatible replay
-
-
----
-
-## 5. Connection Open Event
+## 4. Connection Open Event
 
 Emitted when a downstream TCP connection is accepted.
 
@@ -107,7 +84,7 @@ Emitted when a downstream TCP connection is accepted.
 
 ---
 
-## 6. HTTP Request Event
+## 5. HTTP Request Event
 
 ```json
 {
@@ -184,7 +161,7 @@ Reasons:
 
 ---
 
-## 7. HTTP Response Event (Optional but Recommended)
+## 6. HTTP Response Event (Optional but Recommended)
 
 ```json
 {
@@ -217,7 +194,7 @@ them using the same per-connection ordering model.
 
 ---
 
-## 8. Connection Close Event
+## 7. Connection Close Event
 
 ```json
 {
@@ -241,12 +218,12 @@ file as the implicit close point when `connection_close` is absent.
 
 ---
 
-## 9. Replay Semantics
+## 8. Replay Semantics
 
 Replay engine MUST:
 
 1. Read events in append order without buffering the full capture.
-2. Route every non-meta event by `node` + `connection_id` to exactly one replay worker.
+2. Route every event by `node` + `connection_id` to exactly one replay worker.
 3. Preserve the parser's per-connection monotonic `sequence`; replay MUST NOT reorder events.
 4. Open one replay connection state per `node` + `connection_id`.
 5. Replay requests in observed connection order for HTTP/1.1 and serialized HTTP/2.
@@ -269,7 +246,7 @@ Two supported modes:
 
 Multiplexed mode uses stream-aware checkpointing so a later completed request cannot advance the checkpoint past an earlier in-flight request.
 
-### 9.1 Distributed Replay for Large Captures
+### 8.1 Distributed Replay for Large Captures
 
 When capture logs are too large for a single replay process, replay MAY be distributed across multiple replay engines.
 
@@ -277,7 +254,7 @@ Requirements:
 
 1. Shard assignment MUST be derived from `node` + `connection_id` (for example, hash-based partitioning).
 2. All events for a single `node` + `connection_id` MUST be handled by exactly one replay engine.
-3. Per-connection ordering rules in Section 9 MUST still hold within each shard.
+3. Per-connection ordering rules in Section 8 MUST still hold within each shard.
 4. Sharding by byte offsets or naive timestamp windows MUST NOT split a single connection across shards.
 5. Each shard MAY be replayed independently, but deterministic behavior is defined primarily per connection, not as a single global wall-clock schedule.
 
@@ -286,11 +263,11 @@ Recommended implementation pattern:
 * Use a dispatcher to read NDJSON and route events to shard-specific queues/files by `connection_id`.
 * Preserve append order within each shard output.
 * Persist replay checkpoints per shard to support restart without duplicate sends.
-* Apply capacity controls per replay engine (see Section 11.2).
+* Apply capacity controls per replay engine (see Section 10.2).
 
 ---
 
-## 10. Non-Goals
+## 9. Non-Goals
 
 The system does NOT:
 
@@ -304,7 +281,7 @@ The system operates at HTTP semantic level, not packet level.
 
 ---
 
-## 11. Safety Considerations
+## 10. Safety Considerations
 
 Replay engine SHOULD support:
 
@@ -314,7 +291,7 @@ Replay engine SHOULD support:
 * Authorization token replacement
 * Idempotency safeguards
 
-### 11.1 Target Override Semantics
+### 10.1 Target Override Semantics
 
 To avoid replaying captured production traffic back into production, replay tooling SHOULD support explicit destination overrides.
 
@@ -332,7 +309,7 @@ Example rewrite intent:
 * Override target: `https://api.staging.example.com`
 * Replayed URL: `https://api.staging.example.com/api/v1/login?redirect=/home`
 
-### 11.2 Per-Engine Capacity Limits (VU Model)
+### 10.2 Per-Engine Capacity Limits (VU Model)
 
 Replay engines SHOULD expose virtual-user (VU) worker controls rather than treating VU count as a request-per-second or total-load throttle.
 
@@ -357,7 +334,7 @@ Distributed replay note:
 * In multi-engine deployments, the VU limit applies per engine.
 * The sum of per-engine worker limits is aggregate VU capacity, not an aggregate load ceiling. Operators SHOULD size and shard replay engines for the capture's peak open connections and multiplexed stream concurrency.
 
-### 11.3 Replay Outcome Model
+### 10.3 Replay Outcome Model
 
 Replay execution MUST produce deterministic run outcomes at three levels: request, connection, and run.
 
@@ -387,7 +364,7 @@ Exit status guidance:
 * Engine SHOULD return exit code `0` for `partial_success` by default.
 * Engine MAY make `partial_success` exit behavior configurable when operators need non-zero behavior in CI-style contexts.
 
-### 11.4 Metrics Emission and Scrape Endpoint
+### 10.4 Metrics Emission and Scrape Endpoint
 
 Replay engines MUST expose Prometheus metrics over HTTP at `/metrics` for pull-based scraping.
 
@@ -414,7 +391,7 @@ Engine-specific integrations MAY configure a different Prometheus namespace and 
 
 For `replay_status_counter`, the `status` label MAY contain either a numeric HTTP status code or a synthetic transport status such as `timeout`, `connection_refused`, `connection_reset`, `tls`, `network`, or `send_error` when no HTTP response was received.
 
-### 11.5 Runtime Configuration (YAML)
+### 10.5 Runtime Configuration (YAML)
 
 Replay runtime behavior SHOULD be configurable via a YAML file.
 
@@ -497,15 +474,7 @@ POST and mutation requests may cause side effects if replayed against production
 
 ---
 
-## 12. Versioning Strategy
-
-* `format_version` MUST follow semantic versioning
-* Backward-incompatible changes require major version bump
-* New optional fields may be added in minor versions
-
----
-
-## 13. Future Extensions (Optional)
+## 11. Future Extensions (Optional)
 
 Example replay hints:
 
@@ -525,7 +494,7 @@ Example tagging:
 
 ---
 
-## 14. Summary
+## 12. Summary
 
 This specification provides:
 

@@ -83,10 +83,6 @@ In addition to the summary printed to stdout, the engine maintains aggregate out
 - `ConnectionResult` — fields: `node`, `connection_id`, `outcome` (`completed`/`aborted`), plus per-connection aggregate counters (`requests_sent`, `responses_received`, `send_errors`, `validation_failed`, `skipped`).
 - `RequestResult` — retained as an API type for future bounded detail output; `Summary.RequestResults` and `ConnectionResult.Requests` are not populated during normal replay so large captures do not retain one result per request.
 
-## Migration note
-
-When present, the NDJSON meta header's format version is validated. Recordings without a meta event continue to use the legacy event format.
-
 ## Example config (replay/config.yaml)
 
 See `config.yaml` in this directory for a ready-to-use example demonstrating safe defaults, metrics, and override usage.

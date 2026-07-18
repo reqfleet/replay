@@ -3,7 +3,6 @@ package model
 type EventType string
 
 const (
-	EventMeta            EventType = "meta"
 	EventConnectionOpen  EventType = "connection_open"
 	EventRequest         EventType = "request"
 	EventResponse        EventType = "response"
@@ -19,7 +18,6 @@ const (
 
 type Event struct {
 	Type          EventType     `json:"type"`
-	FormatVersion string        `json:"format_version,omitempty"`
 	Node          string        `json:"node,omitempty"`
 	ConnectionID  int           `json:"connection_id"`
 	StreamID      int           `json:"stream_id,omitempty"`

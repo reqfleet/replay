@@ -190,19 +190,6 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			event.AccessLogType = model.AccessLogTypeDownstreamStart
 		}
 
-		// Optional meta event validation
-		if event.Type == model.EventMeta {
-			fv := event.FormatVersion
-			if fv == "" {
-				return fmt.Errorf("line %d: missing format_version", line)
-			}
-			// require major version 1 for now
-			parts := strings.SplitN(fv, ".", 2)
-			if parts[0] != "1" {
-				return fmt.Errorf("line %d: unsupported format_version: %s", line, fv)
-			}
-		}
-
 		// Basic timestamp validation when present
 		if event.Timestamp != "" {
 			if _, ok := model.ParseTimestamp(event.Timestamp); !ok {
@@ -271,9 +258,6 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			}
 			connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
 			delete(states, connectionKey)
-
-		case model.EventMeta:
-			// already validated above
 
 		default:
 			return fmt.Errorf("line %d: unknown event type: %s", line, event.Type)

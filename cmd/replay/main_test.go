@@ -285,7 +285,6 @@ func TestShutdownMetricsServerDrainsInFlightRequest(t *testing.T) {
 func writeReplayLog(t *testing.T, authority string) string {
 	t.Helper()
 	content := strings.Join([]string{
-		`{"type":"meta","format_version":"1.0"}`,
 		`{"type":"connection_open","connection_id":1}`,
 		fmt.Sprintf(`{"type":"request","connection_id":1,"http":{"method":"GET","scheme":"http","authority":%q,"path":"/transport"}}`, authority),
 		`{"type":"connection_close","connection_id":1,"reason":"remote_close"}`,
