@@ -426,7 +426,6 @@ Minimum configurable domains:
 * Validation: status, header, body, and ignored-header controls.
 * Pacing: optional timestamp-delta replay with a maximum sleep cap.
 * Lifecycle: whether replay requires `connection_open` before requests.
-* Environment variables: key/value pairs injected into replay process/runtime.
 * Metrics server: listen address/port, endpoint enable toggle (default enabled), path (default `/metrics`).
 * Capacity controls: `max_virtual_users_per_engine`, `max_active_connections_per_engine` (`0` means unlimited).
 
@@ -489,9 +488,6 @@ metrics:
     - name: "zone"
       value: "unknown"
       env: "REPLAY_ZONE"
-env:
-  TARGET_ENV: "staging"
-  AUTH_MODE: "token-rewrite"
 ```
 
 Each `validation.status`, `validation.headers`, and `validation.body` field

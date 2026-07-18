@@ -163,21 +163,6 @@ func TestApplyEnvMetricLabelRefsFallback(t *testing.T) {
 			},
 		},
 		{
-			name: "uses cfg env values before they are exported into process env",
-			configure: func(cfg *Config) {
-				cfg.Metrics.CommonLabels = []MetricLabel{
-					{Name: "tenant_id", Value: "tenant-yaml", Env: "TENANT_ID_FROM_CFG_ENV"},
-					{Name: "run_id", Value: "run-yaml", Env: "RUN_ID_FROM_CFG_ENV"},
-				}
-				cfg.Env["TENANT_ID_FROM_CFG_ENV"] = "tenant-from-cfg-env"
-				cfg.Env["RUN_ID_FROM_CFG_ENV"] = "run-from-cfg-env"
-			},
-			want: []MetricLabel{
-				{Name: "tenant_id", Value: "tenant-from-cfg-env", Env: "TENANT_ID_FROM_CFG_ENV"},
-				{Name: "run_id", Value: "run-from-cfg-env", Env: "RUN_ID_FROM_CFG_ENV"},
-			},
-		},
-		{
 			name: "falls back to defaults when no literal override is provided",
 			configure: func(cfg *Config) {
 				cfg.Metrics.CommonLabels = []MetricLabel{

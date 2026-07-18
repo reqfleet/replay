@@ -18,8 +18,6 @@ type Config struct {
 	Metrics MetricsConfig        `yaml:"metrics"`
 	Target  TargetOverrideConfig `yaml:"target"`
 
-	Env map[string]string `yaml:"env"`
-
 	Header HeaderRewriteConfig `yaml:"header_rewrite"`
 }
 
@@ -208,7 +206,6 @@ func Default() Config {
 			},
 			GracefulTerminationPeriod: 5 * time.Second,
 		},
-		Env:    map[string]string{},
 		Target: TargetOverrideConfig{},
 		Header: HeaderRewriteConfig{Set: map[string]string{}},
 	}
@@ -385,7 +382,7 @@ func (c *Config) resolveLabelValue(currentValue, envKey string) string {
 	if envKey == "" {
 		return currentValue
 	}
-	if value, ok := lookupEnvValue(envKey, c.Env); ok {
+	if value, ok := os.LookupEnv(envKey); ok && value != "" {
 		return value
 	}
 	return currentValue
@@ -552,14 +549,4 @@ func isValidMetricLabelName(name string) bool {
 		return false
 	}
 	return true
-}
-
-func lookupEnvValue(key string, fallbacks map[string]string) (string, bool) {
-	if value, ok := os.LookupEnv(key); ok && value != "" {
-		return value, true
-	}
-	if value, ok := fallbacks[key]; ok && value != "" {
-		return value, true
-	}
-	return "", false
 }
