@@ -4,6 +4,8 @@ BIN_DIR ?= bin
 IMG ?= $(BINARY)
 PKG ?= ./...
 LOG ?= requests.log
+E2E_REPLAY := $(BIN_DIR)/e2e_replay
+E2E_GENERATED_LOG := $(BIN_DIR)/e2e-generated-body.ndjson
 
 # Target OS and architecture for build
 GOOS ?= $(shell $(GO) env GOOS)
@@ -28,18 +30,55 @@ e2e-server-stop:
 	@if [ -f e2e_server.pid ]; then \
 		echo "Stopping test server..."; \
 		kill $$(cat e2e_server.pid) || true; \
-		rm -f e2e_server.pid $(BIN_DIR)/e2e_test_server; \
+		rm -f e2e_server.pid $(BIN_DIR)/e2e_test_server $(E2E_REPLAY) $(E2E_GENERATED_LOG); \
 	else \
 		echo "No test server running."; \
 	fi
 
 e2e: e2e-server-start
+	@$(GO) build -o $(E2E_REPLAY) ./cmd/replay || ($(MAKE) e2e-server-stop; exit 1)
 	@echo "Running e2e tests..."
-	@$(GO) run ./cmd/replay -log e2e/requests-ndjson.log -verbose || ($(MAKE) e2e-server-stop; exit 1)
+	@$(E2E_REPLAY) -log e2e/requests-ndjson.log -verbose || ($(MAKE) e2e-server-stop; exit 1)
 	@echo "Running e2e tests with gzip..."
-	@$(GO) run ./cmd/replay -log e2e/requests-ndjson.log.gz -gzip -verbose || ($(MAKE) e2e-server-stop; exit 1)
+	@$(E2E_REPLAY) -log e2e/requests-ndjson.log.gz -gzip -verbose || ($(MAKE) e2e-server-stop; exit 1)
 	@echo "Running e2e tests with zstd..."
-	@$(GO) run ./cmd/replay -log e2e/requests-ndjson.log.zst -zstd -verbose || ($(MAKE) e2e-server-stop; exit 1)
+	@$(E2E_REPLAY) -log e2e/requests-ndjson.log.zst -zstd -verbose || ($(MAKE) e2e-server-stop; exit 1)
+	@echo "Running generated downstream-end request body e2e test..."
+	@$(GO) run ./tools/generate_requests.go \
+		-base http://localhost:6000 \
+		-subpath e2e/request-body \
+		-reqs 1 \
+		-conns 1 \
+		-status 200 \
+		-header 'Content-Type: application/json' \
+		-header 'X-E2E-Trace: one' \
+		-header 'X-E2E-Trace: two' \
+		-body '{"message":"hello"}' \
+		-out $(E2E_GENERATED_LOG) || ($(MAKE) e2e-server-stop; exit 1)
+	@$(E2E_REPLAY) -config e2e/response-validation.yaml -log $(E2E_GENERATED_LOG) -verbose || ($(MAKE) e2e-server-stop; exit 1)
+	@echo "Running matching status, body, and header validation e2e test..."
+	@$(E2E_REPLAY) -config e2e/response-validation.yaml -log e2e/response-validation-match.ndjson -verbose || ($(MAKE) e2e-server-stop; exit 1)
+	@echo "Running mismatched response body validation e2e test..."
+	@$(E2E_REPLAY) -config e2e/response-validation.yaml -log e2e/response-validation-body-mismatch.ndjson -verbose; status=$$?; \
+		if [ $$status -ne 1 ]; then \
+			echo "Mismatched response body exit code = $$status, want 1"; \
+			$(MAKE) e2e-server-stop; \
+			exit 1; \
+		fi
+	@echo "Running mismatched response header validation e2e test..."
+	@$(E2E_REPLAY) -config e2e/response-validation.yaml -log e2e/response-validation-header-mismatch.ndjson -verbose; status=$$?; \
+		if [ $$status -ne 1 ]; then \
+			echo "Mismatched response header exit code = $$status, want 1"; \
+			$(MAKE) e2e-server-stop; \
+			exit 1; \
+		fi
+	@echo "Running mismatched response status validation e2e test..."
+	@$(E2E_REPLAY) -config e2e/response-validation.yaml -log e2e/response-validation-status-mismatch.ndjson -verbose; status=$$?; \
+		if [ $$status -ne 1 ]; then \
+			echo "Mismatched response status exit code = $$status, want 1"; \
+			$(MAKE) e2e-server-stop; \
+			exit 1; \
+		fi
 	@$(MAKE) e2e-server-stop
 	@echo "e2e tests passed."
 alltests: test e2e
