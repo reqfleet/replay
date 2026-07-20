@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"slices"
+
 	"github.com/reqfleet/replay/internal/model"
 )
 
