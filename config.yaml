@@ -32,6 +32,7 @@ replay:
     shard_count: 1
   checkpoint:
     file: "./checkpoint.json"
+    sync_interval: 1s
 
 metrics:
   enabled: true

@@ -38,16 +38,22 @@ func TestCheckpointWrittenOnSuccess(t *testing.T) {
 
 	tmp := t.TempDir()
 	ckPath := filepath.Join(tmp, "checkpoint.json")
-	store, err := newCheckpointStore(ckPath)
+	store, err := newCheckpointStore(ckPath, time.Second)
 	if err != nil {
 		t.Fatalf("new checkpoint store: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
 
 	client, transport := e.makePerConnectionClient(false)
 	defer transport.CloseIdleConnections()
 	summary := e.replayConnectionSerialized(context.Background(), client, []model.Event{req}, store)
 	if summary.RequestsSent != 1 {
 		t.Fatalf("expect 1 request sent, got %d", summary.RequestsSent)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("store.Close() error: %v", err)
 	}
 
 	b, err := os.ReadFile(ckPath)
@@ -65,40 +71,41 @@ func TestCheckpointWrittenOnSuccess(t *testing.T) {
 	}
 }
 
-func TestCheckpointPersistsEveryAdvance(t *testing.T) {
+func TestCheckpointPersistsLatestProgressOnInterval(t *testing.T) {
 	tmp := t.TempDir()
 	ckPath := filepath.Join(tmp, "checkpoint.json")
 	legacyTmpPath := ckPath + ".tmp"
 	if err := os.WriteFile(legacyTmpPath, []byte("sentinel"), 0o644); err != nil {
 		t.Fatalf("os.WriteFile(%q) error: %v", legacyTmpPath, err)
 	}
-	store, err := newCheckpointStore(ckPath)
+	store, err := newCheckpointStore(ckPath, 10*time.Millisecond)
 	if err != nil {
 		t.Fatalf("newCheckpointStore(%q) error: %v", ckPath, err)
 	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
 
 	key := model.ConnectionKey{Node: "envoy-a", ConnectionID: 1}
 	for sequence := 1; sequence <= 3; sequence++ {
 		if err := store.markProcessed(key, sequence); err != nil {
 			t.Fatalf("markProcessed(sequence=%d) error: %v", sequence, err)
 		}
-		if got := readCheckpointSequence(t, ckPath, key); got != sequence {
-			t.Fatalf("checkpoint sequence after mark %d = %d", sequence, got)
-		}
 	}
+	waitForCheckpointSequence(t, ckPath, key, 3, time.Second)
 	if err := store.Close(); err != nil {
 		t.Fatalf("store.Close() error: %v", err)
 	}
 
-	reloaded, err := newCheckpointStore(ckPath)
+	reloaded, err := newCheckpointStore(ckPath, time.Hour)
 	if err != nil {
 		t.Fatalf("reload checkpoint: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = reloaded.Close()
+	})
 	if !reloaded.alreadyProcessed(key, 3) {
-		t.Fatal("reloaded checkpoint does not contain acknowledged sequence 3")
-	}
-	if err := reloaded.Close(); err != nil {
-		t.Fatalf("reloaded.Close() error: %v", err)
+		t.Fatal("reloaded checkpoint does not contain sequence 3")
 	}
 	if got, err := os.ReadFile(legacyTmpPath); err != nil || string(got) != "sentinel" {
 		t.Fatalf("legacy temp sentinel = %q, %v; want untouched", got, err)
@@ -114,14 +121,108 @@ func TestCheckpointPersistsEveryAdvance(t *testing.T) {
 	}
 }
 
-func TestCheckpointConcurrentMarksAreDurableOnReturn(t *testing.T) {
-	const marks = 32
+func TestReplayUsesConfiguredCheckpointSyncInterval(t *testing.T) {
+	srv := startOKServer()
+	defer srv.Close()
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
 
 	path := filepath.Join(t.TempDir(), "checkpoint.json")
-	store, err := newCheckpointStore(path)
+	cfg := config.Default()
+	cfg.Replay.Lifecycle.RequireOpen = false
+	cfg.Replay.Checkpoint.File = path
+	cfg.Replay.Checkpoint.SyncInterval = 10 * time.Millisecond
+	eng := New(cfg, metrics.New(cfg.Metrics))
+
+	type streamResult struct {
+		summary Summary
+		err     error
+	}
+	events := make(chan model.Event)
+	resultCh := make(chan streamResult, 1)
+	go func() {
+		summary, replayErr := eng.ReplayStream(context.Background(), events)
+		resultCh <- streamResult{summary: summary, err: replayErr}
+	}()
+	var closeEventsOnce sync.Once
+	closeEvents := func() {
+		closeEventsOnce.Do(func() {
+			close(events)
+		})
+	}
+	t.Cleanup(closeEvents)
+
+	key := model.ConnectionKey{Node: "envoy-a", ConnectionID: 1}
+	events <- model.Event{
+		Type:         model.EventRequest,
+		Node:         key.Node,
+		ConnectionID: key.ConnectionID,
+		Sequence:     1,
+		HTTP: model.HTTPRequestMeta{
+			Method:    http.MethodGet,
+			Scheme:    target.Scheme,
+			Authority: target.Host,
+			Path:      "/",
+		},
+	}
+	waitForCheckpointSequence(t, path, key, 1, time.Second)
+	closeEvents()
+
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			t.Fatalf("ReplayStream(configured checkpoint interval) error: %v", result.err)
+		}
+		if got, want := result.summary.RequestsSent, int64(1); got != want {
+			t.Errorf("ReplayStream(configured checkpoint interval).RequestsSent = %d, want %d", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ReplayStream(configured checkpoint interval) did not finish")
+	}
+}
+
+func TestCheckpointCloseFlushesLatestInMemoryProgress(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "checkpoint.json")
+	store, err := newCheckpointStore(path, time.Hour)
 	if err != nil {
 		t.Fatalf("newCheckpointStore(%q) error: %v", path, err)
 	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	key := model.ConnectionKey{Node: "envoy-a", ConnectionID: 1}
+	if err := store.markProcessed(key, 3); err != nil {
+		t.Fatalf("markProcessed(%v, 3) error: %v", key, err)
+	}
+	if !store.alreadyProcessed(key, 3) {
+		t.Fatalf("alreadyProcessed(%v, 3) = false, want true", key)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("os.Stat(%q) error = %v, want not-exist error before periodic sync", path, err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("store.Close() error: %v", err)
+	}
+	if got := readCheckpointSequence(t, path, key); got != 3 {
+		t.Fatalf("checkpoint sequence after Close() = %d, want 3", got)
+	}
+}
+
+func TestCheckpointConcurrentMarksPersistOnClose(t *testing.T) {
+	const marks = 32
+
+	path := filepath.Join(t.TempDir(), "checkpoint.json")
+	store, err := newCheckpointStore(path, time.Hour)
+	if err != nil {
+		t.Fatalf("newCheckpointStore(%q) error: %v", path, err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
 
 	start := make(chan struct{})
 	results := make(chan error, marks)
@@ -137,18 +238,8 @@ func TestCheckpointConcurrentMarksAreDurableOnReturn(t *testing.T) {
 				results <- fmt.Errorf("markProcessed(%v, 1): %w", key, err)
 				return
 			}
-			payload, err := os.ReadFile(path)
-			if err != nil {
-				results <- fmt.Errorf("os.ReadFile(%q) after markProcessed(%v, 1): %w", path, key, err)
-				return
-			}
-			var data checkpointData
-			if err := json.Unmarshal(payload, &data); err != nil {
-				results <- fmt.Errorf("json.Unmarshal(checkpoint) after markProcessed(%v, 1): %w", key, err)
-				return
-			}
-			if got := data.Connections[key]; got != 1 {
-				results <- fmt.Errorf("checkpoint sequence after markProcessed(%v, 1) = %d, want 1", key, got)
+			if !store.alreadyProcessed(key, 1) {
+				results <- fmt.Errorf("alreadyProcessed(%v, 1) = false, want true", key)
 				return
 			}
 			results <- nil
@@ -163,8 +254,25 @@ func TestCheckpointConcurrentMarksAreDurableOnReturn(t *testing.T) {
 			t.Error(err)
 		}
 	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("os.Stat(%q) error = %v, want not-exist error before Close()", path, err)
+	}
 	if err := store.Close(); err != nil {
-		t.Errorf("store.Close() error: %v", err)
+		t.Fatalf("store.Close() error: %v", err)
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile(%q) error: %v", path, err)
+	}
+	var data checkpointData
+	if err := json.Unmarshal(payload, &data); err != nil {
+		t.Fatalf("json.Unmarshal(checkpoint) error: %v", err)
+	}
+	for connectionID := 1; connectionID <= marks; connectionID++ {
+		key := model.ConnectionKey{Node: "envoy-a", ConnectionID: connectionID}
+		if got := data.Connections[key]; got != 1 {
+			t.Errorf("checkpoint sequence for %v = %d, want 1", key, got)
+		}
 	}
 }
 
@@ -185,7 +293,7 @@ func TestCheckpointRejectsUnsupportedVersions(t *testing.T) {
 			if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
 				t.Fatalf("os.WriteFile(%q) error: %v", path, err)
 			}
-			store, err := newCheckpointStore(path)
+			store, err := newCheckpointStore(path, time.Second)
 			if tt.wantErr {
 				if err == nil || !strings.Contains(err.Error(), "unsupported checkpoint version") {
 					t.Fatalf("newCheckpointStore(version=%d) error = %v", tt.version, err)
@@ -206,7 +314,7 @@ func TestCheckpointCloseReturnsPersistenceFailure(t *testing.T) {
 	tmp := t.TempDir()
 	parent := filepath.Join(tmp, "not-a-directory")
 	path := filepath.Join(parent, "checkpoint.json")
-	store, err := newCheckpointStore(path)
+	store, err := newCheckpointStore(path, time.Hour)
 	if err != nil {
 		t.Fatalf("newCheckpointStore(%q) error: %v", path, err)
 	}
@@ -215,16 +323,15 @@ func TestCheckpointCloseReturnsPersistenceFailure(t *testing.T) {
 	}
 
 	key := model.ConnectionKey{Node: "envoy-a", ConnectionID: 1}
-	markErr := store.markProcessed(key, 1)
-	if markErr == nil {
-		t.Fatal("markProcessed() error = nil, want persistence failure")
+	if err := store.markProcessed(key, 1); err != nil {
+		t.Fatalf("markProcessed(%v, 1) error: %v", key, err)
 	}
 	closeErr := store.Close()
-	if closeErr == nil || closeErr.Error() != markErr.Error() {
-		t.Fatalf("store.Close() error = %v, want first error %v", closeErr, markErr)
+	if closeErr == nil {
+		t.Fatal("store.Close() error = nil, want persistence failure")
 	}
-	if secondErr := store.Close(); secondErr == nil || secondErr.Error() != markErr.Error() {
-		t.Fatalf("second store.Close() error = %v, want first error %v", secondErr, markErr)
+	if secondErr := store.Close(); secondErr == nil || secondErr.Error() != closeErr.Error() {
+		t.Fatalf("second store.Close() error = %v, want first error %v", secondErr, closeErr)
 	}
 }
 
@@ -239,14 +346,20 @@ func TestCheckpointPathsAreIsolatedByShard(t *testing.T) {
 		t.Fatalf("shard checkpoint paths = %q, %q", firstPath, secondPath)
 	}
 
-	first, err := newCheckpointStore(firstPath)
+	first, err := newCheckpointStore(firstPath, time.Hour)
 	if err != nil {
 		t.Fatalf("newCheckpointStore(first) error: %v", err)
 	}
-	second, err := newCheckpointStore(secondPath)
+	t.Cleanup(func() {
+		_ = first.Close()
+	})
+	second, err := newCheckpointStore(secondPath, time.Hour)
 	if err != nil {
 		t.Fatalf("newCheckpointStore(second) error: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = second.Close()
+	})
 	firstKey := model.ConnectionKey{Node: "envoy-a", ConnectionID: 1}
 	secondKey := model.ConnectionKey{Node: "envoy-b", ConnectionID: 2}
 	if err := first.markProcessed(firstKey, 3); err != nil {
@@ -254,6 +367,12 @@ func TestCheckpointPathsAreIsolatedByShard(t *testing.T) {
 	}
 	if err := second.markProcessed(secondKey, 7); err != nil {
 		t.Fatalf("second.markProcessed() error: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("first.Close() error: %v", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("second.Close() error: %v", err)
 	}
 	if got := readCheckpointSequence(t, firstPath, firstKey); got != 3 {
 		t.Fatalf("first shard sequence = %d, want 3", got)
@@ -329,6 +448,29 @@ func readCheckpointSequence(t *testing.T, path string, key model.ConnectionKey) 
 	return data.Connections[key]
 }
 
+func waitForCheckpointSequence(t *testing.T, path string, key model.ConnectionKey, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var got int
+	for time.Now().Before(deadline) {
+		payload, err := os.ReadFile(path)
+		if err == nil {
+			var data checkpointData
+			if err := json.Unmarshal(payload, &data); err != nil {
+				t.Fatalf("json.Unmarshal(%q) error: %v", path, err)
+			}
+			got = data.Connections[key]
+			if got == want {
+				return
+			}
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("os.ReadFile(%q) error: %v", path, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("checkpoint sequence after %s = %d, want %d", timeout, got, want)
+}
+
 func TestCheckpointNotWrittenInDryRun(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.Lifecycle.RequireOpen = false
@@ -346,22 +488,25 @@ func TestCheckpointNotWrittenInDryRun(t *testing.T) {
 
 	tmp := t.TempDir()
 	ckPath := filepath.Join(tmp, "checkpoint.json")
-	store, err := newCheckpointStore(ckPath)
+	store, err := newCheckpointStore(ckPath, time.Second)
 	if err != nil {
 		t.Fatalf("new checkpoint store: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
 
 	client, transport := e.makePerConnectionClient(false)
 	defer transport.CloseIdleConnections()
 	summary := e.replayConnectionSerialized(context.Background(), client, []model.Event{req}, store)
 	if summary.Skipped == 0 {
-		t.Fatalf("expected skipped > 0 for dry run")
+		t.Fatalf("expected skipped > 0, got %d", summary.Skipped)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("store.Close() error: %v", err)
 	}
 	if _, err := os.Stat(ckPath); !os.IsNotExist(err) {
-		if err == nil {
-			t.Fatalf("expected no checkpoint file written in dry run")
-		}
-		t.Fatalf("unexpected stat error: %v", err)
+		t.Fatalf("os.Stat(%q) error = %v, want not-exist error", ckPath, err)
 	}
 }
 
@@ -380,16 +525,22 @@ func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
 
 	tmp := t.TempDir()
 	ckPath := filepath.Join(tmp, "checkpoint.json")
-	store, err := newCheckpointStore(ckPath)
+	store, err := newCheckpointStore(ckPath, time.Second)
 	if err != nil {
 		t.Fatalf("new checkpoint store: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
 
 	client, transport := e.makePerConnectionClient(false)
 	defer transport.CloseIdleConnections()
 	summary := e.replayConnectionSerialized(context.Background(), client, []model.Event{req}, store)
 	if summary.Skipped != 1 {
-		t.Fatalf("expected 1 skipped, got %d", summary.Skipped)
+		t.Fatalf("summary.Skipped = %d, want 1", summary.Skipped)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("store.Close() error: %v", err)
 	}
 	b, err := os.ReadFile(ckPath)
 	if err != nil {
