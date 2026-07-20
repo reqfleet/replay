@@ -156,14 +156,15 @@ func (c *checkpointStore) persist() {
 	err := persistCheckpointData(c.path, copyData)
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if err != nil {
 		if c.persistErr == nil {
 			c.persistErr = err
 		}
+		c.mu.Unlock()
 		return
 	}
 	c.persistedGeneration = generation
+	c.mu.Unlock()
 }
 
 func persistCheckpointData(path string, data checkpointData) error {
