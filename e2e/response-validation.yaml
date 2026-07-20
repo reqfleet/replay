@@ -1,0 +1,8 @@
+metrics:
+  enabled: false
+replay:
+  partial_success_exit_zero: false
+  validation:
+    status: true
+    headers: true
+    body: true
