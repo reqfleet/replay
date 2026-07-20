@@ -5,7 +5,6 @@ type EventType string
 const (
 	EventConnectionOpen  EventType = "connection_open"
 	EventRequest         EventType = "request"
-	EventResponse        EventType = "response"
 	EventConnectionClose EventType = "connection_close"
 )
 
@@ -35,6 +34,8 @@ type Event struct {
 	HTTP                    HTTPRequestMeta     `json:"http"`
 	Headers                 map[string][]string `json:"headers,omitempty"`
 	Body                    *Body               `json:"body,omitempty"`
+	ResponseHeaders         map[string][]string `json:"response_headers,omitempty"`
+	ResponseBody            *Body               `json:"response_body,omitempty"`
 }
 
 type HTTPRequestMeta struct {

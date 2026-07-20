@@ -92,6 +92,9 @@ See `config.yaml` in this directory for a ready-to-use example demonstrating saf
 Use `config.yaml` to control retry, response validation, pacing, lifecycle, and idempotency safeguards.
 Each `validation.status`, `validation.headers`, and `validation.body` field
 directly enables that check; there is no aggregate validation toggle.
+Validation expectations are authoritative fields on `DownstreamEnd` request
+events: `status`, `response_headers`, and `response_body`. Replay validates the
+target response immediately and rejects separate `response` events.
 
 ```yaml
 replay:
