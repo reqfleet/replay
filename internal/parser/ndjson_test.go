@@ -28,6 +28,36 @@ func TestParseSuccess(t *testing.T) {
 	}
 }
 
+func TestParseDownstreamEndResponseExpectations(t *testing.T) {
+	input := strings.NewReader(
+		"{" +
+			`"type":"request","log_type":"DownstreamEnd","connection_id":1,"status":200,` +
+			`"response_headers":{"content-type":["application/json"]},` +
+			`"response_body":{"encoding":"base64","content":"b2s=","size_bytes":2},` +
+			`"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
+			"}\n")
+
+	var got model.Event
+	if err := ParseStream(input, func(event model.Event) error {
+		got = event
+		return nil
+	}); err != nil {
+		t.Fatalf("ParseStream(DownstreamEnd request) error: %v", err)
+	}
+	if got.AccessLogType != model.AccessLogTypeDownstreamEnd {
+		t.Errorf("AccessLogType = %q, want %q", got.AccessLogType, model.AccessLogTypeDownstreamEnd)
+	}
+	if got.Status != 200 {
+		t.Errorf("Status = %d, want 200", got.Status)
+	}
+	if values := got.ResponseHeaders["content-type"]; len(values) != 1 || values[0] != "application/json" {
+		t.Errorf("ResponseHeaders[content-type] = %v, want [application/json]", values)
+	}
+	if got.ResponseBody == nil || got.ResponseBody.Content != "b2s=" {
+		t.Errorf("ResponseBody = %#v, want base64 content b2s=", got.ResponseBody)
+	}
+}
+
 func TestParseDownstreamStartAccessLogAsRequest(t *testing.T) {
 	input := strings.NewReader("{" +
 		`"type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22.001Z","http":{"method":"GET","authority":"example.com","path":"/start"}` +
@@ -250,30 +280,14 @@ func TestParseRejectsNonMonotonicSequence(t *testing.T) {
 	}
 }
 
-func TestParseAssignsResponseSequenceFromRequest(t *testing.T) {
+func TestParseRejectsResponseEvent(t *testing.T) {
 	input := strings.NewReader(
 		"{" +
-			`"type":"request","connection_id":1,"stream_id":7,"http":{"method":"GET","scheme":"http","authority":"example.com","path":"/a"}` +
-			"}\n" +
-			"{" +
 			`"type":"response","connection_id":1,"stream_id":7,"status":200}` +
 			"\n")
 
-	events := make([]model.Event, 0)
-	if err := ParseStream(input, func(e model.Event) error {
-		events = append(events, e)
-		return nil
-	}); err != nil {
-		t.Fatalf("parse failed: %v", err)
-	}
-	if got, want := len(events), 2; got != want {
-		t.Fatalf("ParseStream() event count = %d, want %d", got, want)
-	}
-	if got, want := events[0].Sequence, 1; got != want {
-		t.Errorf("ParseStream(request sequence) = %d, want %d", got, want)
-	}
-	if got, want := events[1].Sequence, 1; got != want {
-		t.Errorf("ParseStream(response sequence) = %d, want %d", got, want)
+	if err := ParseStream(input, func(model.Event) error { return nil }); err == nil {
+		t.Fatal("ParseStream(response event) error = nil, want error")
 	}
 }
 
@@ -361,29 +375,5 @@ func TestParseConnectionCloseInvalidReason(t *testing.T) {
 	err := ParseStream(input, func(e model.Event) error { return nil })
 	if err == nil {
 		t.Fatal("expected error for invalid connection_close reason")
-	}
-}
-
-func TestParseResponseDefaultsHTTP11StreamID(t *testing.T) {
-	input := strings.NewReader(
-		"{" +
-			`"type":"request","connection_id":1,"stream_id":1,"http":{"version":"HTTP/1.1","method":"GET","scheme":"http","authority":"example.com","path":"/"}` +
-			"}\n" +
-			"{" +
-			`"type":"response","connection_id":1,"http":{"version":"HTTP/1.1"},"status":200` +
-			"}\n")
-
-	events := make([]model.Event, 0)
-	if err := ParseStream(input, func(e model.Event) error {
-		events = append(events, e)
-		return nil
-	}); err != nil {
-		t.Fatalf("parse failed: %v", err)
-	}
-	if len(events) != 2 {
-		t.Fatalf("expected 2 events, got %d", len(events))
-	}
-	if got, want := events[1].StreamID, 1; got != want {
-		t.Errorf("ParseStream(response HTTP/1.1 stream_id) = %d, want %d", got, want)
 	}
 }

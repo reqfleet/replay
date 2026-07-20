@@ -23,25 +23,16 @@ var allowedCloseReasons = map[string]struct{}{
 }
 
 type connectionSequenceState struct {
-	nextRequestSequence     int
-	lastRequestSequence     int
-	requestSequenceByStream map[int]int
+	nextRequestSequence int
 }
 
-func (s *connectionSequenceState) recordRequest(streamID, provided int) (int, error) {
+func (s *connectionSequenceState) recordRequest(provided int) (int, error) {
 	if provided > 0 {
 		if s.nextRequestSequence > 0 && provided < s.nextRequestSequence {
 			return 0, fmt.Errorf("non-monotonic sequence")
 		}
 		if provided >= s.nextRequestSequence {
 			s.nextRequestSequence = provided + 1
-		}
-		s.lastRequestSequence = provided
-		if streamID > 0 {
-			if s.requestSequenceByStream == nil {
-				s.requestSequenceByStream = make(map[int]int)
-			}
-			s.requestSequenceByStream[streamID] = provided
 		}
 		return provided, nil
 	}
@@ -51,29 +42,7 @@ func (s *connectionSequenceState) recordRequest(streamID, provided int) (int, er
 	}
 	sequence := s.nextRequestSequence
 	s.nextRequestSequence++
-	s.lastRequestSequence = sequence
-	if streamID > 0 {
-		if s.requestSequenceByStream == nil {
-			s.requestSequenceByStream = make(map[int]int)
-		}
-		s.requestSequenceByStream[streamID] = sequence
-	}
 	return sequence, nil
-}
-
-func (s *connectionSequenceState) recordResponse(streamID, provided int) (int, error) {
-	if provided > 0 {
-		return provided, nil
-	}
-	if streamID > 0 && s.requestSequenceByStream != nil {
-		if sequence, ok := s.requestSequenceByStream[streamID]; ok {
-			return sequence, nil
-		}
-	}
-	if s.lastRequestSequence > 0 {
-		return s.lastRequestSequence, nil
-	}
-	return 0, fmt.Errorf("response missing sequence")
 }
 
 var readers = map[string]func(io.Reader) (io.ReadCloser, error){
@@ -198,7 +167,7 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		}
 
 		var isHTTP11 bool
-		if event.Type == model.EventRequest || event.Type == model.EventResponse {
+		if event.Type == model.EventRequest {
 			isHTTP11 = len(event.HTTP.Version) >= 8 && strings.EqualFold(event.HTTP.Version[:8], "HTTP/1.1")
 			if isHTTP11 && event.StreamID == 0 {
 				event.StreamID = 1
@@ -214,7 +183,7 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 				continue
 			}
 			connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
-			sequence, err := stateForConnection(connectionKey).recordRequest(event.StreamID, event.Sequence)
+			sequence, err := stateForConnection(connectionKey).recordRequest(event.Sequence)
 			if err != nil {
 				return fmt.Errorf("line %d: %w", line, err)
 			}
@@ -228,17 +197,6 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 			if isHTTP11 && event.StreamID != 1 {
 				return fmt.Errorf("line %d: HTTP/1.1 requests must use stream_id=1", line)
 			}
-
-		case model.EventResponse:
-			if !hasConnectionID {
-				return fmt.Errorf("line %d: response missing connection_id", line)
-			}
-			connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
-			sequence, err := stateForConnection(connectionKey).recordResponse(event.StreamID, event.Sequence)
-			if err != nil {
-				return fmt.Errorf("line %d: %w", line, err)
-			}
-			event.Sequence = sequence
 
 		case model.EventConnectionOpen:
 			if !hasConnectionID {

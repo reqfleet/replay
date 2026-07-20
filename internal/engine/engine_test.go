@@ -759,56 +759,6 @@ func TestMetricStatusForSendErrorUsesStructuredErrors(t *testing.T) {
 	}
 }
 
-func TestReplayMarksValidationFailedOnStatusMismatch(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("boom"))
-	}))
-	defer srv.Close()
-	target, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("url parse failed: %v", err)
-	}
-
-	cfg := config.Default()
-
-	cfg.Replay.Validation.Status = true
-
-	eng := New(cfg, metrics.New(cfg.Metrics))
-	events := []model.Event{
-		{Type: model.EventConnectionOpen, ConnectionID: 1},
-		{
-			Type:         model.EventRequest,
-			ConnectionID: 1,
-			Sequence:     1,
-			HTTP: model.HTTPRequestMeta{
-				Method:    http.MethodGet,
-				Scheme:    target.Scheme,
-				Authority: target.Host,
-				Path:      "/",
-			},
-		},
-		{
-			Type:         model.EventResponse,
-			ConnectionID: 1,
-			Sequence:     1,
-			Status:       http.StatusOK,
-		},
-		{Type: model.EventConnectionClose, ConnectionID: 1},
-	}
-
-	summary, err := runReplay(eng, events)
-	if err != nil {
-		t.Fatalf("replay failed: %v", err)
-	}
-	if summary.ValidationFailed != 1 {
-		t.Fatalf("summary.ValidationFailed = %d, want 1", summary.ValidationFailed)
-	}
-	if summary.Outcome != RunPartialSuccess {
-		t.Fatalf("summary.Outcome = %s, want %s", summary.Outcome, RunPartialSuccess)
-	}
-}
-
 func TestDownstreamStartRequestSkipsInlineResponseValidation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -899,140 +849,19 @@ func TestDownstreamEndRequestValidatesInlineResponseStatus(t *testing.T) {
 	}
 }
 
-func TestDownstreamEndRequestPreservesLaterResponseValidation(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	}))
-	defer srv.Close()
-	target, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("url parse failed: %v", err)
-	}
-
+func TestReplayRejectsResponseEvents(t *testing.T) {
 	cfg := config.Default()
-
-	cfg.Replay.Validation.Status = true
+	cfg.Replay.Lifecycle.RequireOpen = false
 	eng := New(cfg, metrics.New(cfg.Metrics))
-	events := []model.Event{
-		{Type: model.EventConnectionOpen, ConnectionID: 1},
-		{
-			Type:          model.EventRequest,
-			AccessLogType: model.AccessLogTypeDownstreamEnd,
-			ConnectionID:  1,
-			Sequence:      1,
-			Status:        http.StatusOK,
-			HTTP: model.HTTPRequestMeta{
-				Method:    http.MethodGet,
-				Scheme:    target.Scheme,
-				Authority: target.Host,
-				Path:      "/",
-			},
-		},
-		{
-			Type:         model.EventResponse,
-			ConnectionID: 1,
-			Sequence:     1,
-			Status:       http.StatusInternalServerError,
-		},
-		{Type: model.EventConnectionClose, ConnectionID: 1},
-	}
+	events := []model.Event{{
+		Type:         model.EventType("response"),
+		ConnectionID: 1,
+		Sequence:     1,
+		Status:       http.StatusOK,
+	}}
 
-	summary, err := runReplay(eng, events)
-	if err != nil {
-		t.Fatalf("replay failed: %v", err)
-	}
-	if got, want := summary.ValidationFailed, int64(1); got != want {
-		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
-	}
-	if got, want := summary.Outcome, RunPartialSuccess; got != want {
-		t.Fatalf("summary.Outcome = %s, want %s", got, want)
-	}
-}
-
-func TestReplayMarksUnmatchedExpectedResponseAsValidationFailed(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	}))
-	defer srv.Close()
-	target, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("url parse failed: %v", err)
-	}
-
-	cfg := config.Default()
-
-	cfg.Replay.Validation.Status = true
-	eng := New(cfg, metrics.New(cfg.Metrics))
-	events := []model.Event{
-		{Type: model.EventConnectionOpen, ConnectionID: 1},
-		{
-			Type:         model.EventRequest,
-			ConnectionID: 1,
-			Sequence:     1,
-			HTTP: model.HTTPRequestMeta{
-				Method:    http.MethodGet,
-				Scheme:    target.Scheme,
-				Authority: target.Host,
-				Path:      "/",
-			},
-		},
-		{
-			Type:         model.EventResponse,
-			ConnectionID: 1,
-			Sequence:     2,
-			Status:       http.StatusOK,
-		},
-		{Type: model.EventConnectionClose, ConnectionID: 1},
-	}
-
-	summary, err := runReplay(eng, events)
-	if err != nil {
-		t.Fatalf("replay failed: %v", err)
-	}
-	if got, want := summary.ValidationFailed, int64(1); got != want {
-		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
-	}
-}
-
-func TestReplaySkipsValidationForSkippedRequestResponse(t *testing.T) {
-	cfg := config.Default()
-	cfg.Replay.DryRun = true
-
-	cfg.Replay.Validation.Status = true
-	eng := New(cfg, metrics.New(cfg.Metrics))
-	events := []model.Event{
-		{Type: model.EventConnectionOpen, ConnectionID: 1},
-		{
-			Type:         model.EventRequest,
-			ConnectionID: 1,
-			Sequence:     1,
-			HTTP: model.HTTPRequestMeta{
-				Method:    http.MethodGet,
-				Scheme:    "http",
-				Authority: "example.invalid",
-				Path:      "/",
-			},
-		},
-		{
-			Type:         model.EventResponse,
-			ConnectionID: 1,
-			Sequence:     1,
-			Status:       http.StatusOK,
-		},
-		{Type: model.EventConnectionClose, ConnectionID: 1},
-	}
-
-	summary, err := runReplay(eng, events)
-	if err != nil {
-		t.Fatalf("replay failed: %v", err)
-	}
-	if got, want := summary.Skipped, int64(1); got != want {
-		t.Fatalf("summary.Skipped = %d, want %d", got, want)
-	}
-	if got, want := summary.ValidationFailed, int64(0); got != want {
-		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
+	if _, err := runReplay(eng, events); err == nil {
+		t.Fatal("runReplay(response event) error = nil, want error")
 	}
 }
 
@@ -1081,18 +910,14 @@ func TestReplayDoesNotValidateResponseAfterTransportSendError(t *testing.T) {
 	events := []model.Event{
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
-			Type:         model.EventRequest,
-			ConnectionID: 1,
-			Sequence:     1,
+			Type:          model.EventRequest,
+			AccessLogType: model.AccessLogTypeDownstreamEnd,
+			ConnectionID:  1,
+			Sequence:      1,
+			Status:        http.StatusOK,
 			HTTP: model.HTTPRequestMeta{
 				Method: http.MethodGet, Scheme: "http", Authority: addr, Path: "/transport",
 			},
-		},
-		{
-			Type:         model.EventResponse,
-			ConnectionID: 1,
-			Sequence:     1,
-			Status:       http.StatusOK,
 		},
 		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
@@ -1227,24 +1052,20 @@ func TestReplayHeaderValidationIgnoresConfiguredHeaders(t *testing.T) {
 	events := []model.Event{
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
-			Type:         model.EventRequest,
-			ConnectionID: 1,
-			Sequence:     1,
+			Type:          model.EventRequest,
+			AccessLogType: model.AccessLogTypeDownstreamEnd,
+			ConnectionID:  1,
+			Sequence:      1,
+			Status:        http.StatusOK,
+			ResponseHeaders: map[string][]string{
+				"content-type": {"application/json"},
+				"x-request-id": {"expected-other-id"},
+			},
 			HTTP: model.HTTPRequestMeta{
 				Method:    http.MethodGet,
 				Scheme:    target.Scheme,
 				Authority: target.Host,
 				Path:      "/",
-			},
-		},
-		{
-			Type:         model.EventResponse,
-			ConnectionID: 1,
-			Sequence:     1,
-			Status:       http.StatusOK,
-			Headers: map[string][]string{
-				"content-type": {"application/json"},
-				"x-request-id": {"expected-other-id"},
 			},
 		},
 		{Type: model.EventConnectionClose, ConnectionID: 1},
@@ -1296,24 +1117,20 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 	events := []model.Event{
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
-			Type:         model.EventRequest,
-			ConnectionID: 1,
-			Sequence:     1,
+			Type:          model.EventRequest,
+			AccessLogType: model.AccessLogTypeDownstreamEnd,
+			ConnectionID:  1,
+			Sequence:      1,
+			Status:        http.StatusOK,
+			ResponseBody: &model.Body{
+				Encoding: "base64",
+				Content:  base64.StdEncoding.EncodeToString([]byte("expected-body")),
+			},
 			HTTP: model.HTTPRequestMeta{
 				Method:    http.MethodGet,
 				Scheme:    target.Scheme,
 				Authority: target.Host,
 				Path:      "/",
-			},
-		},
-		{
-			Type:         model.EventResponse,
-			ConnectionID: 1,
-			Sequence:     1,
-			Status:       http.StatusOK,
-			Body: &model.Body{
-				Encoding: "base64",
-				Content:  base64.StdEncoding.EncodeToString([]byte("expected-body")),
 			},
 		},
 		{Type: model.EventConnectionClose, ConnectionID: 1},
@@ -1373,22 +1190,18 @@ func TestReplayBodyValidationDistinguishesEmptyFromAbsent(t *testing.T) {
 			events := []model.Event{
 				{Type: model.EventConnectionOpen, ConnectionID: 1},
 				{
-					Type:         model.EventRequest,
-					ConnectionID: 1,
-					Sequence:     1,
+					Type:          model.EventRequest,
+					AccessLogType: model.AccessLogTypeDownstreamEnd,
+					ConnectionID:  1,
+					Sequence:      1,
+					Status:        http.StatusOK,
+					ResponseBody:  tt.expectedBody,
 					HTTP: model.HTTPRequestMeta{
 						Method:    http.MethodGet,
 						Scheme:    target.Scheme,
 						Authority: target.Host,
 						Path:      "/",
 					},
-				},
-				{
-					Type:         model.EventResponse,
-					ConnectionID: 1,
-					Sequence:     1,
-					Status:       http.StatusOK,
-					Body:         tt.expectedBody,
 				},
 				{Type: model.EventConnectionClose, ConnectionID: 1},
 			}
@@ -1479,22 +1292,28 @@ func TestResponseValidationComparesOversizedBodiesExactly(t *testing.T) {
 	}
 }
 
-func TestFinishRequestSuccessDoesNotRetainDetailsWhenValidationDisabled(t *testing.T) {
+func TestFinishRequestSuccessValidatesInlineImmediately(t *testing.T) {
 	cfg := config.Default()
-	cfg.Replay.Validation.Status = false
+	cfg.Replay.Validation.Status = true
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
-	req := model.Event{Type: model.EventRequest, ConnectionID: 1, Sequence: 1}
+	req := model.Event{
+		Type:          model.EventRequest,
+		AccessLogType: model.AccessLogTypeDownstreamEnd,
+		ConnectionID:  1,
+		Sequence:      1,
+		Status:        http.StatusOK,
+	}
 
-	abort := eng.finishRequestSuccess(cs, req, requestExecution{statusCode: http.StatusOK, body: []byte("actual")}, nil)
+	abort := eng.finishRequestSuccess(cs, req, requestExecution{statusCode: http.StatusInternalServerError}, nil)
 	if abort {
 		t.Fatal("finishRequestSuccess aborted unexpectedly")
 	}
-	if len(cs.pendingActual) != 0 {
-		t.Fatalf("pendingActual len = %d, want 0", len(cs.pendingActual))
+	if got, want := cs.validationFailed, int64(1); got != want {
+		t.Fatalf("finishRequestSuccess validation failures = %d, want %d", got, want)
 	}
 	if got, want := cs.sent, int64(1); got != want {
-		t.Fatalf("cs.sent = %d, want %d", got, want)
+		t.Fatalf("finishRequestSuccess sent = %d, want %d", got, want)
 	}
 }
 
@@ -2092,18 +1911,22 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 	cfg.Replay.HTTP2.Mode = "multiplexed"
 	cfg.Replay.TLS.InsecureSkipVerify = true
 	cfg.Replay.Idempotency.Enabled = false
+	cfg.Replay.Validation.Status = true
 
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
-		{Type: model.EventRequest, ConnectionID: 1, StreamID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"}},
-		{Type: model.EventRequest, ConnectionID: 1, StreamID: 3, Sequence: 2, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"}},
+		{Type: model.EventRequest, AccessLogType: model.AccessLogTypeDownstreamEnd, ConnectionID: 1, StreamID: 1, Sequence: 1, Status: http.StatusOK, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"}},
+		{Type: model.EventRequest, AccessLogType: model.AccessLogTypeDownstreamEnd, ConnectionID: 1, StreamID: 3, Sequence: 2, Status: http.StatusCreated, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"}},
 		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
-	_, err = runReplay(eng, events)
+	summary, err := runReplay(eng, events)
 	if err != nil {
 		t.Fatalf("replay failed: %v", err)
+	}
+	if got, want := summary.ValidationFailed, int64(1); got != want {
+		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
 	}
 	// With InsecureSkipVerify set to true and a TLS server, true HTTP/2 multiplexing
 	// is enabled. Both requests will be processed concurrently over a single connection,
