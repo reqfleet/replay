@@ -137,7 +137,7 @@ func TestGeneratedDownstreamEndRequestIncludesRequestAndResponseFields(t *testin
 	if got, want := req.Headers["x-real-ip"], "198.51.100.7"; len(got) != 1 || got[0] != want {
 		t.Errorf("generatedRequestEvent(DownstreamEnd).Headers[x-real-ip] = %v, want [%q]", got, want)
 	}
-	if got, want := req.Headers["x-trace"], []string{"one", "two"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	if got, want := req.Headers["x-trace"], []string{"one", "two"}; !slices.Equal(got, want) {
 		t.Errorf("generatedRequestEvent(DownstreamEnd).Headers[x-trace] = %v, want %v", got, want)
 	}
 	if got, want := req.Headers["x-api-key"], "key"; len(got) != 1 || got[0] != want {
