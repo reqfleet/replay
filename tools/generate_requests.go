@@ -82,7 +82,7 @@ func generatedRequestEvent(logType model.AccessLogType, connID int, ts time.Time
 		"x-forwarded-port":   {options.port},
 	}
 	for name, values := range options.extraHeaders {
-		headers[name] = append([]string(nil), values...)
+		headers[name] = slices.Clone(values)
 	}
 
 	req := model.Event{
