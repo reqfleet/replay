@@ -261,6 +261,24 @@ func TestLoadParsesCheckpointSyncInterval(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsCheckpointSyncIntervalWhenOmitted(t *testing.T) {
+	path := t.TempDir() + "/cfg.yaml"
+	content := "replay:\n" +
+		"  checkpoint:\n" +
+		"    file: checkpoint.json\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", path, err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%q) error: %v", path, err)
+	}
+	if got, want := cfg.Replay.Checkpoint.SyncInterval, time.Second; got != want {
+		t.Fatalf("Load(%q).Replay.Checkpoint.SyncInterval = %v, want %v", path, got, want)
+	}
+}
+
 func TestLoadParsesMaxActiveConnectionsPerEngine(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/cfg.yaml"
