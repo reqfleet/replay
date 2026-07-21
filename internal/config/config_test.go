@@ -53,6 +53,13 @@ func TestDefaultRampupDuration(t *testing.T) {
 	}
 }
 
+func TestDefaultCheckpointSyncInterval(t *testing.T) {
+	cfg := Default()
+	if got, want := cfg.Replay.Checkpoint.SyncInterval, time.Second; got != want {
+		t.Fatalf("Default().Replay.Checkpoint.SyncInterval = %v, want %v", got, want)
+	}
+}
+
 func TestDefaultMaxActiveConnectionsIsUnlimited(t *testing.T) {
 	cfg := Default()
 	if got, want := cfg.Replay.MaxActiveConnectionsPerEngine, 0; got != want {
@@ -236,6 +243,42 @@ func TestLoadParsesRampupDuration(t *testing.T) {
 	}
 }
 
+func TestLoadParsesCheckpointSyncInterval(t *testing.T) {
+	path := t.TempDir() + "/cfg.yaml"
+	content := "replay:\n" +
+		"  checkpoint:\n" +
+		"    sync_interval: 250ms\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", path, err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%q) error: %v", path, err)
+	}
+	if got, want := cfg.Replay.Checkpoint.SyncInterval, 250*time.Millisecond; got != want {
+		t.Fatalf("Load(%q).Replay.Checkpoint.SyncInterval = %v, want %v", path, got, want)
+	}
+}
+
+func TestLoadDefaultsCheckpointSyncIntervalWhenOmitted(t *testing.T) {
+	path := t.TempDir() + "/cfg.yaml"
+	content := "replay:\n" +
+		"  checkpoint:\n" +
+		"    file: checkpoint.json\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", path, err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%q) error: %v", path, err)
+	}
+	if got, want := cfg.Replay.Checkpoint.SyncInterval, time.Second; got != want {
+		t.Fatalf("Load(%q).Replay.Checkpoint.SyncInterval = %v, want %v", path, got, want)
+	}
+}
+
 func TestLoadParsesMaxActiveConnectionsPerEngine(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/cfg.yaml"
@@ -361,6 +404,26 @@ func TestValidateRejectsNegativeRampupDuration(t *testing.T) {
 	cfg.Replay.RampupDuration = -1 * time.Second
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for negative rampup duration")
+	}
+}
+
+func TestValidateRejectsNonPositiveCheckpointSyncInterval(t *testing.T) {
+	tests := []struct {
+		name         string
+		syncInterval time.Duration
+	}{
+		{name: "zero", syncInterval: 0},
+		{name: "negative", syncInterval: -time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Replay.Checkpoint.SyncInterval = tt.syncInterval
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "replay.checkpoint.sync_interval") {
+				t.Fatalf("Validate(checkpoint.sync_interval=%v) error = %v, want checkpoint sync interval error", tt.syncInterval, err)
+			}
+		})
 	}
 }
 

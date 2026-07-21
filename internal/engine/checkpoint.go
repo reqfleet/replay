@@ -22,14 +22,16 @@ type checkpointData struct {
 
 type checkpointStore struct {
 	mu                  sync.Mutex
-	persistCond         *sync.Cond
 	closeOnce           sync.Once
 	path                string
 	data                checkpointData
-	persisting          bool
+	stop                chan struct{}
+	done                chan struct{}
 	generation          uint64
 	persistedGeneration uint64
 	persistErr          error
+	closeErr            error
+	closed              bool
 }
 
 func checkpointPath(path string, shardIndex, shardCount int) string {
@@ -39,9 +41,12 @@ func checkpointPath(path string, shardIndex, shardCount int) string {
 	return fmt.Sprintf("%s.shard-%d-of-%d", path, shardIndex, shardCount)
 }
 
-func newCheckpointStore(path string) (*checkpointStore, error) {
+func newCheckpointStore(path string, syncInterval time.Duration) (*checkpointStore, error) {
 	if path == "" {
 		return nil, nil
+	}
+	if syncInterval <= 0 {
+		return nil, fmt.Errorf("checkpoint sync interval must be positive: %s", syncInterval)
 	}
 	store := &checkpointStore{
 		path: path,
@@ -49,32 +54,31 @@ func newCheckpointStore(path string) (*checkpointStore, error) {
 			Version:     currentCheckpointVersion,
 			Connections: map[model.ConnectionKey]int{},
 		},
+		stop: make(chan struct{}),
+		done: make(chan struct{}),
 	}
-	store.persistCond = sync.NewCond(&store.mu)
 
 	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return store, nil
-		}
+	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read checkpoint: %w", err)
 	}
-	if len(b) == 0 {
-		return store, nil
+	if err == nil && len(b) > 0 {
+		if err := json.Unmarshal(b, &store.data); err != nil {
+			return nil, fmt.Errorf("parse checkpoint: %w", err)
+		}
+		if store.data.Version != currentCheckpointVersion {
+			return nil, fmt.Errorf(
+				"unsupported checkpoint version %d (want %d)",
+				store.data.Version,
+				currentCheckpointVersion,
+			)
+		}
+		if store.data.Connections == nil {
+			store.data.Connections = map[model.ConnectionKey]int{}
+		}
 	}
-	if err := json.Unmarshal(b, &store.data); err != nil {
-		return nil, fmt.Errorf("parse checkpoint: %w", err)
-	}
-	if store.data.Version != currentCheckpointVersion {
-		return nil, fmt.Errorf(
-			"unsupported checkpoint version %d (want %d)",
-			store.data.Version,
-			currentCheckpointVersion,
-		)
-	}
-	if store.data.Connections == nil {
-		store.data.Connections = map[model.ConnectionKey]int{}
-	}
+
+	go store.run(syncInterval)
 	return store, nil
 }
 
@@ -103,67 +107,64 @@ func (c *checkpointStore) markProcessed(connectionKey model.ConnectionKey, seque
 	}
 
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.persistErr != nil {
-		err := c.persistErr
-		c.mu.Unlock()
-		return err
+		return c.persistErr
+	}
+	if c.closed {
+		return fmt.Errorf("checkpoint store is closed")
 	}
 	if sequence > c.data.Connections[connectionKey] {
 		c.data.Connections[connectionKey] = sequence
-		c.data.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		c.generation++
 	}
-	targetGeneration := c.generation
-	c.mu.Unlock()
-
-	// A successful return acknowledges that this caller's observed generation
-	// is on disk. Calls covered by the same snapshot return together instead of
-	// serially persisting generations that are already durable.
-	return c.persistThrough(targetGeneration)
+	return nil
 }
 
-func (c *checkpointStore) persistThrough(targetGeneration uint64) error {
-	if c == nil || c.path == "" {
-		return nil
+func (c *checkpointStore) run(syncInterval time.Duration) {
+	ticker := time.NewTicker(syncInterval)
+	defer ticker.Stop()
+	defer close(c.done)
+
+	for {
+		select {
+		case <-ticker.C:
+			c.persist()
+		case <-c.stop:
+			c.persist()
+			return
+		}
 	}
+}
+
+func (c *checkpointStore) persist() {
+	c.mu.Lock()
+	if c.persistErr != nil || c.persistedGeneration == c.generation {
+		c.mu.Unlock()
+		return
+	}
+	generation := c.generation
+	updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	c.data.UpdatedAt = updatedAt
+	copyData := checkpointData{
+		Version:     c.data.Version,
+		UpdatedAt:   updatedAt,
+		Connections: maps.Clone(c.data.Connections),
+	}
+	c.mu.Unlock()
+
+	err := persistCheckpointData(c.path, copyData)
 
 	c.mu.Lock()
-	for {
-		if c.persistErr != nil {
-			err := c.persistErr
-			c.mu.Unlock()
-			return err
-		}
-		if c.persistedGeneration >= targetGeneration {
-			c.mu.Unlock()
-			return nil
-		}
-		if c.persisting {
-			c.persistCond.Wait()
-			continue
-		}
-
-		generation := c.generation
-		copyData := checkpointData{
-			Version:     c.data.Version,
-			UpdatedAt:   c.data.UpdatedAt,
-			Connections: maps.Clone(c.data.Connections),
-		}
-		c.persisting = true
-		c.mu.Unlock()
-
-		err := persistCheckpointData(c.path, copyData)
-
-		c.mu.Lock()
-		if err != nil && c.persistErr == nil {
+	if err != nil {
+		if c.persistErr == nil {
 			c.persistErr = err
 		}
-		if err == nil {
-			c.persistedGeneration = generation
-		}
-		c.persisting = false
-		c.persistCond.Broadcast()
+		c.mu.Unlock()
+		return
 	}
+	c.persistedGeneration = generation
+	c.mu.Unlock()
 }
 
 func persistCheckpointData(path string, data checkpointData) error {
@@ -217,18 +218,22 @@ func writeCheckpointFile(path string, payload []byte) error {
 	return nil
 }
 
-// Close completes any outstanding write and returns the first persistence error.
+// Close stops periodic persistence, flushes the latest in-memory progress, and returns the first persistence error.
 func (c *checkpointStore) Close() error {
 	if c == nil {
 		return nil
 	}
 	c.closeOnce.Do(func() {
 		c.mu.Lock()
-		targetGeneration := c.generation
+		c.closed = true
 		c.mu.Unlock()
-		_ = c.persistThrough(targetGeneration)
+
+		close(c.stop)
+		<-c.done
+
+		c.mu.Lock()
+		c.closeErr = c.persistErr
+		c.mu.Unlock()
 	})
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.persistErr
+	return c.closeErr
 }

@@ -156,11 +156,14 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 		drainEvents(events)
 		return Summary{Outcome: RunFailed}, fmt.Errorf("validate target override: %w", e.targetOverrideErr)
 	}
-	checkpoints, err := newCheckpointStore(checkpointPath(
-		e.cfg.Replay.Checkpoint.File,
-		e.cfg.Replay.Sharding.ShardIndex,
-		e.cfg.Replay.Sharding.ShardCount,
-	))
+	checkpoints, err := newCheckpointStore(
+		checkpointPath(
+			e.cfg.Replay.Checkpoint.File,
+			e.cfg.Replay.Sharding.ShardIndex,
+			e.cfg.Replay.Sharding.ShardCount,
+		),
+		e.cfg.Replay.Checkpoint.SyncInterval,
+	)
 	if err != nil {
 		drainEvents(events)
 		return Summary{Outcome: RunFailed}, err

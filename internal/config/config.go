@@ -94,9 +94,11 @@ type ShardingConfig struct {
 }
 
 const maxShardCount = uint64(1) << 32
+const defaultCheckpointSyncInterval = time.Second
 
 type CheckpointConfig struct {
-	File string `yaml:"file"`
+	File         string        `yaml:"file"`
+	SyncInterval time.Duration `yaml:"sync_interval"`
 }
 
 type MetricsConfig struct {
@@ -190,7 +192,9 @@ func Default() Config {
 				ShardIndex: 0,
 				ShardCount: 1,
 			},
-			Checkpoint: CheckpointConfig{},
+			Checkpoint: CheckpointConfig{
+				SyncInterval: defaultCheckpointSyncInterval,
+			},
 		},
 		Metrics: MetricsConfig{
 			Enabled:       true,
@@ -253,6 +257,10 @@ func (c Config) Validate() error {
 	}
 	if c.Replay.Pacing.MaxSleepDelta < 0 {
 		return errors.New("replay.pacing.max_sleep_delta must be >= 0")
+	}
+	// Load overlays YAML onto Default, so an omitted interval remains one second.
+	if c.Replay.Checkpoint.SyncInterval <= 0 {
+		return errors.New("replay.checkpoint.sync_interval must be > 0")
 	}
 	if c.Replay.Sharding.ShardCount <= 0 {
 		return errors.New("replay.sharding.shard_count must be > 0")

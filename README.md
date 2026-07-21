@@ -74,7 +74,7 @@ CLI flags are applied last and take highest precedence for safety-related settin
 - Always run with `--dry-run` first to confirm traffic parsing and pacing without emitting network requests.
 - When replaying against non-production targets, use `--override-url` and consider setting `--disallow-recorded-targets` in operator configs to prevent accidental traffic to recorded destinations.
 - Verify the metrics endpoint (default `http://0.0.0.0:9102/metrics`) is reachable before and during runs.
-- If you need resumable runs, set `checkpoint.file` in the YAML. Every acknowledged sequence is durably persisted per `node` + `connection_id`; persistence failures fail the run.
+- If you need resumable runs, set `checkpoint.file` in the YAML. Acknowledged sequences update in-memory progress per `node` + `connection_id`; dirty progress is durably synced at `checkpoint.sync_interval` (default `1s`) and flushed on orderly shutdown. An abrupt process or host failure can lose up to approximately one configured interval of progress, and persistence failures fail the run when observed or during shutdown.
 
 ## Programmatic outcome details
 
@@ -148,6 +148,6 @@ Lifecycle checks require `connection_open` before each replayed connection. `con
 Round-robin workers may drive multiple recorded connections. Each recorded connection owns its HTTP transport until `connection_close` or EOF, preserving keep-alive reuse and socket isolation; `max_virtual_users_per_engine` bounds the worker count.
 
 Sharding routes connections by `node` + `connection_id` hash (`shard_index` / `shard_count`) and only replays the local shard. With multiple shards, replay isolates checkpoint files using a `.shard-<index>-of-<count>` suffix.
-If `checkpoint.file` is set, completed sequences are persisted and skipped on the next run using the same `node` + `connection_id` identity.
+If `checkpoint.file` is set, completed sequences update an in-memory watermark and are persisted at `checkpoint.sync_interval` (default `1s`). Orderly shutdown flushes the latest watermark; after an abrupt termination, replay can repeat requests completed since the last successful sync. Persisted sequences are skipped on the next run using the same `node` + `connection_id` identity.
 For HTTP/2 traffic, `serialized` replays requests sequentially, while `multiplexed`
 dispatches requests concurrently on the shared per-connection client and waits for them at `connection_close` or EOF.
