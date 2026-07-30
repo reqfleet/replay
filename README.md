@@ -36,6 +36,14 @@ Metric names with the default `replay` namespace:
 `replay_threads_gauge` reflects active virtual users. It increments when a replay
 worker starts and decrements when that worker finishes.
 
+`metrics.path_templates` reduces Prometheus label cardinality by replacing dynamic
+request paths with configured templates. A path segment enclosed in braces is a
+wildcard: with `/users/{id}`, a request to `/users/123` emits `/users/{id}` as
+the metric `label`. Templates must have the same number of segments as the
+request and match every literal segment; the first matching template wins.
+Query strings are excluded before matching, and unmatched paths retain their
+original path label.
+
 ## Outcome model
 
 - Run outcomes: `success`, `partial_success`, `failed`
@@ -127,6 +135,9 @@ replay:
     file: "./checkpoint.json"
 metrics:
   namespace: replay
+  path_templates:
+    - /users/{id}
+    - /users/{id}/orders
   common_labels:
     - name: run_id
       value: unknown

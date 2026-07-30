@@ -361,6 +361,14 @@ Engine-specific integrations MAY configure a different Prometheus namespace and 
 
 For `replay_status_counter`, the `status` label MAY contain either a numeric HTTP status code or a synthetic transport status such as `timeout`, `connection_refused`, `connection_reset`, `tls`, `network`, or `send_error` when no HTTP response was received.
 
+Engines SHOULD support a `metrics.path_templates` list to prevent dynamic path
+segments from creating unbounded metric-label cardinality. A segment enclosed
+in braces (for example, `{id}` in `/users/{id}`) is dynamic; all other segments
+are literal. Matching MUST use the path without its query string, require the
+same segment count, and compare literal segments exactly. The first matching
+template MUST become the metric-specific `label`; when no template matches, the
+path without its query string MUST remain the label.
+
 ### 9.5 Runtime Configuration (YAML)
 
 Replay runtime behavior SHOULD be configurable via a YAML file.
@@ -425,6 +433,9 @@ metrics:
   namespace: "replay"
   listen_address: "0.0.0.0:9102"
   path: "/metrics"
+  path_templates:
+    - "/users/{id}"
+    - "/users/{id}/orders"
   common_labels:
     - name: "run_id"
       value: "unknown"
