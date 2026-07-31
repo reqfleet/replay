@@ -95,6 +95,13 @@ type ShardingConfig struct {
 
 const maxShardCount = uint64(1) << 32
 const defaultCheckpointSyncInterval = time.Second
+const (
+	maxPathTemplates               = 256
+	maxPathTemplateLength          = 2 * 1024
+	maxPathTemplatesTotalLength    = 64 * 1024
+	maxPathTemplateSegments        = 64
+	maxPathTemplateParameterLength = 64
+)
 
 type CheckpointConfig struct {
 	File         string        `yaml:"file"`
@@ -276,6 +283,9 @@ func (c Config) Validate() error {
 	}
 	if c.Metrics.MaxLabels < 0 {
 		return errors.New("metrics.max_labels must be >= 0")
+	}
+	if err := validatePathTemplates(c.Metrics.PathTemplates); err != nil {
+		return err
 	}
 	if err := validateHeaderRewrite(c.Header); err != nil {
 		return err
@@ -461,6 +471,152 @@ func validateMetricsPath(path string) error {
 		return errors.New("metrics.path must not contain a scheme, host, query, or fragment")
 	}
 	return nil
+}
+
+func validatePathTemplates(templates []string) error {
+	if len(templates) > maxPathTemplates {
+		return fmt.Errorf("metrics.path_templates must contain at most %d templates", maxPathTemplates)
+	}
+
+	seen := make(map[string]int, len(templates))
+	totalLength := 0
+	for i, template := range templates {
+		if len(template) > maxPathTemplateLength {
+			return fmt.Errorf(
+				"metrics.path_templates[%d] must be at most %d bytes",
+				i,
+				maxPathTemplateLength,
+			)
+		}
+		totalLength += len(template)
+		if totalLength > maxPathTemplatesTotalLength {
+			return fmt.Errorf(
+				"metrics.path_templates must contain at most %d bytes in total",
+				maxPathTemplatesTotalLength,
+			)
+		}
+		if previous, ok := seen[template]; ok {
+			return fmt.Errorf(
+				"metrics.path_templates contains duplicate templates at indexes %d and %d",
+				previous,
+				i,
+			)
+		}
+		if err := validatePathTemplate(template); err != nil {
+			return fmt.Errorf("metrics.path_templates[%d]: %w", i, err)
+		}
+		seen[template] = i
+	}
+	return nil
+}
+
+func validatePathTemplate(template string) error {
+	if template == "" {
+		return errors.New("must not be empty")
+	}
+	if !strings.HasPrefix(template, "/") {
+		return errors.New("must be an absolute URL path")
+	}
+	if strings.ContainsAny(template, "?#") {
+		return errors.New("must not contain a query or fragment")
+	}
+	if template == "/" {
+		return nil
+	}
+	if strings.HasSuffix(template, "/") {
+		return errors.New("must not end with an empty segment")
+	}
+
+	segments := strings.Split(template[1:], "/")
+	if len(segments) > maxPathTemplateSegments {
+		return fmt.Errorf("must contain at most %d segments", maxPathTemplateSegments)
+	}
+	for i, segment := range segments {
+		if segment == "" {
+			return fmt.Errorf("segment %d must not be empty", i+1)
+		}
+		if segment == "." || segment == ".." {
+			return fmt.Errorf("segment %d must not be %q", i+1, segment)
+		}
+		if strings.ContainsAny(segment, "{}") {
+			if segment[0] != '{' ||
+				segment[len(segment)-1] != '}' ||
+				strings.Count(segment, "{") != 1 ||
+				strings.Count(segment, "}") != 1 {
+				return fmt.Errorf("segment %d must use wildcard syntax {name}", i+1)
+			}
+			name := segment[1 : len(segment)-1]
+			if len(name) > maxPathTemplateParameterLength {
+				return fmt.Errorf(
+					"segment %d wildcard name must be at most %d bytes",
+					i+1,
+					maxPathTemplateParameterLength,
+				)
+			}
+			if !isValidPathTemplateParameterName(name) {
+				return fmt.Errorf(
+					"segment %d wildcard name must match [A-Za-z_][A-Za-z0-9_]*",
+					i+1,
+				)
+			}
+			continue
+		}
+		if err := validateLiteralPathTemplateSegment(segment); err != nil {
+			return fmt.Errorf("segment %d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+func validateLiteralPathTemplateSegment(segment string) error {
+	for i := 0; i < len(segment); i++ {
+		if segment[i] == '%' {
+			if i+2 >= len(segment) || !isHexDigit(segment[i+1]) || !isHexDigit(segment[i+2]) {
+				return errors.New("literal segment contains an invalid percent escape")
+			}
+			i += 2
+			continue
+		}
+		if !isRFC3986PChar(segment[i]) {
+			return fmt.Errorf("literal segment contains invalid character %q", segment[i])
+		}
+	}
+	return nil
+}
+
+func isRFC3986PChar(c byte) bool {
+	if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+		return true
+	}
+	switch c {
+	case '-', '.', '_', '~', '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', ':', '@':
+		return true
+	default:
+		return false
+	}
+}
+
+func isHexDigit(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+func isValidPathTemplateParameterName(name string) bool {
+	if name == "" {
+		return false
+	}
+	if name[0] != '_' && (name[0] < 'a' || name[0] > 'z') && (name[0] < 'A' || name[0] > 'Z') {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		c := name[i]
+		if c != '_' &&
+			(c < 'a' || c > 'z') &&
+			(c < 'A' || c > 'Z') &&
+			(c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func validateHeaderRewrite(rewrite HeaderRewriteConfig) error {

@@ -482,6 +482,129 @@ func TestValidateMetricsPath(t *testing.T) {
 	}
 }
 
+func TestValidatePathTemplates(t *testing.T) {
+	tooManyTemplates := make([]string, maxPathTemplates+1)
+	for i := range tooManyTemplates {
+		tooManyTemplates[i] = "/template/" + strconv.Itoa(i)
+	}
+	atTemplateCountLimit := tooManyTemplates[:maxPathTemplates]
+
+	atTotalLengthLimit := make([]string, maxPathTemplatesTotalLength/maxPathTemplateLength)
+	for i := range atTotalLengthLimit {
+		prefix := "/" + strconv.Itoa(i) + "/"
+		atTotalLengthLimit[i] = prefix + strings.Repeat("a", maxPathTemplateLength-len(prefix))
+	}
+	oversizedTotal := append(atTotalLengthLimit, "/overflow")
+
+	tests := []struct {
+		name      string
+		templates []string
+		wantErr   bool
+	}{
+		{name: "none"},
+		{name: "root", templates: []string{"/"}},
+		{name: "literal", templates: []string{"/health"}},
+		{name: "wildcards", templates: []string{"/users/{user_id}/orders/{order2}"}},
+		{
+			name:      "encoded and RFC 3986 literal characters",
+			templates: []string{`/files/a-b._~!$&'()*+,;=:@/%C3%A9`},
+		},
+		{
+			name:      "overlap remains ordered",
+			templates: []string{"/{resource}/{id}", "/users/{id}"},
+		},
+		{
+			name:      "wildcard name at limit",
+			templates: []string{"/users/{" + strings.Repeat("a", maxPathTemplateParameterLength) + "}"},
+		},
+		{
+			name:      "segments at limit",
+			templates: []string{strings.Repeat("/segment", maxPathTemplateSegments)},
+		},
+		{
+			name:      "template length at limit",
+			templates: []string{"/" + strings.Repeat("a", maxPathTemplateLength-1)},
+		},
+		{name: "template count at limit", templates: atTemplateCountLimit},
+		{name: "templates total length at limit", templates: atTotalLengthLimit},
+		{name: "empty", templates: []string{""}, wantErr: true},
+		{name: "relative", templates: []string{"users/{id}"}, wantErr: true},
+		{name: "trailing slash", templates: []string{"/users/{id}/"}, wantErr: true},
+		{name: "empty segment", templates: []string{"/users//orders"}, wantErr: true},
+		{name: "dot segment", templates: []string{"/users/./orders"}, wantErr: true},
+		{name: "dot dot segment", templates: []string{"/users/../orders"}, wantErr: true},
+		{name: "query", templates: []string{"/users/{id}?view=full"}, wantErr: true},
+		{name: "fragment", templates: []string{"/users/{id}#details"}, wantErr: true},
+		{name: "empty wildcard name", templates: []string{"/users/{}"}, wantErr: true},
+		{name: "numeric wildcard prefix", templates: []string{"/users/{2id}"}, wantErr: true},
+		{name: "wildcard punctuation", templates: []string{"/users/{user-id}"}, wantErr: true},
+		{name: "partial wildcard", templates: []string{"/users/user-{id}"}, wantErr: true},
+		{name: "nested wildcard", templates: []string{"/users/{{id}}"}, wantErr: true},
+		{
+			name:      "long wildcard name",
+			templates: []string{"/users/{" + strings.Repeat("a", maxPathTemplateParameterLength+1) + "}"},
+			wantErr:   true,
+		},
+		{name: "space", templates: []string{"/users/bad path"}, wantErr: true},
+		{name: "backslash", templates: []string{`/users/bad\path`}, wantErr: true},
+		{name: "raw unicode", templates: []string{"/users/café"}, wantErr: true},
+		{name: "bad percent escape", templates: []string{"/users/%zz"}, wantErr: true},
+		{name: "duplicate", templates: []string{"/users/{id}", "/users/{id}"}, wantErr: true},
+		{
+			name:      "too many segments",
+			templates: []string{strings.Repeat("/segment", maxPathTemplateSegments+1)},
+			wantErr:   true,
+		},
+		{
+			name:      "template too long",
+			templates: []string{"/" + strings.Repeat("a", maxPathTemplateLength)},
+			wantErr:   true,
+		},
+		{
+			name:      "too many templates",
+			templates: tooManyTemplates,
+			wantErr:   true,
+		},
+		{name: "templates too large in total", templates: oversizedTotal, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Metrics.PathTemplates = tt.templates
+			err := cfg.Validate()
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Fatalf(
+					"Validate(metrics.path_templates=%q) error = %v, want error presence %t",
+					tt.templates,
+					err,
+					tt.wantErr,
+				)
+			}
+			if tt.wantErr && !strings.Contains(err.Error(), "metrics.path_templates") {
+				t.Errorf(
+					"Validate(metrics.path_templates=%q) error = %v, want metrics.path_templates error",
+					tt.templates,
+					err,
+				)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidPathTemplate(t *testing.T) {
+	path := t.TempDir() + "/config.yaml"
+	content := []byte("metrics:\n  path_templates:\n    - users/{id}\n")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", path, err)
+	}
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "metrics.path_templates") {
+		t.Fatalf("Load(%q) error = %v, want metrics.path_templates error", path, err)
+	}
+}
+
 func TestValidateRejectsInvalidMetricCommonLabels(t *testing.T) {
 	tests := []struct {
 		name   string

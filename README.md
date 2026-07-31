@@ -44,6 +44,14 @@ request and match every literal segment; the first matching template wins.
 Query strings are excluded before matching, and unmatched paths retain their
 original path label.
 
+Templates are validated when configuration loads. Each template must be an
+absolute path with at most 64 non-empty segments and no trailing slash, dot
+segments, query, or fragment. Wildcards must occupy an entire segment and use
+a name of at most 64 bytes matching `[A-Za-z_][A-Za-z0-9_]*`; literal segments
+must use RFC 3986 path characters, with non-ASCII bytes percent-encoded.
+Duplicate templates are rejected. A configuration may contain at most 256
+templates, 2 KiB each and 64 KiB in total.
+
 ## Outcome model
 
 - Run outcomes: `success`, `partial_success`, `failed`
