@@ -535,9 +535,6 @@ func validatePathTemplate(template string) error {
 		if segment == "" {
 			return fmt.Errorf("segment %d must not be empty", i+1)
 		}
-		if segment == "." || segment == ".." {
-			return fmt.Errorf("segment %d must not be %q", i+1, segment)
-		}
 		if strings.ContainsAny(segment, "{}") {
 			if segment[0] != '{' ||
 				segment[len(segment)-1] != '}' ||
@@ -573,6 +570,9 @@ func validateLiteralPathTemplateSegment(segment string) error {
 	parsed, err := url.ParseRequestURI(rawPath)
 	if err != nil {
 		return fmt.Errorf("literal segment must be a valid URL path: %w", err)
+	}
+	if parsed.Path == "/." || parsed.Path == "/.." {
+		return errors.New("literal segment must not decode to . or ..")
 	}
 
 	// net/url permits brackets in paths for compatibility, but RFC 3986
