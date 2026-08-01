@@ -572,7 +572,7 @@ func validateLiteralPathTemplateSegment(segment string) error {
 		return fmt.Errorf("literal segment must be a valid URL path: %w", err)
 	}
 	if parsed.Path == "/." || parsed.Path == "/.." {
-		return errors.New("literal segment must not decode to . or ..")
+		return errors.New("literal segment must not decode to a dot segment")
 	}
 
 	// net/url permits brackets in paths for compatibility, but RFC 3986
