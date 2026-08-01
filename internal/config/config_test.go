@@ -547,6 +547,7 @@ func TestValidatePathTemplates(t *testing.T) {
 		},
 		{name: "space", templates: []string{"/users/bad path"}, wantErr: true},
 		{name: "backslash", templates: []string{`/users/bad\path`}, wantErr: true},
+		{name: "brackets", templates: []string{"/users/[id]"}, wantErr: true},
 		{name: "raw unicode", templates: []string{"/users/café"}, wantErr: true},
 		{name: "bad percent escape", templates: []string{"/users/%zz"}, wantErr: true},
 		{name: "duplicate", templates: []string{"/users/{id}", "/users/{id}"}, wantErr: true},

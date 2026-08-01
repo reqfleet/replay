@@ -569,35 +569,18 @@ func validatePathTemplate(template string) error {
 }
 
 func validateLiteralPathTemplateSegment(segment string) error {
-	for i := 0; i < len(segment); i++ {
-		if segment[i] == '%' {
-			if i+2 >= len(segment) || !isHexDigit(segment[i+1]) || !isHexDigit(segment[i+2]) {
-				return errors.New("literal segment contains an invalid percent escape")
-			}
-			i += 2
-			continue
-		}
-		if !isRFC3986PChar(segment[i]) {
-			return fmt.Errorf("literal segment contains invalid character %q", segment[i])
-		}
+	rawPath := "/" + segment
+	parsed, err := url.ParseRequestURI(rawPath)
+	if err != nil {
+		return fmt.Errorf("literal segment must be a valid URL path: %w", err)
+	}
+
+	// net/url permits brackets in paths for compatibility, but RFC 3986
+	// reserves them for IP literals and excludes them from path segments.
+	if parsed.EscapedPath() != rawPath || strings.ContainsAny(segment, "[]") {
+		return errors.New("literal segment must use RFC 3986 path characters or percent escapes")
 	}
 	return nil
-}
-
-func isRFC3986PChar(c byte) bool {
-	if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
-		return true
-	}
-	switch c {
-	case '-', '.', '_', '~', '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', ':', '@':
-		return true
-	default:
-		return false
-	}
-}
-
-func isHexDigit(c byte) bool {
-	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
 }
 
 func isValidPathTemplateParameterName(name string) bool {
