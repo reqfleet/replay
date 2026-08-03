@@ -21,8 +21,6 @@ replay:
   pacing:
     enabled: false
     max_sleep_delta: 30s
-  lifecycle:
-    require_open: true
   idempotency:
     enabled: true
     block_methods: [POST, PUT, PATCH, DELETE]

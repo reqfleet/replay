@@ -15,7 +15,6 @@ import (
 func TestOutcomeAggregation_DryRunSerialized(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.DryRun = true
-	cfg.Replay.Lifecycle.RequireOpen = false
 
 	reg := metrics.New(cfg.Metrics)
 	e := New(cfg, reg)
@@ -25,13 +24,13 @@ func TestOutcomeAggregation_DryRunSerialized(t *testing.T) {
 			Type:         model.EventRequest,
 			ConnectionID: 1,
 			Sequence:     1,
-			HTTP:         model.HTTPRequestMeta{Path: "/"},
+			Path:         "/",
 		},
 		{
 			Type:         model.EventRequest,
 			ConnectionID: 1,
 			Sequence:     2,
-			HTTP:         model.HTTPRequestMeta{Path: "/ok"},
+			Path:         "/ok",
 		},
 	}
 
@@ -68,7 +67,6 @@ func TestOutcomeAggregation_DryRunSerialized(t *testing.T) {
 
 func TestOutcomeAggregation_ValidationFailure(t *testing.T) {
 	cfg := config.Default()
-	cfg.Replay.Lifecycle.RequireOpen = false
 
 	cfg.Replay.Validation.Status = true
 
@@ -85,12 +83,13 @@ func TestOutcomeAggregation_ValidationFailure(t *testing.T) {
 
 	requests := []model.Event{
 		{
-			Type:          model.EventRequest,
-			AccessLogType: model.AccessLogTypeDownstreamEnd,
-			ConnectionID:  1,
-			Sequence:      1,
-			Status:        http.StatusOK,
-			HTTP:          model.HTTPRequestMeta{Scheme: "http", Authority: authority, Path: "/"},
+			Type:         model.AccessLogTypeDownstreamEnd,
+			ConnectionID: 1,
+			Sequence:     1,
+			ResponseCode: intPointer(http.StatusOK),
+			Scheme:       "http",
+			Authority:    authority,
+			Path:         "/",
 		},
 	}
 
@@ -115,7 +114,6 @@ func TestOutcomeAggregation_ValidationFailure(t *testing.T) {
 func TestOutcomeAggregation_SkippedSerializedResponseValidation(t *testing.T) {
 	cfg := config.Default()
 	cfg.Replay.DryRun = true
-	cfg.Replay.Lifecycle.RequireOpen = false
 
 	cfg.Replay.Validation.Status = true
 
@@ -124,12 +122,13 @@ func TestOutcomeAggregation_SkippedSerializedResponseValidation(t *testing.T) {
 
 	requests := []model.Event{
 		{
-			Type:          model.EventRequest,
-			AccessLogType: model.AccessLogTypeDownstreamEnd,
-			ConnectionID:  1,
-			Sequence:      1,
-			Status:        http.StatusOK,
-			HTTP:          model.HTTPRequestMeta{Scheme: "http", Authority: "example.invalid", Path: "/"},
+			Type:         model.AccessLogTypeDownstreamEnd,
+			ConnectionID: 1,
+			Sequence:     1,
+			ResponseCode: intPointer(http.StatusOK),
+			Scheme:       "http",
+			Authority:    "example.invalid",
+			Path:         "/",
 		},
 	}
 
@@ -147,18 +146,14 @@ func TestOutcomeAggregation_SkippedSerializedResponseValidation(t *testing.T) {
 
 func TestOutcomeAggregation_SendError(t *testing.T) {
 	cfg := config.Default()
-	cfg.Replay.Lifecycle.RequireOpen = false
 
 	reg := metrics.New(cfg.Metrics)
 	e := New(cfg, reg)
 
 	// Missing path will cause buildRequestURL to error and be treated as send error
-	bad := model.Event{
-		Type:         model.EventRequest,
+	bad := model.Event{Type: model.EventRequest,
 		ConnectionID: 2,
-		Sequence:     1,
-		HTTP:         model.HTTPRequestMeta{Scheme: "http", Authority: "example.invalid", Path: ""},
-	}
+		Sequence:     1, Scheme: "http", Authority: "example.invalid", Path: ""}
 
 	client, transport := e.makePerConnectionClient(false)
 	defer transport.CloseIdleConnections()
@@ -183,7 +178,7 @@ func TestOutcomeAggregation_SendError(t *testing.T) {
 
 func TestOutcomeAggregation_HTTP2Multiplexed(t *testing.T) {
 	cfg := config.Default()
-	cfg.Replay.Lifecycle.RequireOpen = false
+
 	cfg.Replay.HTTP2.Mode = "multiplexed"
 
 	reg := metrics.New(cfg.Metrics)
@@ -198,8 +193,8 @@ func TestOutcomeAggregation_HTTP2Multiplexed(t *testing.T) {
 	authority := u.Host
 
 	requests := []model.Event{
-		{Type: model.EventRequest, ConnectionID: 3, StreamID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Scheme: "http", Authority: authority, Path: "/s1"}},
-		{Type: model.EventRequest, ConnectionID: 3, StreamID: 2, Sequence: 1, HTTP: model.HTTPRequestMeta{Version: "HTTP/2", Scheme: "http", Authority: authority, Path: "/s2"}},
+		{Type: model.EventRequest, ConnectionID: 3, StreamID: 1, Sequence: 1, Protocol: "HTTP/2", Scheme: "http", Authority: authority, Path: "/s1"},
+		{Type: model.EventRequest, ConnectionID: 3, StreamID: 2, Sequence: 1, Protocol: "HTTP/2", Scheme: "http", Authority: authority, Path: "/s2"},
 	}
 
 	summary := e.replayConnectionWithCheckpoint(context.Background(), requests, nil)

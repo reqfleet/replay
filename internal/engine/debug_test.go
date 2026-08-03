@@ -15,12 +15,10 @@ func TestIdempotencyPolicyInfersPostForBodyHeaders(t *testing.T) {
 
 	eng := New(cfg, nil)
 	req := model.Event{
-		HTTP: model.HTTPRequestMeta{
-			Scheme:    "http",
-			Authority: "example.invalid",
-			Path:      "/",
-		},
-		Headers: map[string][]string{"content-type": {"text/plain"}},
+		Scheme:    "http",
+		Authority: "example.invalid",
+		Path:      "/",
+		Headers:   map[string][]string{"content-type": {"text/plain"}},
 	}
 
 	if got := eng.shouldSkipByIdempotencyPolicy(req, eng.effectiveRequestHeaders(req.Headers)); !got {

@@ -14,14 +14,6 @@ import (
 	"github.com/reqfleet/replay/internal/model"
 )
 
-var allowedCloseReasons = map[string]struct{}{
-	"remote_close": {},
-	"local_close":  {},
-	"timeout":      {},
-	"drain":        {},
-	"error":        {},
-}
-
 type connectionSequenceState struct {
 	nextRequestSequence int
 }
@@ -87,21 +79,74 @@ func ParseFileStream(path string, format string, handler func(model.Event) error
 
 type rawEvent struct {
 	model.Event
-	ConnectionID            *int    `json:"connection_id"`
-	StartTime               string  `json:"start_time"`
-	Method                  string  `json:"method"`
-	Path                    string  `json:"path"`
-	Protocol                string  `json:"protocol"`
-	Authority               string  `json:"authority"`
-	ResponseCode            int     `json:"response_code"`
-	DurationMillis          float64 `json:"duration_ms"`
-	DownstreamRemoteAddress string  `json:"downstream_remote_address"`
-	UserAgent               string  `json:"user_agent"`
+	Type            *model.EventType `json:"type"`
+	ConnectionID    *int             `json:"connection_id"`
+	NestedHTTP      json.RawMessage  `json:"http"`
+	LegacyTimestamp *string          `json:"timestamp"`
+	LegacyStatus    *int             `json:"status"`
+	LegacyLogType   model.EventType  `json:"log_type"`
 }
 
-func isMalformedDownstreamStartRequest(event model.Event) bool {
-	return event.AccessLogType == model.AccessLogTypeDownstreamStart &&
-		(event.HTTP.Authority == "" || event.HTTP.Path == "")
+func (ev rawEvent) normalize(line int) (model.Event, error) {
+	eventType := model.AccessLogTypeDownstreamEnd
+	if ev.Type != nil {
+		eventType = *ev.Type
+	}
+	switch eventType {
+	case model.AccessLogTypeDownstreamStart, model.AccessLogTypeDownstreamEnd:
+	default:
+		return model.Event{}, fmt.Errorf("line %d: unsupported access log type %q", line, eventType)
+	}
+	if len(ev.NestedHTTP) != 0 || ev.LegacyTimestamp != nil || ev.LegacyStatus != nil || ev.LegacyLogType != "" {
+		return model.Event{}, fmt.Errorf("line %d: access log must use the flat Envoy schema", line)
+	}
+	if ev.ConnectionID == nil {
+		return model.Event{}, fmt.Errorf("line %d: access log missing connection_id", line)
+	}
+	if ev.StartTime == "" {
+		return model.Event{}, fmt.Errorf("line %d: access log missing start_time", line)
+	}
+	if _, ok := model.ParseTimestamp(ev.StartTime); !ok {
+		return model.Event{}, fmt.Errorf("line %d: invalid start_time", line)
+	}
+	if ev.Method == "" {
+		return model.Event{}, fmt.Errorf("line %d: access log missing method", line)
+	}
+	if ev.Protocol == "" {
+		return model.Event{}, fmt.Errorf("line %d: access log missing protocol", line)
+	}
+	if ev.Authority == "" {
+		return model.Event{}, fmt.Errorf("line %d: access log missing authority", line)
+	}
+	if ev.Path == "" {
+		return model.Event{}, fmt.Errorf("line %d: access log missing path", line)
+	}
+	if eventType == model.AccessLogTypeDownstreamEnd && ev.ResponseCode == nil {
+		return model.Event{}, fmt.Errorf("line %d: DownstreamEnd access log missing response_code", line)
+	}
+
+	headers := ev.Headers
+	if ev.UserAgent != "" && ev.UserAgent != "-" {
+		hasUserAgentHeader := false
+		for name := range headers {
+			if strings.EqualFold(name, "user-agent") {
+				hasUserAgentHeader = true
+				break
+			}
+		}
+		if !hasUserAgentHeader {
+			if headers == nil {
+				headers = make(map[string][]string, 1)
+			}
+			headers["user-agent"] = []string{ev.UserAgent}
+		}
+	}
+
+	event := ev.Event
+	event.Type = eventType
+	event.ConnectionID = *ev.ConnectionID
+	event.Headers = headers
+	return event, nil
 }
 
 // ParseStream reads NDJSON events from r and invokes handler for each parsed event.
@@ -133,92 +178,24 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return fmt.Errorf("line %d: invalid json: %w", line, err)
 		}
-		event := ev.Event
-		if ev.ConnectionID != nil {
-			event.ConnectionID = *ev.ConnectionID
-		}
-		hasConnectionID := ev.ConnectionID != nil
-		if event.Type == "" && ev.StartTime != "" && ev.Method != "" && ev.Path != "" {
-			event.Type = model.EventRequest
-			event.AccessLogType = model.AccessLogTypeDownstreamEnd
-			event.Timestamp = ev.StartTime
-			event.Status = ev.ResponseCode
-			event.DurationMS = ev.DurationMillis
-			event.DownstreamRemoteAddress = ev.DownstreamRemoteAddress
-			event.HTTP.Version = ev.Protocol
-			event.HTTP.Method = ev.Method
-			event.HTTP.Authority = ev.Authority
-			event.HTTP.Path = ev.Path
-			if ev.UserAgent != "" && ev.UserAgent != "-" {
-				event.Headers = map[string][]string{"user-agent": {ev.UserAgent}}
-			}
-		}
-		switch event.Type {
-		case model.EventType(model.AccessLogTypeDownstreamStart):
-			event.Type = model.EventRequest
-			event.AccessLogType = model.AccessLogTypeDownstreamStart
+		event, err := ev.normalize(line)
+		if err != nil {
+			return err
 		}
 
-		// Basic timestamp validation when present
-		if event.Timestamp != "" {
-			if _, ok := model.ParseTimestamp(event.Timestamp); !ok {
-				return fmt.Errorf("line %d: invalid timestamp", line)
-			}
+		connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
+		sequence, err := stateForConnection(connectionKey).recordRequest(event.Sequence)
+		if err != nil {
+			return fmt.Errorf("line %d: %w", line, err)
 		}
+		event.Sequence = sequence
 
-		var isHTTP11 bool
-		if event.Type == model.EventRequest {
-			isHTTP11 = len(event.HTTP.Version) >= 8 && strings.EqualFold(event.HTTP.Version[:8], "HTTP/1.1")
-			if isHTTP11 && event.StreamID == 0 {
-				event.StreamID = 1
-			}
+		isHTTP11 := len(event.Protocol) >= 8 && strings.EqualFold(event.Protocol[:8], "HTTP/1.1")
+		if isHTTP11 && event.StreamID == 0 {
+			event.StreamID = 1
 		}
-
-		switch event.Type {
-		case model.EventRequest:
-			if !hasConnectionID {
-				return fmt.Errorf("line %d: request missing connection_id", line)
-			}
-			if isMalformedDownstreamStartRequest(event) {
-				continue
-			}
-			connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
-			sequence, err := stateForConnection(connectionKey).recordRequest(event.Sequence)
-			if err != nil {
-				return fmt.Errorf("line %d: %w", line, err)
-			}
-			event.Sequence = sequence
-			if event.HTTP.Authority == "" {
-				return fmt.Errorf("line %d: request missing http.authority", line)
-			}
-			if event.HTTP.Path == "" {
-				return fmt.Errorf("line %d: request missing http.path", line)
-			}
-			if isHTTP11 && event.StreamID != 1 {
-				return fmt.Errorf("line %d: HTTP/1.1 requests must use stream_id=1", line)
-			}
-
-		case model.EventConnectionOpen:
-			if !hasConnectionID {
-				return fmt.Errorf("line %d: connection_open missing connection_id", line)
-			}
-			connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
-			stateForConnection(connectionKey)
-
-		case model.EventConnectionClose:
-			if !hasConnectionID {
-				return fmt.Errorf("line %d: connection_close missing connection_id", line)
-			}
-			if event.Reason != "" {
-				if _, ok := allowedCloseReasons[event.Reason]; !ok {
-					return fmt.Errorf("line %d: invalid connection_close reason: %s", line, event.Reason)
-				}
-			}
-			connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
-			delete(states, connectionKey)
-
-		default:
-			return fmt.Errorf("line %d: unknown event type: %s", line, event.Type)
+		if isHTTP11 && event.StreamID != 1 {
+			return fmt.Errorf("line %d: HTTP/1.1 requests must use stream_id=1", line)
 		}
 
 		if err := handler(event); err != nil {

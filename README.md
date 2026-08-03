@@ -103,14 +103,30 @@ In addition to the summary printed to stdout, the engine maintains aggregate out
 
 See `config.yaml` in this directory for a ready-to-use example demonstrating safe defaults, metrics, and override usage.
 
+## Envoy access-log input
+
+Replay accepts one flat JSON object per line. When present, `type` must be the
+exact, case-sensitive value `DownstreamStart` or `DownstreamEnd`; that field
+selects the parser behavior. For compatibility with Envoy's default
+request-completion access logs, a missing `type` is treated as
+`DownstreamEnd`. The required common fields are `connection_id`, `start_time`,
+`method`, `authority`, `path`, and `protocol`. `DownstreamEnd` additionally
+requires `response_code`.
+
+Each original HTTP request must produce exactly one record: choose either start
+or end. If both are present, Replay treats them as separate requests and
+replays the original request twice. Normalized `request` records, nested `http`
+objects, connection lifecycle events, and explicit unknown Envoy access-log
+types are rejected.
+
 ## Retry and validation config
 
-Use `config.yaml` to control retry, response validation, pacing, lifecycle, and idempotency safeguards.
+Use `config.yaml` to control retry, response validation, pacing, and idempotency safeguards.
 Each `validation.status`, `validation.headers`, and `validation.body` field
 directly enables that check; there is no aggregate validation toggle.
-Validation expectations are authoritative fields on `DownstreamEnd` request
-events: `status`, `response_headers`, and `response_body`. Replay validates the
-target response immediately and rejects separate `response` events.
+On `DownstreamEnd` events, `response_code`, `response_headers`, and
+`response_body` provide response-validation expectations. `DownstreamStart`
+events carry request data only and never trigger inline response validation.
 
 ```yaml
 replay:
@@ -130,8 +146,6 @@ replay:
   pacing:
     enabled: false
     max_sleep_delta: 30s
-  lifecycle:
-    require_open: true
   idempotency:
     enabled: true
     block_methods: [POST, PUT, PATCH, DELETE]
@@ -163,10 +177,19 @@ When a recorded response exists for a request (`connection_id` + `sequence`), mi
 When the target is unreachable or times out, the request is recorded as `send_error`, the run remains `partial_success`, and `replay_status_counter` is incremented with a synthetic transport status.
 
 When idempotency safeguards are enabled, mutation methods are skipped unless one of the allow headers is present.
-Lifecycle checks require `connection_open` before each replayed connection. `connection_close` is optional; EOF finalizes any still-open connections.
-Round-robin workers may drive multiple recorded connections. Each recorded connection owns its HTTP transport until `connection_close` or EOF, preserving keep-alive reuse and socket isolation; `max_virtual_users_per_engine` bounds the worker count.
+Native Envoy HTTP access logs do not contain TCP connection-close records.
+Replay initializes connection state from the first record for each
+`node` + `connection_id` and retains its sequence and HTTP transport state until
+EOF. This preserves keep-alive reuse and socket isolation if the connection
+appears again later in the capture. `max_virtual_users_per_engine` bounds worker
+count, not retained connection state.
 
-Sharding routes connections by `node` + `connection_id` hash (`shard_index` / `shard_count`) and only replays the local shard. With multiple shards, replay isolates checkpoint files using a `.shard-<index>-of-<count>` suffix.
+Per-instance memory therefore scales with the number of unique connection
+identities assigned to that instance. For large captures, use `shard_index` and
+`shard_count`; sharding keeps every `node` + `connection_id` on one engine and
+isolates checkpoint files with a `.shard-<index>-of-<count>` suffix. Do not split
+a connection using arbitrary byte offsets or timestamp windows.
+
 If `checkpoint.file` is set, completed sequences update an in-memory watermark and are persisted at `checkpoint.sync_interval` (default `1s`). Orderly shutdown flushes the latest watermark; after an abrupt termination, replay can repeat requests completed since the last successful sync. Persisted sequences are skipped on the next run using the same `node` + `connection_id` identity.
-For HTTP/2 traffic, `serialized` replays requests sequentially, while `multiplexed`
-dispatches requests concurrently on the shared per-connection client and waits for them at `connection_close` or EOF.
+For HTTP/2 traffic, `serialized` replays requests sequentially, while
+`multiplexed` dispatches requests concurrently on the shared per-connection client and waits for them at EOF.

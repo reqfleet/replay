@@ -263,7 +263,7 @@ func (e *Engine) newConnState(connKey model.ConnectionKey) *connState {
 
 func (e *Engine) detectHTTP2ForConn(cs *connState, firstRequest model.Event) {
 	cs.detected = true
-	version := firstRequest.HTTP.Version
+	version := firstRequest.Protocol
 	if strings.Contains(version, "HTTP/2") || strings.Contains(version, "http/2") {
 		cs.http2 = true
 	}
@@ -275,7 +275,6 @@ func (e *Engine) detectHTTP2ForConn(cs *connState, firstRequest model.Event) {
 // ensuring even distribution. All events for a connection go to the same
 // worker, preserving per-connection ordering.
 func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, workerChs []chan model.Event) error {
-	opened := make(map[model.ConnectionKey]bool)
 	connWorker := make(map[model.ConnectionKey]int)
 	vus := len(workerChs)
 	nextWorker := 0
@@ -287,15 +286,8 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 		}
 
 		switch ev.Type {
-		case model.EventConnectionOpen:
-			opened[connKey] = true
-		case model.EventConnectionClose:
-			// Cleanup happens after the close event is routed so it reaches the
-			// worker that owns the connection state.
-		case model.EventRequest:
-			if e.cfg.Replay.Lifecycle.RequireOpen && !opened[connKey] {
-				return fmt.Errorf("connection %v missing connection_open", connKey)
-			}
+		case model.EventConnectionOpen, model.EventConnectionClose, model.EventRequest,
+			model.AccessLogTypeDownstreamStart, model.AccessLogTypeDownstreamEnd:
 		default:
 			return fmt.Errorf("unsupported event type %q", ev.Type)
 		}
@@ -314,7 +306,6 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 		}
 
 		if ev.Type == model.EventConnectionClose {
-			delete(opened, connKey)
 			delete(connWorker, connKey)
 		}
 	}
@@ -353,7 +344,7 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 				conns[connKey] = cs
 			}
 
-		case model.EventRequest:
+		case model.EventRequest, model.AccessLogTypeDownstreamStart, model.AccessLogTypeDownstreamEnd:
 			if cs == nil {
 				cs = e.newConnState(connKey)
 				conns[connKey] = cs
@@ -547,13 +538,13 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 }
 
 func (e *Engine) paceRequest(ctx context.Context, cs *connState, requestEvent model.Event) error {
-	if err := e.sleepForPacing(ctx, cs.previousTimestamp, cs.previousTimestampSet, requestEvent.Timestamp); err != nil {
+	if err := e.sleepForPacing(ctx, cs.previousTimestamp, cs.previousTimestampSet, requestEvent.StartTime); err != nil {
 		return err
 	}
 	cs.previousTimestamp, cs.previousTimestampSet = advancePacingClock(
 		cs.previousTimestamp,
 		cs.previousTimestampSet,
-		requestEvent.Timestamp,
+		requestEvent.StartTime,
 	)
 	return nil
 }
@@ -665,18 +656,13 @@ func (e *Engine) finishRequestSuccess(cs *connState, requestEvent model.Event, e
 }
 
 func (e *Engine) expectedResponseFromRequestEvent(requestEvent model.Event) (model.Event, bool) {
-	if !e.responseValidationEnabled() || requestEvent.AccessLogType != model.AccessLogTypeDownstreamEnd {
+	if !e.responseValidationEnabled() || requestEvent.Type != model.AccessLogTypeDownstreamEnd {
 		return model.Event{}, false
 	}
-	expected := model.Event{
-		Status:  requestEvent.Status,
-		Headers: requestEvent.ResponseHeaders,
-		Body:    requestEvent.ResponseBody,
-	}
-	if expected.Status == 0 && len(expected.Headers) == 0 && expected.Body == nil {
+	if requestEvent.ResponseCode == nil && len(requestEvent.ResponseHeaders) == 0 && requestEvent.ResponseBody == nil {
 		return model.Event{}, false
 	}
-	return expected, true
+	return requestEvent, true
 }
 
 func (e *Engine) responseValidationEnabled() bool {
@@ -796,7 +782,7 @@ func (e *Engine) detectHTTP2(requests []model.Event) (http2 bool, multiplexed bo
 	}
 	for _, req := range requests {
 		if !http2 {
-			version := req.HTTP.Version
+			version := req.Protocol
 			if strings.Contains(version, "HTTP/2") || strings.Contains(version, "http/2") {
 				http2 = true
 				if !isMultiplexedMode {
@@ -838,7 +824,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		default:
 		}
 
-		if sleepErr := e.sleepForPacing(ctx, previousTimestamp, previousTimestampSet, requestEvent.Timestamp); sleepErr != nil {
+		if sleepErr := e.sleepForPacing(ctx, previousTimestamp, previousTimestampSet, requestEvent.StartTime); sleepErr != nil {
 			result.ConnectionsAborted++
 			result.Outcome = RunFailed
 			return result
@@ -846,7 +832,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		previousTimestamp, previousTimestampSet = advancePacingClock(
 			previousTimestamp,
 			previousTimestampSet,
-			requestEvent.Timestamp,
+			requestEvent.StartTime,
 		)
 
 		requestKey := model.ConnectionKey{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID}
@@ -906,7 +892,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 					"conn", requestEvent.ConnectionID,
 					"seq", requestEvent.Sequence,
 					"status", exec.statusCode,
-					"expected_status", expected.Status,
+					"expected_status", expected.ResponseCode,
 				)
 				if len(exec.body) > 0 {
 					slog.DebugContext(ctx, "Validation failed body", "body", string(exec.body))
@@ -1146,7 +1132,7 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 			slog.DebugContext(ctx, "Request failed",
 				"conn", requestEvent.ConnectionID,
 				"seq", requestEvent.Sequence,
-				"path", requestEvent.HTTP.Path,
+				"path", requestEvent.Path,
 				"error", err,
 			)
 			if attempt == maxAttempts || !e.shouldRetryError(err) {
@@ -1164,7 +1150,7 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 			slog.DebugContext(ctx, "Request retryable status",
 				"conn", requestEvent.ConnectionID,
 				"seq", requestEvent.Sequence,
-				"path", requestEvent.HTTP.Path,
+				"path", requestEvent.Path,
 				"status", exec.statusCode,
 			)
 			if sleepErr := e.sleepBackoff(ctx, attempt); sleepErr != nil {
@@ -1175,7 +1161,7 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 		slog.DebugContext(ctx, "Request success",
 			"conn", requestEvent.ConnectionID,
 			"seq", requestEvent.Sequence,
-			"path", requestEvent.HTTP.Path,
+			"path", requestEvent.Path,
 			"status", exec.statusCode,
 		)
 		return exec, nil
@@ -1363,7 +1349,7 @@ func metricStatusForSendError(err error) string {
 }
 
 func (e *Engine) metricLabelForRequest(requestEvent model.Event) string {
-	label, _, _ := strings.Cut(requestEvent.HTTP.Path, "?")
+	label, _, _ := strings.Cut(requestEvent.Path, "?")
 	if len(e.parsedPathTemplates) > 0 {
 		label = MatchPathTemplate(label, e.parsedPathTemplates)
 	}
@@ -1426,14 +1412,14 @@ func backoffDuration(strategy string, attempt int) time.Duration {
 
 func (e *Engine) responseValidationFailed(expected model.Event, actual requestExecution) bool {
 	validation := e.cfg.Replay.Validation
-	if validation.Status && expected.Status > 0 && expected.Status != actual.statusCode {
+	if validation.Status && expected.ResponseCode != nil && *expected.ResponseCode != actual.statusCode {
 		return true
 	}
-	if validation.Headers && headersMismatch(expected.Headers, actual.headers, validation.IgnoreHeaders) {
+	if validation.Headers && headersMismatch(expected.ResponseHeaders, actual.headers, validation.IgnoreHeaders) {
 		return true
 	}
-	if validation.Body && expected.Body != nil {
-		expectedBody, err := base64.StdEncoding.DecodeString(expected.Body.Content)
+	if validation.Body && expected.ResponseBody != nil {
+		expectedBody, err := base64.StdEncoding.DecodeString(expected.ResponseBody.Content)
 		if err != nil {
 			return true
 		}
@@ -1484,7 +1470,7 @@ func headersMismatch(expected map[string][]string, actual map[string][]string, i
 
 func (e *Engine) buildRequestURL(event model.Event) (string, error) {
 	if e.parsedOverrideURL != nil {
-		requestURI := event.HTTP.Path
+		requestURI := event.Path
 		parsedPath, err := url.ParseRequestURI(requestURI)
 		if err != nil {
 			return "", fmt.Errorf("parse request path: %w", err)
@@ -1501,21 +1487,21 @@ func (e *Engine) buildRequestURL(event model.Event) (string, error) {
 		return u.String(), nil
 	}
 
-	scheme := event.HTTP.Scheme
+	scheme := event.Scheme
 	if scheme == "" {
 		scheme = "http"
 	}
-	if event.HTTP.Authority == "" {
+	if event.Authority == "" {
 		return "", fmt.Errorf("request authority is required")
 	}
-	if event.HTTP.Path == "" {
+	if event.Path == "" {
 		return "", fmt.Errorf("request path is required")
 	}
-	return scheme + "://" + event.HTTP.Authority + event.HTTP.Path, nil
+	return scheme + "://" + event.Authority + event.Path, nil
 }
 
 func resolvedRequestMethod(request model.Event) string {
-	method := strings.ToUpper(strings.TrimSpace(request.HTTP.Method))
+	method := strings.ToUpper(strings.TrimSpace(request.Method))
 	if method != "" {
 		return method
 	}

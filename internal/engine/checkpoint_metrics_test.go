@@ -22,7 +22,6 @@ import (
 
 func TestCheckpointWrittenOnSuccess(t *testing.T) {
 	cfg := config.Default()
-	cfg.Replay.Lifecycle.RequireOpen = false
 
 	reg := metrics.New(cfg.Metrics)
 	e := New(cfg, reg)
@@ -34,7 +33,7 @@ func TestCheckpointWrittenOnSuccess(t *testing.T) {
 	// extract host part
 	host := u[len("http://"):]
 
-	req := model.Event{Type: model.EventRequest, Node: "envoy-a", ConnectionID: 1, Sequence: 1, HTTP: model.HTTPRequestMeta{Scheme: "http", Authority: host, Path: "/"}}
+	req := model.Event{Type: model.EventRequest, Node: "envoy-a", ConnectionID: 1, Sequence: 1, Scheme: "http", Authority: host, Path: "/"}
 
 	tmp := t.TempDir()
 	ckPath := filepath.Join(tmp, "checkpoint.json")
@@ -131,7 +130,7 @@ func TestReplayUsesConfiguredCheckpointSyncInterval(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "checkpoint.json")
 	cfg := config.Default()
-	cfg.Replay.Lifecycle.RequireOpen = false
+
 	cfg.Replay.Checkpoint.File = path
 	cfg.Replay.Checkpoint.SyncInterval = 10 * time.Millisecond
 	eng := New(cfg, metrics.New(cfg.Metrics))
@@ -155,18 +154,13 @@ func TestReplayUsesConfiguredCheckpointSyncInterval(t *testing.T) {
 	t.Cleanup(closeEvents)
 
 	key := model.ConnectionKey{Node: "envoy-a", ConnectionID: 1}
-	events <- model.Event{
-		Type:         model.EventRequest,
+	events <- model.Event{Type: model.EventRequest,
 		Node:         key.Node,
 		ConnectionID: key.ConnectionID,
-		Sequence:     1,
-		HTTP: model.HTTPRequestMeta{
-			Method:    http.MethodGet,
-			Scheme:    target.Scheme,
-			Authority: target.Host,
-			Path:      "/",
-		},
-	}
+		Sequence:     1, Method: http.MethodGet,
+		Scheme:    target.Scheme,
+		Authority: target.Host,
+		Path:      "/"}
 	waitForCheckpointSequence(t, path, key, 1, time.Second)
 	closeEvents()
 
@@ -415,9 +409,10 @@ func TestReplayStreamReturnsCheckpointPersistenceFailure(t *testing.T) {
 			Type:         model.EventRequest,
 			ConnectionID: 1,
 			Sequence:     1,
-			HTTP: model.HTTPRequestMeta{
-				Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/",
-			},
+			Method:       http.MethodGet,
+			Scheme:       target.Scheme,
+			Authority:    target.Host,
+			Path:         "/",
 		},
 		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
@@ -473,7 +468,7 @@ func waitForCheckpointSequence(t *testing.T, path string, key model.ConnectionKe
 
 func TestCheckpointNotWrittenInDryRun(t *testing.T) {
 	cfg := config.Default()
-	cfg.Replay.Lifecycle.RequireOpen = false
+
 	cfg.Replay.DryRun = true
 
 	reg := metrics.New(cfg.Metrics)
@@ -484,7 +479,7 @@ func TestCheckpointNotWrittenInDryRun(t *testing.T) {
 	u := srv.URL
 	host := u[len("http://"):]
 
-	req := model.Event{Type: model.EventRequest, Node: "envoy-b", ConnectionID: 2, Sequence: 1, HTTP: model.HTTPRequestMeta{Scheme: "http", Authority: host, Path: "/"}}
+	req := model.Event{Type: model.EventRequest, Node: "envoy-b", ConnectionID: 2, Sequence: 1, Scheme: "http", Authority: host, Path: "/"}
 
 	tmp := t.TempDir()
 	ckPath := filepath.Join(tmp, "checkpoint.json")
@@ -512,7 +507,7 @@ func TestCheckpointNotWrittenInDryRun(t *testing.T) {
 
 func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
 	cfg := config.Default()
-	cfg.Replay.Lifecycle.RequireOpen = false
+
 	cfg.Replay.Idempotency.Enabled = true
 	cfg.Replay.Idempotency.BlockMethods = []string{"POST"}
 	cfg.Replay.Idempotency.RequireHeaderForAllow = []string{"x-idempotency-key"}
@@ -521,7 +516,7 @@ func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
 	e := New(cfg, reg)
 
 	// no server needed because idempotency skip happens before network
-	req := model.Event{Type: model.EventRequest, Node: "envoy-b", ConnectionID: 42, Sequence: 42, HTTP: model.HTTPRequestMeta{Scheme: "http", Authority: "example.invalid", Path: "/"}, Headers: map[string][]string{"content-type": {"text/plain"}}}
+	req := model.Event{Type: model.EventRequest, Node: "envoy-b", ConnectionID: 42, Sequence: 42, Scheme: "http", Authority: "example.invalid", Path: "/", Headers: map[string][]string{"content-type": {"text/plain"}}}
 
 	tmp := t.TempDir()
 	ckPath := filepath.Join(tmp, "checkpoint.json")
