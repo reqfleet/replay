@@ -59,7 +59,7 @@ not correlate start and end records and would replay the request twice.
 Replay rejects unknown explicit types, including normalized `request` records,
 `connection_open`, `connection_close`, periodic, upstream, TCP, and tunnel
 events. It also rejects the previous nested `http` representation and the
-aliases `timestamp`, `status`, and `log_type`.
+aliases `start_time`, `status`, and `log_type`.
 
 ### 3.1 Flat Record Schema
 
@@ -70,7 +70,7 @@ aliases `timestamp`, `status`, and `log_type`.
   "connection_id": 42,
   "stream_id": 7,
   "sequence": 12,
-  "start_time": "2026-02-27T03:10:22.001Z",
+  "timestamp": "2026-02-27T03:10:22.001Z",
   "method": "POST",
   "scheme": "https",
   "authority": "api.example.com",
@@ -105,7 +105,7 @@ aliases `timestamp`, `status`, and `log_type`.
 Every record MUST contain:
 
 * `connection_id`: integer logical connection identifier
-* `start_time`: RFC3339 timestamp
+* `timestamp`: RFC3339 timestamp
 * `method`: HTTP method
 * `authority`: request authority
 * `path`: request path, including its query string
@@ -192,7 +192,7 @@ Two supported modes:
 Multiplexed mode uses stream-aware checkpointing so a later completed request cannot advance the checkpoint past an earlier in-flight request.
 
 Replay consumes HTTP/2 records in append order and does not reorder them by
-`start_time`, `stream_id`, or `sequence`. Envoy emits `DownstreamEnd` records as
+`timestamp`, `stream_id`, or `sequence`. Envoy emits `DownstreamEnd` records as
 streams complete, so multiplexed streams MAY appear in completion order rather
 than their original request-start order. Serialized mode replays that observed
 completion order.

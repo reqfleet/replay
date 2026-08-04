@@ -10,7 +10,7 @@ import (
 func TestParseFlatDownstreamStart(t *testing.T) {
 	input := strings.NewReader(
 		`{"type":"DownstreamStart","node":"envoy-a","connection_id":7,` +
-			`"start_time":"2026-02-27T03:10:22.001Z","method":"GET","scheme":"https",` +
+			`"timestamp":"2026-02-27T03:10:22.001Z","method":"GET","scheme":"https",` +
 			`"authority":"example.com","path":"/start","protocol":"HTTP/1.1","response_code":503,"user_agent":"curl/8.0.0"}` + "\n")
 
 	events := parseEvents(t, input)
@@ -30,8 +30,8 @@ func TestParseFlatDownstreamStart(t *testing.T) {
 	if got.StreamID != 1 {
 		t.Errorf("event.StreamID = %d, want 1", got.StreamID)
 	}
-	if got.StartTime != "2026-02-27T03:10:22.001Z" {
-		t.Errorf("event.StartTime = %q, want input start_time", got.StartTime)
+	if got.Timestamp != "2026-02-27T03:10:22.001Z" {
+		t.Errorf("event.Timestamp = %q, want input timestamp", got.Timestamp)
 	}
 	if got.Protocol != "HTTP/1.1" || got.Method != "GET" ||
 		got.Scheme != "https" || got.Authority != "example.com" ||
@@ -50,7 +50,7 @@ func TestParseFlatDownstreamStart(t *testing.T) {
 func TestParseFlatDownstreamEnd(t *testing.T) {
 	input := strings.NewReader(
 		`{"type":"DownstreamEnd","connection_id":7,` +
-			`"start_time":"2026-02-27T03:10:22.101Z","method":"POST","scheme":"https",` +
+			`"timestamp":"2026-02-27T03:10:22.101Z","method":"POST","scheme":"https",` +
 			`"authority":"example.com","path":"/end","protocol":"HTTP/2","response_code":503,` +
 			`"duration_ms":16,"user_agent":"flat-user-agent",` +
 			`"headers":{"content-type":["application/json"],"User-Agent":["recorded-user-agent"]},` +
@@ -96,7 +96,7 @@ func TestParseFlatDownstreamEnd(t *testing.T) {
 
 func TestParseFlatWithoutTypeDefaultsToDownstreamEnd(t *testing.T) {
 	input := strings.NewReader(
-		`{"connection_id":7,"start_time":"2026-02-27T03:10:22.101Z","method":"GET",` +
+		`{"connection_id":7,"timestamp":"2026-02-27T03:10:22.101Z","method":"GET",` +
 			`"authority":"example.com","path":"/end","protocol":"HTTP/1.1","response_code":201}` + "\n")
 
 	events := parseEvents(t, input)
@@ -119,11 +119,11 @@ func TestParseRejectsUnsupportedInputShapes(t *testing.T) {
 	}{
 		{
 			name:  "empty_type",
-			input: `{"type":"","connection_id":1,"start_time":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1","response_code":200}`,
+			input: `{"type":"","connection_id":1,"timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1","response_code":200}`,
 		},
 		{
 			name:  "noncanonical_type",
-			input: `{"type":"downstreamend","connection_id":1,"start_time":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1","response_code":200}`,
+			input: `{"type":"downstreamend","connection_id":1,"timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1","response_code":200}`,
 		},
 		{
 			name:  "legacy_request",
@@ -135,47 +135,47 @@ func TestParseRejectsUnsupportedInputShapes(t *testing.T) {
 		},
 		{
 			name:  "nested_http",
-			input: `{"type":"DownstreamEnd","connection_id":1,"start_time":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1","response_code":200,"http":{"method":"GET","authority":"example.com","path":"/"}}`,
+			input: `{"type":"DownstreamEnd","connection_id":1,"timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1","response_code":200,"http":{"method":"GET","authority":"example.com","path":"/"}}`,
 		},
 		{
-			name:  "legacy_timestamp",
+			name:  "legacy_start_time",
 			input: `{"type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22Z","start_time":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1"}`,
 		},
 		{
 			name:  "missing_connection_id",
-			input: `{"type":"DownstreamStart","start_time":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1"}`,
+			input: `{"type":"DownstreamStart","timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1"}`,
 		},
 		{
-			name:  "missing_start_time",
+			name:  "missing_timestamp",
 			input: `{"type":"DownstreamStart","connection_id":1,"method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1"}`,
 		},
 		{
-			name:  "invalid_start_time",
-			input: `{"type":"DownstreamStart","connection_id":1,"start_time":"not-a-time","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1"}`,
+			name:  "invalid_timestamp",
+			input: `{"type":"DownstreamStart","connection_id":1,"timestamp":"not-a-time","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1"}`,
 		},
 		{
 			name:  "missing_method",
-			input: `{"type":"DownstreamStart","connection_id":1,"start_time":"2026-02-27T03:10:22Z","authority":"example.com","path":"/","protocol":"HTTP/1.1"}`,
+			input: `{"type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22Z","authority":"example.com","path":"/","protocol":"HTTP/1.1"}`,
 		},
 		{
 			name:  "missing_protocol",
-			input: `{"type":"DownstreamStart","connection_id":1,"start_time":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/"}`,
+			input: `{"type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/"}`,
 		},
 		{
 			name:  "missing_authority",
-			input: `{"type":"DownstreamStart","connection_id":1,"start_time":"2026-02-27T03:10:22Z","method":"GET","path":"/","protocol":"HTTP/1.1"}`,
+			input: `{"type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22Z","method":"GET","path":"/","protocol":"HTTP/1.1"}`,
 		},
 		{
 			name:  "missing_path",
-			input: `{"type":"DownstreamStart","connection_id":1,"start_time":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","protocol":"HTTP/1.1"}`,
+			input: `{"type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","protocol":"HTTP/1.1"}`,
 		},
 		{
 			name:  "completion_missing_response_code",
-			input: `{"type":"DownstreamEnd","connection_id":1,"start_time":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1"}`,
+			input: `{"type":"DownstreamEnd","connection_id":1,"timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1"}`,
 		},
 		{
 			name:  "untyped_completion_missing_response_code",
-			input: `{"connection_id":1,"start_time":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1"}`,
+			input: `{"connection_id":1,"timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1"}`,
 		},
 	}
 
@@ -192,7 +192,7 @@ func TestParseRejectsUnsupportedInputShapes(t *testing.T) {
 func TestParseSkipsNonJSONLines(t *testing.T) {
 	input := strings.NewReader(
 		"[2026-04-23 07:12:34.566][1][info][main] shutting down parent after drain\n" +
-			`{"type":"DownstreamStart","connection_id":1,"start_time":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1"}` + "\n")
+			`{"type":"DownstreamStart","connection_id":1,"timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"HTTP/1.1"}` + "\n")
 
 	events := parseEvents(t, input)
 	if got, want := len(events), 1; got != want {
@@ -203,7 +203,7 @@ func TestParseSkipsNonJSONLines(t *testing.T) {
 func TestParseRejectsHTTP11StreamIDNotOne(t *testing.T) {
 	input := strings.NewReader(
 		`{"type":"DownstreamStart","connection_id":1,"stream_id":2,` +
-			`"start_time":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com",` +
+			`"timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com",` +
 			`"path":"/","protocol":"HTTP/1.1"}` + "\n")
 
 	err := ParseStream(input, func(model.Event) error { return nil })
@@ -215,10 +215,10 @@ func TestParseRejectsHTTP11StreamIDNotOne(t *testing.T) {
 func TestParseRejectsNonMonotonicSequence(t *testing.T) {
 	input := strings.NewReader(
 		`{"type":"DownstreamStart","connection_id":1,"sequence":2,` +
-			`"start_time":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com",` +
+			`"timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com",` +
 			`"path":"/a","protocol":"HTTP/1.1"}` + "\n" +
 			`{"type":"DownstreamStart","connection_id":1,"sequence":1,` +
-			`"start_time":"2026-02-27T03:10:23Z","method":"GET","authority":"example.com",` +
+			`"timestamp":"2026-02-27T03:10:23Z","method":"GET","authority":"example.com",` +
 			`"path":"/b","protocol":"HTTP/1.1"}` + "\n")
 
 	err := ParseStream(input, func(model.Event) error { return nil })
@@ -230,10 +230,10 @@ func TestParseRejectsNonMonotonicSequence(t *testing.T) {
 func TestParseIsolatesSequenceByNode(t *testing.T) {
 	input := strings.NewReader(
 		`{"type":"DownstreamStart","node":"envoy-a","connection_id":1,` +
-			`"start_time":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com",` +
+			`"timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com",` +
 			`"path":"/a","protocol":"HTTP/1.1"}` + "\n" +
 			`{"type":"DownstreamStart","node":"envoy-b","connection_id":1,` +
-			`"start_time":"2026-02-27T03:10:23Z","method":"GET","authority":"example.com",` +
+			`"timestamp":"2026-02-27T03:10:23Z","method":"GET","authority":"example.com",` +
 			`"path":"/b","protocol":"HTTP/1.1"}` + "\n")
 
 	events := parseEvents(t, input)

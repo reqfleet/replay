@@ -89,7 +89,7 @@ func generatedRequestEvent(logType model.EventType, connID int, ts time.Time, op
 	req := model.Event{
 		Type:         logType,
 		ConnectionID: connID,
-		StartTime:    ts.Format(time.RFC3339Nano),
+		Timestamp:    ts.Format(time.RFC3339Nano),
 		Method:       "GET",
 		Scheme:       options.scheme,
 		Authority:    options.authority,

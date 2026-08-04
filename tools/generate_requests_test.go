@@ -232,7 +232,7 @@ func TestGeneratedEventsInterleaveConnectionsByRequestStep(t *testing.T) {
 	requestTimestamps := []string{}
 	for _, event := range events {
 		requestConnectionIDs = append(requestConnectionIDs, event.ConnectionID)
-		requestTimestamps = append(requestTimestamps, event.StartTime)
+		requestTimestamps = append(requestTimestamps, event.Timestamp)
 	}
 	wantConnectionIDs := []int{1, 2, 3, 1, 2, 3}
 	for i, want := range wantConnectionIDs {

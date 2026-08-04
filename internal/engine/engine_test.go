@@ -2006,8 +2006,8 @@ func TestReplayHTTP2PacingUsesConnectionOrderWithUniqueStreamIDs(t *testing.T) {
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
-		{Type: model.EventRequest, ConnectionID: 1, StreamID: 1, Sequence: 1, StartTime: base.Format(time.RFC3339Nano), Protocol: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"},
-		{Type: model.EventRequest, ConnectionID: 1, StreamID: 3, Sequence: 2, StartTime: base.Add(100 * time.Millisecond).Format(time.RFC3339Nano), Protocol: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 1, Sequence: 1, Timestamp: base.Format(time.RFC3339Nano), Protocol: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 3, Sequence: 2, Timestamp: base.Add(100 * time.Millisecond).Format(time.RFC3339Nano), Protocol: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"},
 		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
@@ -2045,7 +2045,7 @@ func TestPacingClockDoesNotRewindForNonIncreasingTimestamps(t *testing.T) {
 		base.Add(50 * time.Millisecond),
 		base.Add(150 * time.Millisecond),
 	} {
-		if err := eng.paceRequest(context.Background(), cs, model.Event{StartTime: ts.Format(time.RFC3339Nano)}); err != nil {
+		if err := eng.paceRequest(context.Background(), cs, model.Event{Timestamp: ts.Format(time.RFC3339Nano)}); err != nil {
 			t.Fatalf("paceRequest(%s) error: %v", ts.Format(time.RFC3339Nano), err)
 		}
 	}
