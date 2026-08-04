@@ -29,7 +29,7 @@ func writeJSONLine(f *os.File, v any) error {
 	return nil
 }
 
-func generatedAccessLogType(raw string) (model.AccessLogType, error) {
+func generatedAccessLogType(raw string) (model.EventType, error) {
 	switch strings.ToLower(raw) {
 	case "downstream_start", "downstreamstart", "downstream-start":
 		return model.AccessLogTypeDownstreamStart, nil
@@ -73,7 +73,7 @@ func generatedRequestBody(raw string) *model.Body {
 	}
 }
 
-func generatedRequestEvent(logType model.AccessLogType, connID int, ts time.Time, options generatedRequestOptions) model.Event {
+func generatedRequestEvent(logType model.EventType, connID int, ts time.Time, options generatedRequestOptions) model.Event {
 	headers := map[string][]string{
 		"x-api-key":          {options.apiKey},
 		"x-forwarded-proto":  {options.scheme},
@@ -87,21 +87,19 @@ func generatedRequestEvent(logType model.AccessLogType, connID int, ts time.Time
 	}
 
 	req := model.Event{
-		Type:          model.EventRequest,
-		AccessLogType: logType,
-		ConnectionID:  connID,
-		Headers:       headers,
-		HTTP: model.HTTPRequestMeta{
-			Version:   "HTTP/1.1",
-			Scheme:    options.scheme,
-			Authority: options.authority,
-			Method:    "GET",
-			Path:      options.requestPath,
-		},
-		Timestamp: ts.Format(time.RFC3339Nano),
+		Type:         logType,
+		ConnectionID: connID,
+		StartTime:    ts.Format(time.RFC3339Nano),
+		Method:       "GET",
+		Scheme:       options.scheme,
+		Authority:    options.authority,
+		Path:         options.requestPath,
+		Protocol:     "HTTP/1.1",
+		Headers:      headers,
 	}
 	if logType == model.AccessLogTypeDownstreamEnd {
-		req.Status = options.status
+		responseCode := options.status
+		req.ResponseCode = &responseCode
 		req.DurationMS = options.durationMS
 		if options.body != nil {
 			body := *options.body
@@ -111,17 +109,7 @@ func generatedRequestEvent(logType model.AccessLogType, connID int, ts time.Time
 	return req
 }
 
-func emitGeneratedEvents(logType model.AccessLogType, reqs, conns int, now time.Time, options generatedRequestOptions, emit func(model.Event) error) error {
-	for c := 1; c <= conns; c++ {
-		if err := emit(model.Event{
-			Type:                    model.EventConnectionOpen,
-			ConnectionID:            c,
-			Timestamp:               now.Format(time.RFC3339Nano),
-			DownstreamRemoteAddress: "172.18.0.1:45398",
-		}); err != nil {
-			return err
-		}
-	}
+func emitGeneratedEvents(logType model.EventType, reqs, conns int, now time.Time, options generatedRequestOptions, emit func(model.Event) error) error {
 
 	for r := 1; r <= reqs; r++ {
 		p := path.Join("/", options.requestPath)
@@ -138,22 +126,10 @@ func emitGeneratedEvents(logType model.AccessLogType, reqs, conns int, now time.
 		}
 	}
 
-	closeTimestamp := now.Add(time.Duration(reqs+1) * 100 * time.Millisecond).Format(time.RFC3339Nano)
-	for c := 1; c <= conns; c++ {
-		if err := emit(model.Event{
-			Type:         model.EventConnectionClose,
-			ConnectionID: c,
-			Timestamp:    closeTimestamp,
-			Reason:       "remote_close",
-		}); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
-func generatedEvents(logType model.AccessLogType, reqs, conns int, now time.Time, options generatedRequestOptions) []model.Event {
+func generatedEvents(logType model.EventType, reqs, conns int, now time.Time, options generatedRequestOptions) []model.Event {
 	events := []model.Event{}
 	if err := emitGeneratedEvents(logType, reqs, conns, now, options, func(event model.Event) error {
 		events = append(events, event)

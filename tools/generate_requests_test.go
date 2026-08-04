@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 func TestGeneratedAccessLogType(t *testing.T) {
 	tests := []struct {
 		input string
-		want  model.AccessLogType
+		want  model.EventType
 	}{
 		{input: "downstream-start", want: model.AccessLogTypeDownstreamStart},
 		{input: "downstream_start", want: model.AccessLogTypeDownstreamStart},
@@ -90,17 +91,17 @@ func TestGeneratedDownstreamStartRequestOmitsResponseFields(t *testing.T) {
 		body:        generatedRequestBody("hello"),
 	})
 
-	if got, want := req.AccessLogType, model.AccessLogTypeDownstreamStart; got != want {
-		t.Fatalf("req.AccessLogType = %q, want %q", got, want)
+	if got, want := req.Type, model.AccessLogTypeDownstreamStart; got != want {
+		t.Fatalf("req.Type = %q, want %q", got, want)
 	}
-	if got, want := req.Status, 0; got != want {
-		t.Fatalf("req.Status = %d, want %d", got, want)
+	if req.ResponseCode != nil {
+		t.Errorf("req.ResponseCode = %d, want nil", *req.ResponseCode)
 	}
 	if got, want := req.DurationMS, float64(0); got != want {
 		t.Fatalf("req.DurationMS = %v, want %v", got, want)
 	}
-	if got, want := req.HTTP.Scheme, "http"; got != want {
-		t.Fatalf("req.HTTP.Scheme = %q, want %q", got, want)
+	if got, want := req.Scheme, "http"; got != want {
+		t.Fatalf("req.Scheme = %q, want %q", got, want)
 	}
 	if req.Body != nil {
 		t.Errorf("generatedRequestEvent(DownstreamStart).Body = %+v, want nil", req.Body)
@@ -124,11 +125,14 @@ func TestGeneratedDownstreamEndRequestIncludesRequestAndResponseFields(t *testin
 		body: generatedRequestBody("hello"),
 	})
 
-	if got, want := req.AccessLogType, model.AccessLogTypeDownstreamEnd; got != want {
-		t.Fatalf("req.AccessLogType = %q, want %q", got, want)
+	if got, want := req.Type, model.AccessLogTypeDownstreamEnd; got != want {
+		t.Fatalf("req.Type = %q, want %q", got, want)
 	}
-	if got, want := req.Status, 503; got != want {
-		t.Fatalf("req.Status = %d, want %d", got, want)
+	if req.ResponseCode == nil {
+		t.Fatal("req.ResponseCode = nil, want 503")
+	}
+	if got, want := *req.ResponseCode, 503; got != want {
+		t.Fatalf("req.ResponseCode = %d, want %d", got, want)
 	}
 	if got, want := req.DurationMS, float64(16); got != want {
 		t.Fatalf("req.DurationMS = %v, want %v", got, want)
@@ -159,6 +163,34 @@ func TestGeneratedDownstreamEndRequestIncludesRequestAndResponseFields(t *testin
 	}
 }
 
+func TestGeneratedDownstreamEndSerializesZeroResponseCode(t *testing.T) {
+	req := generatedRequestEvent(model.AccessLogTypeDownstreamEnd, 7, time.Unix(100, 0).UTC(), generatedRequestOptions{
+		authority:   "example.com",
+		scheme:      "http",
+		port:        "80",
+		apiKey:      "key",
+		requestPath: "/resource",
+		status:      0,
+	})
+
+	encoded, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("json.Marshal(generatedRequestEvent(DownstreamEnd)) error: %v", err)
+	}
+	var output struct {
+		ResponseCode *int `json:"response_code"`
+	}
+	if err := json.Unmarshal(encoded, &output); err != nil {
+		t.Fatalf("json.Unmarshal(generatedRequestEvent(DownstreamEnd)) error: %v", err)
+	}
+	if output.ResponseCode == nil {
+		t.Fatal("serialized response_code = missing, want 0")
+	}
+	if got, want := *output.ResponseCode, 0; got != want {
+		t.Errorf("serialized response_code = %d, want %d", got, want)
+	}
+}
+
 func TestGeneratedRequestUsesBaseScheme(t *testing.T) {
 	req := generatedRequestEvent(model.AccessLogTypeDownstreamStart, 7, time.Unix(100, 0).UTC(), generatedRequestOptions{
 		authority:   "example.com",
@@ -170,8 +202,8 @@ func TestGeneratedRequestUsesBaseScheme(t *testing.T) {
 		durationMS:  16,
 	})
 
-	if got, want := req.HTTP.Scheme, "https"; got != want {
-		t.Fatalf("req.HTTP.Scheme = %q, want %q", got, want)
+	if got, want := req.Scheme, "https"; got != want {
+		t.Fatalf("req.Scheme = %q, want %q", got, want)
 	}
 }
 
@@ -187,37 +219,20 @@ func TestGeneratedEventsInterleaveConnectionsByRequestStep(t *testing.T) {
 		durationMS:  16,
 	})
 
-	wantTypes := []model.EventType{
-		model.EventConnectionOpen,
-		model.EventConnectionOpen,
-		model.EventConnectionOpen,
-		model.EventRequest,
-		model.EventRequest,
-		model.EventRequest,
-		model.EventRequest,
-		model.EventRequest,
-		model.EventRequest,
-		model.EventConnectionClose,
-		model.EventConnectionClose,
-		model.EventConnectionClose,
+	if got, want := len(events), 6; got != want {
+		t.Fatalf("len(generatedEvents()) = %d, want %d", got, want)
 	}
-	if len(events) != len(wantTypes) {
-		t.Fatalf("len(generatedEvents()) = %d, want %d", len(events), len(wantTypes))
-	}
-	for i, wantType := range wantTypes {
-		if got := events[i].Type; got != wantType {
-			t.Fatalf("events[%d].Type = %q, want %q", i, got, wantType)
+	for i, event := range events {
+		if event.Type != model.AccessLogTypeDownstreamStart {
+			t.Fatalf("events[%d].Type = %q, want %q", i, event.Type, model.AccessLogTypeDownstreamStart)
 		}
 	}
 
 	requestConnectionIDs := []int{}
 	requestTimestamps := []string{}
 	for _, event := range events {
-		if event.Type != model.EventRequest {
-			continue
-		}
 		requestConnectionIDs = append(requestConnectionIDs, event.ConnectionID)
-		requestTimestamps = append(requestTimestamps, event.Timestamp)
+		requestTimestamps = append(requestTimestamps, event.StartTime)
 	}
 	wantConnectionIDs := []int{1, 2, 3, 1, 2, 3}
 	for i, want := range wantConnectionIDs {

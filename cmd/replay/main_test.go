@@ -64,6 +64,31 @@ func TestExitCodeForSummary(t *testing.T) {
 	}
 }
 
+func TestRunReplayFromFileAcceptsNativeEnvoyLogWithoutConnectionOpen(t *testing.T) {
+	cfg := config.Default()
+	cfg.Replay.DryRun = true
+	logPath := filepath.Join(t.TempDir(), "envoy.ndjson")
+	content := `{"type":"DownstreamStart","connection_id":7,"start_time":"2026-08-03T01:11:06.531Z","method":"GET","authority":"envoy-recorder-proxy:8080","path":"/","protocol":"HTTP/1.1"}` + "\n"
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", logPath, err)
+	}
+
+	registry := metrics.New(cfg.Metrics)
+	summary, err := runReplayFromFile(context.Background(), cfg, registry, logPath, "")
+	if err != nil {
+		t.Fatalf("runReplayFromFile(%q) error: %v", logPath, err)
+	}
+	if got, want := summary.Outcome, engine.RunSuccess; got != want {
+		t.Errorf("runReplayFromFile(%q) outcome = %s, want %s", logPath, got, want)
+	}
+	if got, want := summary.Skipped, int64(1); got != want {
+		t.Errorf("runReplayFromFile(%q) skipped = %d, want %d", logPath, got, want)
+	}
+	if got, want := summary.ConnectionsDone, int64(1); got != want {
+		t.Errorf("runReplayFromFile(%q) completed connections = %d, want %d", logPath, got, want)
+	}
+}
+
 func TestRunReplayFromFile_TransportFailures(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -284,11 +309,10 @@ func TestShutdownMetricsServerDrainsInFlightRequest(t *testing.T) {
 
 func writeReplayLog(t *testing.T, authority string) string {
 	t.Helper()
-	content := strings.Join([]string{
-		`{"type":"connection_open","connection_id":1}`,
-		fmt.Sprintf(`{"type":"request","connection_id":1,"http":{"method":"GET","scheme":"http","authority":%q,"path":"/transport"}}`, authority),
-		`{"type":"connection_close","connection_id":1,"reason":"remote_close"}`,
-	}, "\n") + "\n"
+	content := fmt.Sprintf(
+		"{\"type\":\"DownstreamStart\",\"connection_id\":1,\"start_time\":\"2026-08-03T01:11:06.531Z\",\"method\":\"GET\",\"scheme\":\"http\",\"authority\":%q,\"path\":\"/transport\",\"protocol\":\"HTTP/1.1\"}\n",
+		authority,
+	)
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "requests.ndjson")

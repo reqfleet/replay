@@ -7,7 +7,7 @@ This document defines the specification for an HTTP traffic recording and replay
 Goals:
 
 * Record HTTP/1.1 and HTTP/2 traffic
-* Preserve connection lifecycle semantics
+* Preserve per-connection request ordering and keep-alive reuse
 * Support deterministic replay
 * Support keep-alive behavior
 * Support future schema evolution
@@ -34,73 +34,50 @@ Client → Envoy Sidecar → Application
 
 Responsibilities:
 
-* Envoy: HTTP parsing, connection lifecycle tracking
+* Envoy: HTTP parsing and structured access-log emission
 * Recorder Service: Convert structured logs into canonical NDJSON format
 * Replay Engine: Reconstruct connections and replay requests deterministically
 
 ---
 
-## 3. Event Model
+## 3. Envoy Access-Log Input
 
-Each line in the NDJSON file represents one event.
+Each NDJSON line MUST be one flat Envoy access-log record. When present, the
+`type` field is the dispatch key and MUST be one of the exact, case-sensitive
+values below. If `type` is absent, replay MUST treat the record as
+`DownstreamEnd` for compatibility with Envoy's default completion access logs.
 
-### 3.1 Event Types
+| Type                         | Purpose                                                 |
+| ---------------------------- | ------------------------------------------------------- |
+| `DownstreamStart`            | Request captured when downstream request headers arrive |
+| `DownstreamEnd` or omitted   | Completed request with a recorded response status        |
 
-| Type             | Required | Purpose             |
-| ---------------- | -------- | ------------------- |
-| connection_open  | Yes      | TCP lifecycle start |
-| request          | Yes      | Replayable HTTP request with optional final response expectation |
-| connection_close | Optional | TCP lifecycle end   |
+For each original HTTP request, a capture MUST contain exactly one replayable
+record. It MUST NOT contain both types for the same request because replay does
+not correlate start and end records and would replay the request twice.
 
----
+Replay rejects unknown explicit types, including normalized `request` records,
+`connection_open`, `connection_close`, periodic, upstream, TCP, and tunnel
+events. It also rejects the previous nested `http` representation and the
+aliases `timestamp`, `status`, and `log_type`.
 
-## 4. Connection Open Event
-
-Emitted when a downstream TCP connection is accepted.
-
-```json
-{
-  "type": "connection_open",
-  "connection_id": "c42",
-  "timestamp": "2026-02-27T03:10:21.456Z",
-  "downstream_remote_address": "10.1.2.15:53210",
-  "downstream_local_address": "10.1.2.8:8080",
-  "protocol": "HTTP/1.1",
-  "tls": {
-    "enabled": true,
-    "sni": "api.example.com",
-    "alpn": "h2",
-    "version": "TLSv1.3"
-  }
-}
-```
-
-### Design Notes
-
-* `connection_id` is a logical identifier assigned at TCP accept time.
-* Must not be derived from IP:port.
-* TLS block is optional when TLS is disabled.
-
----
-
-## 5. HTTP Request Event
+### 3.1 Flat Record Schema
 
 ```json
 {
-  "type": "request",
-  "log_type": "DownstreamEnd",
-  "connection_id": "c42",
+  "type": "DownstreamEnd",
+  "node": "envoy-a",
+  "connection_id": 42,
   "stream_id": 7,
-  "timestamp": "2026-02-27T03:10:22.001Z",
-  "status": 200,
+  "sequence": 12,
+  "start_time": "2026-02-27T03:10:22.001Z",
+  "method": "POST",
+  "scheme": "https",
+  "authority": "api.example.com",
+  "path": "/api/v1/login?redirect=/home",
+  "protocol": "HTTP/2",
+  "response_code": 200,
   "duration_ms": 149,
-  "http": {
-    "version": "HTTP/2",
-    "method": "POST",
-    "scheme": "https",
-    "authority": "api.example.com",
-    "path": "/api/v1/login?redirect=/home"
-  },
   "headers": {
     "content-type": ["application/json"]
   },
@@ -120,87 +97,85 @@ Emitted when a downstream TCP connection is accepted.
 }
 ```
 
-### Field Requirements
+### 3.2 Field Requirements
 
-* `connection_id`: Required
-* `stream_id`: Required (HTTP/1.1 MUST use value 1)
-* `timestamp`: RFC3339 format
+`type` is optional; when present, it MUST be `DownstreamStart` or
+`DownstreamEnd`.
 
-Replay derives a strictly increasing per-connection sequence internally from
-record order when the recorder does not emit one. If a recorder or converter
-does provide `sequence`, replay preserves it as long as it remains monotonic.
+Every record MUST contain:
 
-Envoy request-start access logs MAY set `type: "DownstreamStart"` exactly.
-Replay maps that exact Envoy type to an internal request event without
-case-folding or spelling normalization. These events do not contain final
-response data, so replay MUST NOT validate a response from their inline fields.
+* `connection_id`: integer logical connection identifier
+* `start_time`: RFC3339 timestamp
+* `method`: HTTP method
+* `authority`: request authority
+* `path`: request path, including its query string
+* `protocol`: HTTP protocol string
 
-Normalized Envoy completion records MUST use `type: "request"` with
-`log_type: "DownstreamEnd"`. Their `status`, `response_headers`, and
-`response_body` fields are authoritative expectations and replay validates them
-as soon as the target response arrives. A separate `type: "response"` event is
-unsupported; logs MUST NOT mix split response events with completion records.
+`scheme` is optional and defaults to `http` during replay. `node` is optional
+and forms part of the logical connection identity when present. `stream_id` is
+optional; replay assigns 1 when it is absent on HTTP/1.1, and rejects any other
+HTTP/1.1 value.
 
-Replay also accepts Envoy's common flat completion access-log shape with fields
-such as `connection_id`, `start_time`, `method`, `path`, `protocol`,
-`authority`, `response_code`, and `duration_ms`. Replay maps that shape to a
-normalized `DownstreamEnd` request event. The flat log MUST include
-`connection_id`; replay derives the same monotonic per-connection sequence.
+`sequence` is optional. Replay derives a strictly increasing sequence from
+record order independently for each `node` + `connection_id`. If the producer
+provides `sequence`, replay preserves it and rejects a decrease.
 
-### Request Headers and Body
+Additional Envoy fields such as `response_flags`, `bytes_received`,
+`bytes_sent`, and `upstream_host` MAY be present and are ignored.
 
-`headers` and `body` describe the request sent to the replay target. Headers are
-stored as `map[string][]string` and header names SHOULD be normalized to
-lowercase. Bodies use base64 encoding to support binary payloads without
-encoding corruption.
+### 3.3 Type-Specific Semantics
 
-### Expected Response Fields
+`DownstreamStart` represents the request at header arrival. It does not provide
+final response expectations, so replay never performs inline response
+validation from this type.
 
-`status`, `response_headers`, and `response_body` describe the final recorded
-response on a `DownstreamEnd` event. Each field is optional; enabled validation
-checks compare only expectations present in the event. `response_headers` uses
-`map[string][]string`. `response_body` uses the same base64 structure as the
-request body.
+`DownstreamEnd` MUST contain `response_code`. It MAY also contain
+`duration_ms`, `response_headers`, and `response_body`. Those fields describe
+the recorded response and enabled validation checks compare them with the
+replay target response.
 
----
+### 3.4 Request Headers and Bodies
 
-## 6. Connection Close Event
+`headers` and `body` describe the request sent to the replay target. Header
+values are arrays and names SHOULD be lowercase. If `headers` does not contain
+`user-agent`, Replay copies a nonempty `user_agent` field into it.
+
+`body` and `response_body` use base64 encoding:
 
 ```json
 {
-  "type": "connection_close",
-  "connection_id": "c42",
-  "timestamp": "2026-02-27T03:15:45.900Z",
-  "reason": "remote_close"
+  "encoding": "base64",
+  "content": "AAEC",
+  "size_bytes": 3
 }
 ```
 
-### Allowed Reasons
-
-* remote_close
-* local_close
-* timeout
-* drain
-* error
-
-Native Envoy access logs do not emit a close event, so replay treats end of
-file as the implicit close point when `connection_close` is absent.
+This representation preserves binary payloads without encoding corruption.
+`response_headers` has the same `map[string][]string` representation as
+`headers`.
 
 ---
 
-## 7. Replay Semantics
+## 4. Replay Semantics
 
 Replay engine MUST:
 
 1. Read events in append order without buffering the full capture.
 2. Route every event by `node` + `connection_id` to exactly one replay worker.
 3. Preserve the parser's per-connection monotonic `sequence`; replay MUST NOT reorder events.
-4. Open one replay connection state per `node` + `connection_id`.
+4. Open one replay connection state on the first record for each `node` + `connection_id`.
 5. Replay requests in observed connection order for HTTP/1.1 and serialized HTTP/2.
 6. In multiplexed HTTP/2 mode, dispatch request sends concurrently as request events arrive.
 7. Optionally sleep based on timestamp deltas in observed connection order.
 8. When pacing timestamps move backward or stay equal, keep the existing pacing clock and do not sleep.
-9. Close connection state when `connection_close` is encountered, or at EOF if the recorder did not emit one.
+9. Close every connection state at EOF.
+
+Native Envoy HTTP access logs do not contain TCP connection-close records.
+Replay therefore retains sequence and HTTP transport state for every observed
+`node` + `connection_id` until EOF. This preserves keep-alive behavior if a
+connection appears again later in the capture, but makes retained state
+proportional to the number of unique connection identities assigned to the
+engine.
 
 ### HTTP/1.1
 
@@ -212,11 +187,22 @@ Replay engine MUST:
 Two supported modes:
 
 1. Serialized mode, which sends requests one at a time in observed connection order.
-2. Multiplexed mode, which sends HTTP/2 requests concurrently on the shared per-connection client and joins in-flight requests at `connection_close` or EOF.
+2. Multiplexed mode, which sends HTTP/2 requests concurrently on the shared per-connection client and joins in-flight requests at EOF.
 
 Multiplexed mode uses stream-aware checkpointing so a later completed request cannot advance the checkpoint past an earlier in-flight request.
 
-### 7.1 Distributed Replay for Large Captures
+Replay consumes HTTP/2 records in append order and does not reorder them by
+`start_time`, `stream_id`, or `sequence`. Envoy emits `DownstreamEnd` records as
+streams complete, so multiplexed streams MAY appear in completion order rather
+than their original request-start order. Serialized mode replays that observed
+completion order.
+
+An HTTP/2 capture that requires the original request-start order MUST use
+`DownstreamStart` records. `DownstreamEnd` remains appropriate when inline
+response validation is required and completion-order replay is acceptable.
+Each request MUST still appear exactly once as required by Section 3.
+
+### 4.1 Distributed Replay for Large Captures
 
 When capture logs are too large for a single replay process, replay MAY be distributed across multiple replay engines.
 
@@ -224,20 +210,21 @@ Requirements:
 
 1. Shard assignment MUST be derived from `node` + `connection_id` (for example, hash-based partitioning).
 2. All events for a single `node` + `connection_id` MUST be handled by exactly one replay engine.
-3. Per-connection ordering rules in Section 7 MUST still hold within each shard.
+3. Per-connection ordering rules in Section 4 MUST still hold within each shard.
 4. Sharding by byte offsets or naive timestamp windows MUST NOT split a single connection across shards.
 5. Each shard MAY be replayed independently, but deterministic behavior is defined primarily per connection, not as a single global wall-clock schedule.
+6. Shard sizing SHOULD bound the number of unique connection identities retained by each replay engine.
 
 Recommended implementation pattern:
 
-* Use a dispatcher to read NDJSON and route events to shard-specific queues/files by `connection_id`.
+* Use a dispatcher to read NDJSON and route events to shard-specific queues/files by `node` + `connection_id`.
 * Preserve append order within each shard output.
 * Persist replay checkpoints per shard to support restart without duplicate sends.
-* Apply capacity controls per replay engine (see Section 9.2).
+* Apply capacity controls per replay engine (see Section 6.2).
 
 ---
 
-## 8. Non-Goals
+## 5. Non-Goals
 
 The system does NOT:
 
@@ -251,7 +238,7 @@ The system operates at HTTP semantic level, not packet level.
 
 ---
 
-## 9. Safety Considerations
+## 6. Safety Considerations
 
 Replay engine SHOULD support:
 
@@ -261,7 +248,7 @@ Replay engine SHOULD support:
 * Authorization token replacement
 * Idempotency safeguards
 
-### 9.1 Target Override Semantics
+### 6.1 Target Override Semantics
 
 To avoid replaying captured production traffic back into production, replay tooling SHOULD support explicit destination overrides.
 
@@ -279,7 +266,7 @@ Example rewrite intent:
 * Override target: `https://api.staging.example.com`
 * Replayed URL: `https://api.staging.example.com/api/v1/login?redirect=/home`
 
-### 9.2 Per-Engine Capacity Limits (VU Model)
+### 6.2 Per-Engine Capacity Limits (VU Model)
 
 Replay engines SHOULD expose virtual-user (VU) worker controls rather than treating VU count as a request-per-second or total-load throttle.
 
@@ -293,18 +280,24 @@ Normative behavior:
 
 1. A replay engine MUST NOT exceed `max_virtual_users_per_engine` replay workers.
 2. Connections MAY be assigned to VUs round-robin, but every event for one `node` + `connection_id` identity MUST remain on the same VU.
-3. Each recorded connection SHOULD own its outbound transport until `connection_close` or EOF so keep-alive reuse and socket isolation are preserved.
-4. Implementations MUST preserve per-connection event ordering and lifecycle semantics when a VU drives multiple connections.
+3. Each recorded connection SHOULD own its outbound transport until EOF so keep-alive reuse and socket isolation are preserved.
+4. Implementations MUST preserve per-connection event ordering when a VU drives multiple connections.
 5. The specification does not require `max_requests_per_second` and does not use it as a primary control.
 
-The VU limit bounds replay workers only. It does not bound retained per-connection transports or concurrent streams dispatched by multiplexed HTTP/2 connections. Actual connection and request concurrency therefore depend on capture topology, HTTP mode, and target latency.
+The VU limit bounds replay workers only. It does not bound per-connection state
+or transports retained until EOF, nor concurrent streams dispatched by
+multiplexed HTTP/2 connections. Per-instance memory therefore depends on the
+number of unique `node` + `connection_id` identities assigned to the engine;
+request concurrency additionally depends on HTTP mode and target latency.
 
 Distributed replay note:
 
 * In multi-engine deployments, the VU limit applies per engine.
-* The sum of per-engine worker limits is aggregate VU capacity, not an aggregate load ceiling. Operators SHOULD size and shard replay engines for the capture's peak open connections and multiplexed stream concurrency.
+* The sum of per-engine worker limits is aggregate VU capacity, not an aggregate
+  load ceiling. Operators SHOULD size and shard replay engines for each shard's
+  unique connection count and multiplexed stream concurrency.
 
-### 9.3 Replay Outcome Model
+### 6.3 Replay Outcome Model
 
 Replay execution MUST produce deterministic run outcomes at three levels: request, connection, and run.
 
@@ -334,7 +327,7 @@ Exit status guidance:
 * Engine SHOULD return exit code `0` for `partial_success` by default.
 * Engine MAY make `partial_success` exit behavior configurable when operators need non-zero behavior in CI-style contexts.
 
-### 9.4 Metrics Emission and Scrape Endpoint
+### 6.4 Metrics Emission and Scrape Endpoint
 
 Replay engines MUST expose Prometheus metrics over HTTP at `/metrics` for pull-based scraping.
 
@@ -369,7 +362,7 @@ same segment count, and compare literal segments exactly. The first matching
 template MUST become the metric-specific `label`; when no template matches, the
 path without its query string MUST remain the label.
 
-### 9.5 Runtime Configuration (YAML)
+### 6.5 Runtime Configuration (YAML)
 
 Replay runtime behavior SHOULD be configurable via a YAML file.
 
@@ -380,7 +373,6 @@ Minimum configurable domains:
 * Retry policy: max retries, retryable error classes/statuses, backoff strategy.
 * Validation: status, header, body, and ignored-header controls.
 * Pacing: optional timestamp-delta replay with a maximum sleep cap.
-* Lifecycle: whether replay requires `connection_open` before requests.
 * Metrics server: listen address/port, endpoint enable toggle (default enabled), path (default `/metrics`).
 * Capacity controls: `max_virtual_users_per_engine`, `max_active_connections_per_engine` (`0` means unlimited).
 
@@ -417,8 +409,6 @@ replay:
   pacing:
     enabled: false
     max_sleep_delta: 30s
-  lifecycle:
-    require_open: true
   idempotency:
     enabled: true
     block_methods: [POST, PUT, PATCH, DELETE]
@@ -455,7 +445,7 @@ POST and mutation requests may cause side effects if replayed against production
 
 ---
 
-## 10. Future Extensions (Optional)
+## 7. Future Extensions (Optional)
 
 Example replay hints:
 
@@ -475,7 +465,7 @@ Example tagging:
 
 ---
 
-## 11. Summary
+## 8. Summary
 
 This specification provides:
 

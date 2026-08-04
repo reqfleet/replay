@@ -38,8 +38,6 @@ type ReplayConfig struct {
 	MaxActiveConnectionsPerEngine int           `yaml:"max_active_connections_per_engine"`
 	RampupDuration                time.Duration `yaml:"rampup_duration"`
 
-	Lifecycle LifecycleConfig `yaml:"lifecycle"`
-
 	DryRun                 bool `yaml:"dry_run"`
 	Verbose                bool `yaml:"verbose"`
 	PartialSuccessExitZero bool `yaml:"partial_success_exit_zero"`
@@ -76,10 +74,6 @@ type ValidationConfig struct {
 type PacingConfig struct {
 	Enabled       bool          `yaml:"enabled"`
 	MaxSleepDelta time.Duration `yaml:"max_sleep_delta"`
-}
-
-type LifecycleConfig struct {
-	RequireOpen bool `yaml:"require_open"`
 }
 
 type IdempotencyConfig struct {
@@ -186,9 +180,6 @@ func Default() Config {
 			Pacing: PacingConfig{
 				Enabled:       false,
 				MaxSleepDelta: 30 * time.Second,
-			},
-			Lifecycle: LifecycleConfig{
-				RequireOpen: true,
 			},
 			Idempotency: IdempotencyConfig{
 				Enabled:               true,
