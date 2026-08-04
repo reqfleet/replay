@@ -68,7 +68,7 @@ func TestRunReplayFromFileAcceptsNativeEnvoyLogWithoutConnectionOpen(t *testing.
 	cfg := config.Default()
 	cfg.Replay.DryRun = true
 	logPath := filepath.Join(t.TempDir(), "envoy.ndjson")
-	content := `{"type":"DownstreamStart","connection_id":7,"start_time":"2026-08-03T01:11:06.531Z","method":"GET","authority":"envoy-recorder-proxy:8080","path":"/","protocol":"HTTP/1.1"}` + "\n"
+	content := `{"type":"DownstreamStart","connection_id":7,"timestamp":"2026-08-03T01:11:06.531Z","method":"GET","authority":"envoy-recorder-proxy:8080","path":"/","protocol":"HTTP/1.1"}` + "\n"
 	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("os.WriteFile(%q) error: %v", logPath, err)
 	}
@@ -310,7 +310,7 @@ func TestShutdownMetricsServerDrainsInFlightRequest(t *testing.T) {
 func writeReplayLog(t *testing.T, authority string) string {
 	t.Helper()
 	content := fmt.Sprintf(
-		"{\"type\":\"DownstreamStart\",\"connection_id\":1,\"start_time\":\"2026-08-03T01:11:06.531Z\",\"method\":\"GET\",\"scheme\":\"http\",\"authority\":%q,\"path\":\"/transport\",\"protocol\":\"HTTP/1.1\"}\n",
+		"{\"type\":\"DownstreamStart\",\"connection_id\":1,\"timestamp\":\"2026-08-03T01:11:06.531Z\",\"method\":\"GET\",\"scheme\":\"http\",\"authority\":%q,\"path\":\"/transport\",\"protocol\":\"HTTP/1.1\"}\n",
 		authority,
 	)
 

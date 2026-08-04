@@ -61,7 +61,7 @@ data:
               #         type: "%ACCESS_LOG_TYPE%"
               #         connection_id: "%CONNECTION_ID%"
               #         timestamp: "%START_TIME%"
-              #         version: "%PROTOCOL%"
+              #         protocol: "%PROTOCOL%"
               #         method: "%REQ(:METHOD)%"
               #         authority: "%REQ(:AUTHORITY)%"
               #         path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
@@ -76,7 +76,7 @@ data:
                     json_format:
                       type: "%ACCESS_LOG_TYPE%"
                       connection_id: "%CONNECTION_ID%"
-                      start_time: "%START_TIME%"
+                      timestamp: "%START_TIME%"
                       method: "%REQ(:METHOD)%"
                       path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
                       protocol: "%PROTOCOL%"

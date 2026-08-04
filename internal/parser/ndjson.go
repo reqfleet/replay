@@ -82,7 +82,7 @@ type rawEvent struct {
 	Type            *model.EventType `json:"type"`
 	ConnectionID    *int             `json:"connection_id"`
 	NestedHTTP      json.RawMessage  `json:"http"`
-	LegacyTimestamp *string          `json:"timestamp"`
+	LegacyStartTime *string          `json:"start_time"`
 	LegacyStatus    *int             `json:"status"`
 	LegacyLogType   model.EventType  `json:"log_type"`
 }
@@ -97,17 +97,17 @@ func (ev rawEvent) normalize(line int) (model.Event, error) {
 	default:
 		return model.Event{}, fmt.Errorf("line %d: unsupported access log type %q", line, eventType)
 	}
-	if len(ev.NestedHTTP) != 0 || ev.LegacyTimestamp != nil || ev.LegacyStatus != nil || ev.LegacyLogType != "" {
+	if len(ev.NestedHTTP) != 0 || ev.LegacyStartTime != nil || ev.LegacyStatus != nil || ev.LegacyLogType != "" {
 		return model.Event{}, fmt.Errorf("line %d: access log must use the flat Envoy schema", line)
 	}
 	if ev.ConnectionID == nil {
 		return model.Event{}, fmt.Errorf("line %d: access log missing connection_id", line)
 	}
-	if ev.StartTime == "" {
-		return model.Event{}, fmt.Errorf("line %d: access log missing start_time", line)
+	if ev.Timestamp == "" {
+		return model.Event{}, fmt.Errorf("line %d: access log missing timestamp", line)
 	}
-	if _, ok := model.ParseTimestamp(ev.StartTime); !ok {
-		return model.Event{}, fmt.Errorf("line %d: invalid start_time", line)
+	if _, ok := model.ParseTimestamp(ev.Timestamp); !ok {
+		return model.Event{}, fmt.Errorf("line %d: invalid timestamp", line)
 	}
 	if ev.Method == "" {
 		return model.Event{}, fmt.Errorf("line %d: access log missing method", line)

@@ -538,13 +538,13 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 }
 
 func (e *Engine) paceRequest(ctx context.Context, cs *connState, requestEvent model.Event) error {
-	if err := e.sleepForPacing(ctx, cs.previousTimestamp, cs.previousTimestampSet, requestEvent.StartTime); err != nil {
+	if err := e.sleepForPacing(ctx, cs.previousTimestamp, cs.previousTimestampSet, requestEvent.Timestamp); err != nil {
 		return err
 	}
 	cs.previousTimestamp, cs.previousTimestampSet = advancePacingClock(
 		cs.previousTimestamp,
 		cs.previousTimestampSet,
-		requestEvent.StartTime,
+		requestEvent.Timestamp,
 	)
 	return nil
 }
@@ -824,7 +824,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		default:
 		}
 
-		if sleepErr := e.sleepForPacing(ctx, previousTimestamp, previousTimestampSet, requestEvent.StartTime); sleepErr != nil {
+		if sleepErr := e.sleepForPacing(ctx, previousTimestamp, previousTimestampSet, requestEvent.Timestamp); sleepErr != nil {
 			result.ConnectionsAborted++
 			result.Outcome = RunFailed
 			return result
@@ -832,7 +832,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		previousTimestamp, previousTimestampSet = advancePacingClock(
 			previousTimestamp,
 			previousTimestampSet,
-			requestEvent.StartTime,
+			requestEvent.Timestamp,
 		)
 
 		requestKey := model.ConnectionKey{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID}

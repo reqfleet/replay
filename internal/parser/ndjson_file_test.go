@@ -12,7 +12,7 @@ import (
 )
 
 func TestParseFileStream(t *testing.T) {
-	content := []byte("{\"type\":\"DownstreamStart\",\"connection_id\":1,\"start_time\":\"2026-02-27T03:10:22Z\",\"method\":\"GET\",\"scheme\":\"http\",\"authority\":\"example.com\",\"path\":\"/\",\"protocol\":\"HTTP/1.1\"}\n")
+	content := []byte("{\"type\":\"DownstreamStart\",\"connection_id\":1,\"timestamp\":\"2026-02-27T03:10:22Z\",\"method\":\"GET\",\"scheme\":\"http\",\"authority\":\"example.com\",\"path\":\"/\",\"protocol\":\"HTTP/1.1\"}\n")
 
 	t.Run("plain", func(t *testing.T) {
 		dir := t.TempDir()

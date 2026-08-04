@@ -109,7 +109,7 @@ Replay accepts one flat JSON object per line. When present, `type` must be the
 exact, case-sensitive value `DownstreamStart` or `DownstreamEnd`; that field
 selects the parser behavior. For compatibility with Envoy's default
 request-completion access logs, a missing `type` is treated as
-`DownstreamEnd`. The required common fields are `connection_id`, `start_time`,
+`DownstreamEnd`. The required common fields are `connection_id`, `timestamp`,
 `method`, `authority`, `path`, and `protocol`. `DownstreamEnd` additionally
 requires `response_code`.
 

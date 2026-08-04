@@ -20,7 +20,7 @@ type Event struct {
 
 	Type                    EventType `json:"type"`
 	Node                    string    `json:"node,omitempty"`
-	StartTime               string    `json:"start_time"`
+	Timestamp               string    `json:"timestamp"`
 	Method                  string    `json:"method"`
 	Scheme                  string    `json:"scheme,omitempty"`
 	Authority               string    `json:"authority"`
