@@ -166,9 +166,10 @@ Replay engine MUST:
 4. Open one replay connection state on the first record for each `node` + `connection_id`.
 5. Replay requests in observed connection order for HTTP/1.1 and serialized HTTP/2.
 6. In multiplexed HTTP/2 mode, dispatch request sends concurrently as request events arrive.
-7. Optionally sleep based on timestamp deltas in observed connection order.
-8. When pacing timestamps move backward or stay equal, keep the existing pacing clock and do not sleep.
-9. Close every connection state at EOF.
+7. When pacing is enabled, schedule increasing timestamp deltas against a per-connection replay deadline.
+8. Time elapsed while replaying a request MUST consume the corresponding timestamp delta; synchronous request latency MUST NOT be followed by another sleep for the full recorded delta.
+9. When pacing timestamps move backward or stay equal, keep the existing pacing clock and do not sleep.
+10. Close every connection state at EOF.
 
 Native Envoy HTTP access logs do not contain TCP connection-close records.
 Replay therefore retains sequence and HTTP transport state for every observed

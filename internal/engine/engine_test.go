@@ -2029,6 +2029,28 @@ func TestReplayHTTP2PacingUsesConnectionOrderWithUniqueStreamIDs(t *testing.T) {
 	}
 }
 
+func TestPacingAccountsForElapsedRequestTime(t *testing.T) {
+	base := time.Date(2026, 2, 27, 3, 10, 21, 0, time.UTC)
+	cfg := config.Default()
+	cfg.Replay.Pacing.Enabled = true
+	cfg.Replay.Pacing.MaxSleepDelta = time.Second
+
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
+	if err := eng.paceRequest(context.Background(), cs, model.Event{Timestamp: base.Format(time.RFC3339Nano)}); err != nil {
+		t.Fatalf("paceRequest(first request) error: %v", err)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	start := time.Now()
+	if err := eng.paceRequest(context.Background(), cs, model.Event{Timestamp: base.Add(200 * time.Millisecond).Format(time.RFC3339Nano)}); err != nil {
+		t.Fatalf("paceRequest(second request) error: %v", err)
+	}
+	if got, maximum := time.Since(start), 125*time.Millisecond; got >= maximum {
+		t.Fatalf("paceRequest(second request) additional delay = %s, want less than %s after 150ms elapsed request time", got, maximum)
+	}
+}
+
 func TestPacingClockDoesNotRewindForNonIncreasingTimestamps(t *testing.T) {
 	base := time.Date(2026, 2, 27, 3, 10, 21, 0, time.UTC)
 	cfg := config.Default()
@@ -2069,11 +2091,14 @@ func TestPacingSleepDoesNotLogByDefault(t *testing.T) {
 	cfg.Replay.Pacing.MaxSleepDelta = time.Millisecond
 
 	eng := New(cfg, metrics.New(cfg.Metrics))
-	if err := eng.sleepForPacing(context.Background(), base, true, base.Add(100*time.Millisecond).Format(time.RFC3339Nano)); err != nil {
-		t.Fatalf("sleepForPacing() error: %v", err)
+	var pacing pacingClock
+	for _, ts := range []time.Time{base, base.Add(100 * time.Millisecond)} {
+		if err := eng.paceTimestamp(context.Background(), &pacing, ts.Format(time.RFC3339Nano)); err != nil {
+			t.Fatalf("paceTimestamp(%s) error: %v", ts.Format(time.RFC3339Nano), err)
+		}
 	}
 	if got := buf.String(); got != "" {
-		t.Fatalf("sleepForPacing() log output = %q, want empty", got)
+		t.Fatalf("paceTimestamp() log output = %q, want empty", got)
 	}
 }
 
