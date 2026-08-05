@@ -227,6 +227,12 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 
 const eventChannelDepth = 256
 
+type pacingClock struct {
+	previousTimestamp time.Time
+	nextRequestAt     time.Time
+	initialized       bool
+}
+
 // connState holds per-connection state within an event worker.
 type connState struct {
 	connKey     model.ConnectionKey
@@ -237,14 +243,13 @@ type connState struct {
 	detected    bool
 
 	// Per-connection event processing state
-	previousTimestamp    time.Time
-	previousTimestampSet bool
-	sent                 int64
-	responsesReceived    int64
-	sendErrors           int64
-	validationFailed     int64
-	skipped              int64
-	aborted              bool
+	pacing            pacingClock
+	sent              int64
+	responsesReceived int64
+	sendErrors        int64
+	validationFailed  int64
+	skipped           int64
+	aborted           bool
 
 	// Concurrent H/2 checkpointing advances the persisted watermark only after
 	// every earlier observed request has reached a terminal checkpointable state.
@@ -538,15 +543,7 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 }
 
 func (e *Engine) paceRequest(ctx context.Context, cs *connState, requestEvent model.Event) error {
-	if err := e.sleepForPacing(ctx, cs.previousTimestamp, cs.previousTimestampSet, requestEvent.Timestamp); err != nil {
-		return err
-	}
-	cs.previousTimestamp, cs.previousTimestampSet = advancePacingClock(
-		cs.previousTimestamp,
-		cs.previousTimestampSet,
-		requestEvent.Timestamp,
-	)
-	return nil
+	return e.paceTimestamp(ctx, &cs.pacing, requestEvent.Timestamp)
 }
 
 func (e *Engine) prepareRequest(cs *connState, requestEvent model.Event, checkpoints *checkpointStore) (model.ConnectionKey, http.Header, bool, bool) {
@@ -812,8 +809,7 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 	connKey := model.ConnectionKey{Node: requests[0].Node, ConnectionID: connID}
 	var connResult ConnectionResult
 
-	var previousTimestamp time.Time
-	previousTimestampSet := false
+	var pacing pacingClock
 
 	for _, requestEvent := range requests {
 		select {
@@ -824,16 +820,11 @@ func (e *Engine) replayConnectionSerialized(ctx context.Context, client *http.Cl
 		default:
 		}
 
-		if sleepErr := e.sleepForPacing(ctx, previousTimestamp, previousTimestampSet, requestEvent.Timestamp); sleepErr != nil {
+		if err := e.paceTimestamp(ctx, &pacing, requestEvent.Timestamp); err != nil {
 			result.ConnectionsAborted++
 			result.Outcome = RunFailed
 			return result
 		}
-		previousTimestamp, previousTimestampSet = advancePacingClock(
-			previousTimestamp,
-			previousTimestampSet,
-			requestEvent.Timestamp,
-		)
 
 		requestKey := model.ConnectionKey{Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID}
 
@@ -1007,38 +998,38 @@ func connectionBelongsToShard(connectionKey model.ConnectionKey, shardIndex, sha
 	return uint64(hasher.Sum32())%uint64(shardCount) == uint64(shardIndex)
 }
 
-func advancePacingClock(previous time.Time, previousSet bool, currentRaw string) (time.Time, bool) {
+func (e *Engine) paceTimestamp(ctx context.Context, clock *pacingClock, currentRaw string) error {
 	current, ok := model.ParseTimestamp(currentRaw)
-	if !ok || (previousSet && !current.After(previous)) {
-		return previous, previousSet
-	}
-	return current, true
-}
-
-func (e *Engine) sleepForPacing(ctx context.Context, previous time.Time, previousSet bool, currentRaw string) error {
-	if !e.cfg.Replay.Pacing.Enabled || !previousSet {
-		return nil
-	}
-	current, ok := model.ParseTimestamp(currentRaw)
-	if !ok || !current.After(previous) {
+	if !ok || (clock.initialized && !current.After(clock.previousTimestamp)) {
 		return nil
 	}
 
-	delta := current.Sub(previous)
+	if !clock.initialized || !e.cfg.Replay.Pacing.Enabled {
+		clock.previousTimestamp = current
+		clock.nextRequestAt = time.Now()
+		clock.initialized = true
+		return nil
+	}
+
+	delta := current.Sub(clock.previousTimestamp)
 	if max := e.cfg.Replay.Pacing.MaxSleepDelta; max > 0 && delta > max {
 		delta = max
 	}
-	timer := time.NewTimer(delta)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
+	nextRequestAt := clock.nextRequestAt.Add(delta)
+	if delay := time.Until(nextRequestAt); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
-}
 
-// timestamp parsing moved to internal/model/ for reuse across packages
+	clock.previousTimestamp = current
+	clock.nextRequestAt = nextRequestAt
+	return nil
+}
 
 func (e *Engine) shouldSkipByIdempotencyPolicy(request model.Event, effectiveHeaders http.Header) bool {
 	policy := e.cfg.Replay.Idempotency

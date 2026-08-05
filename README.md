@@ -172,6 +172,11 @@ metrics:
       env: REPLAY_ZONE
 ```
 
+With pacing enabled, Replay maps increasing recorded timestamp deltas onto a
+per-connection replay deadline. Time spent waiting for the preceding response
+counts toward the next delta; Replay sleeps only for any remaining time instead
+of adding the full recorded delta after the response completes.
+
 When a recorded response exists for a request (`connection_id` + `sequence`), mismatches increment `validation_failed` and produce `partial_success`.
 
 When the target is unreachable or times out, the request is recorded as `send_error`, the run remains `partial_success`, and `replay_status_counter` is incremented with a synthetic transport status.
