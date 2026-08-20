@@ -5,19 +5,19 @@ description: "Fetch a GitHub issue and start a development branch to address it.
 
 # Issue → Development
 
-Use when: the user asks the agent to pick up or start work on a `reqfleet/shibuya` issue (e.g. "work on issue 745", "start issue #745").
+Use when: the user asks the agent to pick up or start work on a `reqfleet/replay` issue (e.g. "work on issue 745", "start issue #745").
 
 ## Summary
 
 This skill fetches a GitHub issue (title, body, comments), ensures the local repository is on `main` (asking for confirmation if it is not), checks out a new branch named with the issue number, and guides the agent through starting development. Commits must be created via the `commit` skill — do not create PRs automatically.
 
-Note: Shibuya is a monorepo; it contains `gui` (a Next.js project) and the control plane implementation written in Go.
+Note: Replay is implemented in Go.
 
 ## Commands (examples)
 
 - Fetch issue JSON:
 
-	gh issue view --repo reqfleet/shibuya {issue_number} --json title,body,comments
+	gh issue view --repo reqfleet/replay {issue_number} --json title,body,comments
 
 - Check current branch:
 
@@ -33,7 +33,7 @@ Note: Shibuya is a monorepo; it contains `gui` (a Next.js project) and the contr
 
 ## Workflow
 
-1. If no `issue_number` parameter is provided, ask the user: "Which `reqfleet/shibuya` issue number should I work on?"
+1. If no `issue_number` parameter is provided, ask the user: "Which `reqfleet/replay` issue number should I work on?"
 2. Run the GH command above to fetch `title`, `body`, and `comments`. If the `gh` CLI returns an error (not installed or not authenticated), report the error and ask the user to authenticate with `gh auth login`.
 3. Summarize the issue (title, brief body, and top-level comments) to the user and ask for confirmation to proceed.
 4. Check the current git branch using `git rev-parse --abbrev-ref HEAD`:
@@ -66,4 +66,4 @@ Note: Shibuya is a monorepo; it contains `gui` (a Next.js project) and the contr
 ## Notes
 
 - This file follows `agent-customization` rules: short `description` frontmatter and clear `Use when` triggers.
-- The skill is workspace-scoped to the `shibuya` repository. Adjust repo name in the GH command if invoked for a different repo.
+- The skill is workspace-scoped to the `replay` repository. Adjust repo name in the GH command if invoked for a different repo.
