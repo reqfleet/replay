@@ -2,7 +2,9 @@
 
 ## 1. Overview
 
-This document defines the specification for an HTTP traffic recording and replay system using an Envoy sidecar for capture and a Go-based replay engine.
+This document defines the specification for an HTTP traffic recording and
+replay system using an Envoy proxy for capture and a Go-based replay engine.
+Envoy may run as an application sidecar or as a standalone proxy.
 
 Goals:
 
@@ -23,18 +25,18 @@ Ordering: Append-only, strictly chronological
 ## 2. Architecture
 
 ```
-Client → Envoy Sidecar → Application
-              ↓
-        Recorder Service
-              ↓
-        traffic.ndjson
-              ↓
-         Replay Engine (Go)
+Client → Envoy Proxy → Application
+             ↓
+       Recorder Service
+             ↓
+       traffic.ndjson
+             ↓
+       Replay Engine (Go)
 ```
 
 Responsibilities:
 
-* Envoy: HTTP parsing and structured access-log emission
+* Envoy (sidecar or standalone proxy): HTTP parsing and structured access-log emission
 * Recorder Service: Convert structured logs into canonical NDJSON format
 * Replay Engine: Reconstruct connections and replay requests deterministically
 
