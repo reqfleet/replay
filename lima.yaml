@@ -46,7 +46,8 @@ provision:
       set -ex -o pipefail
 
       gvm_revision="dd652539fa4b771840846f8319fad303c7d0a8d2"
-      go_version="go1.25.7"
+      go_version="$(awk '$1 == "go" { print "go" $2; exit }' /workspace/replay/go.mod)"
+      test -n "${go_version}"
 
       if [[ ! -s "${HOME}/.gvm/scripts/gvm" ]]; then
         curl -fsSL "https://raw.githubusercontent.com/moovweb/gvm/${gvm_revision}/binscripts/gvm-installer" |
@@ -68,8 +69,10 @@ probes:
       set -ex -o pipefail
 
       source "${HOME}/.gvm/scripts/gvm" || [[ "$(type -t gvm)" == "function" ]]
-      test "$(go env GOVERSION)" = "go1.25.7"
       test -f /workspace/replay/go.mod
+      go_version="$(awk '$1 == "go" { print "go" $2; exit }' /workspace/replay/go.mod)"
+      test -n "${go_version}"
+      test "$(go env GOVERSION)" = "${go_version}"
     hint: |
-      GVM, Go 1.25.7, or the /workspace/replay mount is unavailable.
+      GVM, the Go version declared by /workspace/replay/go.mod, or the project mount is unavailable.
       Inspect /var/log/cloud-init-output.log inside the guest.
