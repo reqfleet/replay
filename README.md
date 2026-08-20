@@ -9,11 +9,9 @@ Go-based HTTP replay engine that consumes NDJSON traffic logs and exposes Promet
 
 ## Recording traffic
 
-This repository ships the replay engine only. It does not ship the Recorder
-Service or durable capture storage shown in [`specs.md`](specs.md). For this
-repository, `specs.md` is the input conformance contract for an external
-recorder or canonicalizer; it is not a claim that the recording pipeline is
-implemented here.
+Replay consumes compatible Envoy access logs. The bundled example below shows
+how to capture those logs from Kubernetes; [`specs.md`](specs.md#3-envoy-access-log-input)
+defines the accepted log schema.
 
 ### Basic capture with the Envoy example
 
@@ -51,17 +49,14 @@ Kubernetes traffic window:
 blank lines and lines that do not begin with `{`; a malformed JSON line that
 does begin with `{` fails parsing.
 
-The example captures request headers and the response status. It does **not**
-capture request or response bodies, response headers, or persist and rotate a
-canonical capture independently of the `kubectl logs` process. Consequently,
-it supports status validation but not recorded response-header or body
-validation.
+The example captures request headers and the response status, but not request
+or response bodies or response headers. Consequently, it supports status
+validation but not recorded response-header or body validation.
 
-### External recorder conformance
+### Capture log conformance
 
-Use an external recorder or canonicalizer when durable collection, request
-bodies, or response-header/body validation is required. Its output must follow
-the [flat record schema](specs.md#31-flat-record-schema), including:
+Logs produced by another Envoy configuration or capture tool must follow the
+[flat record schema](specs.md#31-flat-record-schema), including:
 
 - UTF-8 NDJSON with one flat JSON object per captured request, in append order.
 - Exactly one `DownstreamStart` or `DownstreamEnd` record per original request;
@@ -69,7 +64,7 @@ the [flat record schema](specs.md#31-flat-record-schema), including:
 - `connection_id`, `timestamp`, `method`, `authority`, `path`, and `protocol`
   on every record, plus `response_code` on `DownstreamEnd`.
 - Stable `node` + `connection_id` identities and increasing per-connection
-  `sequence` values when the recorder supplies sequences.
+  `sequence` values when the capture tool supplies sequences.
 - Header values encoded as arrays of strings. Request and response bodies use
   the base64 envelope defined in
   [Request Headers and Bodies](specs.md#34-request-headers-and-bodies).
