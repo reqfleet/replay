@@ -109,9 +109,8 @@ devbox:
 	@if limactl list replay --format '{{.Name}}' >/dev/null 2>&1; then \
 		limactl start replay; \
 	else \
-		DEVBOX_PROJECT_DIR="$(DEVBOX_PROJECT_DIR)" \
-			limactl start --name=replay \
-			--set='.param.projectDir = env(DEVBOX_PROJECT_DIR)' lima.yaml; \
+		limactl start --name=replay \
+			--param "projectDir=$(DEVBOX_PROJECT_DIR)" lima.yaml; \
 	fi
 
 .PHONY: devbox-ssh
@@ -129,3 +128,10 @@ devbox-stop:
 	else \
 		echo 'Lima instance "replay" does not exist.'; \
 	fi
+
+.PHONY: devbox-recreate
+devbox-recreate:
+	@if limactl list replay --format '{{.Name}}' >/dev/null 2>&1; then \
+		limactl delete --force replay; \
+	fi
+	@$(MAKE) devbox

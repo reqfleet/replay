@@ -4,9 +4,9 @@ vmType: "vz"
 arch: "aarch64"
 mountType: "virtiofs"
 
-cpus: 4
-memory: "8GiB"
-disk: "100GiB"
+cpus: 2
+memory: "2GiB"
+disk: "10GiB"
 
 images:
   - location: "https://cloud-images.ubuntu.com/releases/24.04/release-20260814/ubuntu-24.04-server-cloudimg-arm64.img"
