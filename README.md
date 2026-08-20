@@ -7,6 +7,78 @@ Go-based HTTP replay engine that consumes NDJSON traffic logs and exposes Promet
 - Required: `requests.log` (NDJSON traffic file)
 - Optional: `config.yaml` (timeouts, retry, target override, and metrics settings)
 
+## Recording traffic
+
+This repository ships the replay engine only. It does not ship the Recorder
+Service or durable capture storage shown in [`specs.md`](specs.md). For this
+repository, `specs.md` is the input conformance contract for an external
+recorder or canonicalizer; it is not a claim that the recording pipeline is
+implemented here.
+
+### Basic capture with the Envoy example
+
+[`example/envoy-standalone-proxy-full-headers.yaml`](example/envoy-standalone-proxy-full-headers.yaml)
+deploys a single Envoy reverse proxy that emits one flat `DownstreamEnd` JSON
+object per completed request to the Envoy container's stdout. To record a
+Kubernetes traffic window:
+
+1. Copy the manifest and change the `test_cluster` endpoint from
+   `testhttp:8080` to the application service being recorded.
+2. Apply the manifest and wait for the proxy:
+
+   ```bash
+   kubectl apply -f ./example/envoy-standalone-proxy-full-headers.yaml
+   kubectl rollout status deployment/envoy-recorder-proxy
+   ```
+
+3. Start collecting only new container logs:
+
+   ```bash
+   kubectl logs --follow deployment/envoy-recorder-proxy \
+     --container envoy --tail=0 > requests.log
+   ```
+
+4. Route clients to `envoy-recorder-proxy:8080` instead of directly to the
+   application. Stop the log command with `Ctrl-C` when the recording window
+   ends. Requests that bypass the proxy are not recorded.
+5. Parse the resulting file without sending any requests:
+
+   ```bash
+   go run ./cmd/replay --log ./requests.log --dry-run
+   ```
+
+`kubectl logs` can combine access logs with Envoy process logs. Replay ignores
+blank lines and lines that do not begin with `{`; a malformed JSON line that
+does begin with `{` fails parsing.
+
+The example captures request headers and the response status. It does **not**
+capture request or response bodies, response headers, or persist and rotate a
+canonical capture independently of the `kubectl logs` process. Consequently,
+it supports status validation but not recorded response-header or body
+validation.
+
+### External recorder conformance
+
+Use an external recorder or canonicalizer when durable collection, request
+bodies, or response-header/body validation is required. Its output must follow
+the [flat record schema](specs.md#31-flat-record-schema), including:
+
+- UTF-8 NDJSON with one flat JSON object per captured request, in append order.
+- Exactly one `DownstreamStart` or `DownstreamEnd` record per original request;
+  emitting both replays the request twice.
+- `connection_id`, `timestamp`, `method`, `authority`, `path`, and `protocol`
+  on every record, plus `response_code` on `DownstreamEnd`.
+- Stable `node` + `connection_id` identities and increasing per-connection
+  `sequence` values when the recorder supplies sequences.
+- Header values encoded as arrays of strings. Request and response bodies use
+  the base64 envelope defined in
+  [Request Headers and Bodies](specs.md#34-request-headers-and-bodies).
+
+Capture files can contain credentials, cookies, and personal data. Restrict
+their storage and access, and redact fields before sharing them. The sample
+`config.yaml` drops `authorization` and `cookie` when replaying; it does not
+remove those values from an already recorded file.
+
 ## Run
 
 ```bash
