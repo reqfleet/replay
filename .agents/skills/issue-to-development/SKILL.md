@@ -42,7 +42,7 @@ Note: Shibuya is a monorepo; it contains `gui` (a Next.js project) and the contr
 5. If the user agrees, run `git checkout main` and `git pull --ff-only`.
 6. Create and switch to a new branch following the <type>-issue-{issue_number} pattern (e.g., feat-issue-{issue_number}). Determine <type> from issue labels (e.g., bug -> fix, enhancement -> feat). If a branch with that name already exists, ask the user if they want to resume work on it or create a new one with a unique suffix.
 7. Begin development: open the relevant files, implement changes, and run project-specific checks (linters, static type checks, unit tests). Examples:
-	 - Go: From the host repository, run `make devbox-ssh`, then run all project `make` targets and `go test` commands inside the VM at `/workspace/replay`. Do not run them directly on the host. Consult the replay `Makefile` for repository-specific checks such as `make test`, `make e2e`, `make alltests`, or `make build`.
+	 - Go: From the host repository, run `make devbox-ssh`, then run all project `make` targets and `go test` commands inside the VM at `/workspace/replay`. Do not run them directly on the host. The `make devbox`, `make devbox-ssh`, and `make devbox-stop` lifecycle targets are host-only. Consult the replay `Makefile` for repository-specific checks such as `make test`, `make e2e`, `make alltests`, or `make build`.
 	 - Frontend: `npm run lint`, `npx tsc --noEmit`
 	 Adapt checks to the repository or ask the user which checks they prefer.
 8. When ready to save progress, call the `commit` skill to create a commit. Suggested commit message pattern:

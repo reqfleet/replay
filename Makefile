@@ -114,3 +114,15 @@ devbox:
 .PHONY: devbox-ssh
 devbox-ssh: devbox
 	limactl shell --workdir /workspace/replay replay
+
+.PHONY: devbox-stop
+devbox-stop:
+	@if status="$$(limactl list replay --format '{{.Status}}' 2>/dev/null)"; then \
+		if [ "$$status" = "Stopped" ]; then \
+			echo 'Lima instance "replay" is already stopped.'; \
+		else \
+			limactl stop replay; \
+		fi; \
+	else \
+		echo 'Lima instance "replay" does not exist.'; \
+	fi

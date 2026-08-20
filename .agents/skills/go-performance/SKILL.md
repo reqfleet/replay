@@ -11,7 +11,7 @@ Performance-specific guidelines apply only to the **hot path**. Don't prematurel
 
 ## Replay execution environment
 
-From the host repository, run `make devbox-ssh` before benchmarks or verification. Run every project `make` target and `go test` command only in the resulting VM shell at `/workspace/replay`, never directly on the macOS host. `make devbox` and `make devbox-ssh` are host-only exceptions.
+From the host repository, run `make devbox-ssh` before benchmarks or verification. Run every project `make` target and `go test` command only in the resulting VM shell at `/workspace/replay`, never directly on the macOS host. `make devbox`, `make devbox-ssh`, and `make devbox-stop` are host-only VM lifecycle exceptions.
 
 ---
 

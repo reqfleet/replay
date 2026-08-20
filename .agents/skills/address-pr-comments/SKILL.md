@@ -13,7 +13,7 @@ Prerequisites
 
 Execution environment
 - From the host repository, run `make devbox-ssh` before any project `make` target or `go test` command.
-- Run those commands only in the resulting VM shell at `/workspace/replay`. The `make devbox` and `make devbox-ssh` targets themselves are host-only.
+- Run those commands only in the resulting VM shell at `/workspace/replay`. The `make devbox`, `make devbox-ssh`, and `make devbox-stop` lifecycle targets are host-only.
 
 Quick fetch
 - Fetch the PR review JSON (returns a JSON structure containing `reviews` and `comments`):
