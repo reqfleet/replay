@@ -1,0 +1,75 @@
+minimumLimaVersion: "1.0.0"
+
+vmType: "vz"
+arch: "aarch64"
+mountType: "virtiofs"
+
+cpus: 4
+memory: "8GiB"
+disk: "100GiB"
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release-20260814/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+    digest: "sha256:4a281a921b8d7db952895ab619736f10efe9f63e111fa5b5779ed18f023818aa"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+mounts:
+  - location: "/Users/andyh/Documents/src/reqfleet/upstream/replay"
+    mountPoint: "/workspace/replay"
+    writable: true
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        binutils \
+        bison \
+        build-essential \
+        ca-certificates \
+        curl \
+        gcc \
+        git \
+        make \
+        mercurial
+      rm -rf /var/lib/apt/lists/*
+
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -ex -o pipefail
+
+      gvm_revision="dd652539fa4b771840846f8319fad303c7d0a8d2"
+      go_version="go1.25.7"
+
+      if [[ ! -s "${HOME}/.gvm/scripts/gvm" ]]; then
+        curl -fsSL "https://raw.githubusercontent.com/moovweb/gvm/${gvm_revision}/binscripts/gvm-installer" |
+          bash -s -- "${gvm_revision}"
+      fi
+
+      # GVM initialization may return nonzero after defining the gvm function.
+      source "${HOME}/.gvm/scripts/gvm" || [[ "$(type -t gvm)" == "function" ]]
+      if [[ ! -x "${HOME}/.gvm/gos/${go_version}/bin/go" ]]; then
+        gvm install "${go_version}" -B
+      fi
+      gvm use "${go_version}" --default
+
+probes:
+  - mode: readiness
+    description: "GVM and the replay Go toolchain are available"
+    script: |
+      #!/bin/bash
+      set -ex -o pipefail
+
+      source "${HOME}/.gvm/scripts/gvm" || [[ "$(type -t gvm)" == "function" ]]
+      test "$(go env GOVERSION)" = "go1.25.7"
+      test -f /workspace/replay/go.mod
+    hint: |
+      GVM, Go 1.25.7, or the /workspace/replay mount is unavailable.
+      Inspect /var/log/cloud-init-output.log inside the guest.

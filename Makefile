@@ -102,3 +102,15 @@ clean:
 docker-build:
 	$(MAKE) build GOOS=linux
 	docker build --build-arg BIN_DIR=$(BIN_DIR) --build-arg BINARY=$(BINARY) -t $(IMG) .
+
+.PHONY: devbox
+devbox:
+	@if limactl list replay --format '{{.Name}}' >/dev/null 2>&1; then \
+		limactl start replay; \
+	else \
+		limactl start --name=replay lima.yaml; \
+	fi
+
+.PHONY: devbox-ssh
+devbox-ssh: devbox
+	limactl shell --workdir /workspace/replay replay

@@ -9,6 +9,10 @@ In Go, [errors are values](https://go.dev/blog/errors-are-values) - they are
 created by code and consumed by code. This skill covers how to return,
 structure, wrap, and handle errors effectively.
 
+## Replay execution environment
+
+From the host repository, run `make devbox-ssh` before verification. Run every project `make` target and `go test` command only in the resulting VM shell at `/workspace/replay`, never directly on the macOS host. `make devbox` and `make devbox-ssh` are host-only exceptions.
+
 ---
 
 ## Returning Errors
