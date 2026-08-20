@@ -4,6 +4,7 @@ BIN_DIR ?= bin
 IMG ?= $(BINARY)
 PKG ?= ./...
 LOG ?= requests.log
+DEVBOX_PROJECT_DIR ?= $(CURDIR)
 E2E_REPLAY := $(BIN_DIR)/e2e_replay
 E2E_GENERATED_LOG := $(BIN_DIR)/e2e-generated-body.ndjson
 
@@ -108,7 +109,9 @@ devbox:
 	@if limactl list replay --format '{{.Name}}' >/dev/null 2>&1; then \
 		limactl start replay; \
 	else \
-		limactl start --name=replay lima.yaml; \
+		DEVBOX_PROJECT_DIR="$(DEVBOX_PROJECT_DIR)" \
+			limactl start --name=replay \
+			--set='.param.projectDir = env(DEVBOX_PROJECT_DIR)' lima.yaml; \
 	fi
 
 .PHONY: devbox-ssh

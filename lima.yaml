@@ -15,8 +15,12 @@ images:
   - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
     arch: "aarch64"
 
+# `make devbox` replaces this value with the host checkout path.
+param:
+  projectDir: "/path/to/replay"
+
 mounts:
-  - location: "/Users/andyh/Documents/src/reqfleet/upstream/replay"
+  - location: "{{.Param.projectDir}}"
     mountPoint: "/workspace/replay"
     writable: true
 
