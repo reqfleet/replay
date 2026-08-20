@@ -59,10 +59,12 @@ Logs produced by another Envoy configuration or capture tool must follow the
 [flat record schema](specs.md#31-flat-record-schema), including:
 
 - UTF-8 NDJSON with one flat JSON object per captured request, in append order.
-- Exactly one `DownstreamStart` or `DownstreamEnd` record per original request;
-  emitting both replays the request twice.
+- Exactly one record per original request. If `type` is present, it must be
+  `DownstreamStart` or `DownstreamEnd`; when omitted, Replay treats the record
+  as `DownstreamEnd`. Emitting both types replays the request twice.
 - `connection_id`, `timestamp`, `method`, `authority`, `path`, and `protocol`
-  on every record, plus `response_code` on `DownstreamEnd`.
+  on every record, plus `response_code` on `DownstreamEnd` records, including
+  records with an omitted `type`.
 - Stable `node` + `connection_id` identities and increasing per-connection
   `sequence` values when the capture tool supplies sequences.
 - Header values encoded as arrays of strings. Request and response bodies use
