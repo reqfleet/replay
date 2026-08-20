@@ -4,6 +4,7 @@ BIN_DIR ?= bin
 IMG ?= $(BINARY)
 PKG ?= ./...
 LOG ?= requests.log
+DEVBOX_PROJECT_DIR ?= $(CURDIR)
 E2E_REPLAY := $(BIN_DIR)/e2e_replay
 E2E_GENERATED_LOG := $(BIN_DIR)/e2e-generated-body.ndjson
 
@@ -102,3 +103,29 @@ clean:
 docker-build:
 	$(MAKE) build GOOS=linux
 	docker build --build-arg BIN_DIR=$(BIN_DIR) --build-arg BINARY=$(BINARY) -t $(IMG) .
+
+.PHONY: devbox
+devbox:
+	@if limactl list replay --format '{{.Name}}' >/dev/null 2>&1; then \
+		limactl start replay; \
+	else \
+		DEVBOX_PROJECT_DIR="$(DEVBOX_PROJECT_DIR)" \
+			limactl start --name=replay \
+			--set='.param.projectDir = env(DEVBOX_PROJECT_DIR)' lima.yaml; \
+	fi
+
+.PHONY: devbox-ssh
+devbox-ssh: devbox
+	limactl shell --workdir /workspace/replay replay
+
+.PHONY: devbox-stop
+devbox-stop:
+	@if status="$$(limactl list replay --format '{{.Status}}' 2>/dev/null)"; then \
+		if [ "$$status" = "Stopped" ]; then \
+			echo 'Lima instance "replay" is already stopped.'; \
+		else \
+			limactl stop replay; \
+		fi; \
+	else \
+		echo 'Lima instance "replay" does not exist.'; \
+	fi

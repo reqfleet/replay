@@ -7,6 +7,10 @@ description: Go testing patterns from Google and Uber style guides including tes
 
 Guidelines for writing clear, maintainable Go tests following Google's style.
 
+## Replay execution environment
+
+From the host repository, run `make devbox-ssh` before executing tests. Run every project `make` target and `go test` command only in the resulting VM shell at `/workspace/replay`, never directly on the macOS host. `make devbox`, `make devbox-ssh`, and `make devbox-stop` are host-only VM lifecycle exceptions.
+
 ## Useful Test Failures
 
 > **Normative**: Test failures must be diagnosable without reading the test

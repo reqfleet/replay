@@ -9,6 +9,10 @@ description: Go performance patterns including efficient string handling, type c
 
 Performance-specific guidelines apply only to the **hot path**. Don't prematurely optimize—focus these patterns where they matter most.
 
+## Replay execution environment
+
+From the host repository, run `make devbox-ssh` before benchmarks or verification. Run every project `make` target and `go test` command only in the resulting VM shell at `/workspace/replay`, never directly on the macOS host. `make devbox`, `make devbox-ssh`, and `make devbox-stop` are host-only VM lifecycle exceptions.
+
 ---
 
 ## Prefer strconv over fmt

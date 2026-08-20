@@ -11,6 +11,10 @@ Prerequisites
 - `gh` CLI installed and authenticated (access to `reqfleet/replay`).
 - `jq` installed for JSON parsing.
 
+Execution environment
+- From the host repository, run `make devbox-ssh` before any project `make` target or `go test` command.
+- Run those commands only in the resulting VM shell at `/workspace/replay`. The `make devbox`, `make devbox-ssh`, and `make devbox-stop` lifecycle targets are host-only.
+
 Quick fetch
 - Fetch the PR review JSON (returns a JSON structure containing `reviews` and `comments`):
 
@@ -78,6 +82,10 @@ Testing & verification
 - Run tests and linters before committing:
 
 ```bash
+# Host: enter the replay development VM.
+make devbox-ssh
+
+# VM (/workspace/replay): run verification here.
 go test ./...
 gofmt -w .
 ```
