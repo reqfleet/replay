@@ -33,10 +33,8 @@ type ReplayConfig struct {
 	Sharding   ShardingConfig   `yaml:"sharding"`
 	Validation ValidationConfig `yaml:"validation"`
 
-	MaxVirtualUsersPerEngine int `yaml:"max_virtual_users_per_engine"`
-	// MaxActiveConnectionsPerEngine is reserved for connection admission; 0 means unlimited.
-	MaxActiveConnectionsPerEngine int           `yaml:"max_active_connections_per_engine"`
-	RampupDuration                time.Duration `yaml:"rampup_duration"`
+	MaxVirtualUsersPerEngine int           `yaml:"max_virtual_users_per_engine"`
+	RampupDuration           time.Duration `yaml:"rampup_duration"`
 
 	DryRun                 bool `yaml:"dry_run"`
 	Verbose                bool `yaml:"verbose"`
@@ -154,9 +152,8 @@ type HeaderRewriteConfig struct {
 func Default() Config {
 	return Config{
 		Replay: ReplayConfig{
-			MaxVirtualUsersPerEngine:      20,
-			MaxActiveConnectionsPerEngine: 0,
-			RampupDuration:                0,
+			MaxVirtualUsersPerEngine: 20,
+			RampupDuration:           0,
 			HTTP2: HTTP2Config{
 				Mode: "serialized",
 			},
