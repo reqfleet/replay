@@ -332,11 +332,11 @@ Exit status guidance:
 
 ### 6.4 Metrics Emission and Scrape Endpoint
 
-Replay engines MUST expose Prometheus metrics over HTTP at `/metrics` for pull-based scraping.
+Replay engines MUST expose Prometheus metrics over HTTP for pull-based scraping.
 
 Endpoint requirements:
 
-1. Path MUST be `/metrics`.
+1. Path MUST be configurable and MUST default to `/metrics`.
 2. Format MUST be Prometheus text exposition format.
 3. Endpoint SHOULD be enabled by default and bind address/port MUST be configurable.
 4. Endpoint MUST remain available during the full replay lifecycle, including startup and shutdown windows where feasible.
