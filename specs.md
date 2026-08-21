@@ -277,7 +277,6 @@ Definitions:
 
 * `virtual_user` (VU): a logical replay worker that drives one or more recorded connections.
 * `max_virtual_users_per_engine`: maximum number of VUs that may run concurrently in one replay engine.
-* `max_active_connections_per_engine`: configured ceiling for simultaneously open replay connections. `0` means unlimited. This version preserves the setting for configuration compatibility but does not yet enforce positive values.
 
 Normative behavior:
 
@@ -377,7 +376,7 @@ Minimum configurable domains:
 * Validation: status, header, body, and ignored-header controls.
 * Pacing: optional timestamp-delta replay with a maximum sleep cap.
 * Metrics server: listen address/port, endpoint enable toggle (default enabled), path (default `/metrics`).
-* Capacity controls: `max_virtual_users_per_engine`, `max_active_connections_per_engine` (`0` means unlimited).
+* Capacity control: `max_virtual_users_per_engine`.
 
 Configuration precedence (recommended):
 
@@ -391,7 +390,6 @@ Example:
 ```yaml
 replay:
   max_virtual_users_per_engine: 20
-  max_active_connections_per_engine: 0
   rampup_duration: 0s
   http2:
     mode: serialized
