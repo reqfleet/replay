@@ -65,8 +65,11 @@ Logs produced by another Envoy configuration or capture tool must follow the
 - `connection_id`, `timestamp`, `method`, `authority`, `path`, and `protocol`
   on every record, plus `response_code` on `DownstreamEnd` records, including
   records with an omitted `type`.
-- Stable `node` + `connection_id` identities and increasing per-connection
-  `sequence` values when the capture tool supplies sequences.
+- `scheme`, `node`, `stream_id`, and `sequence` are optional. Replay defaults
+  `scheme` to `http`. When present, `node` forms the connection identity with
+  `connection_id`. Replay derives `sequence` from record order independently
+  for each identity when it is omitted; supplied values must not decrease. For
+  HTTP/1.1, `stream_id` defaults to `1`, and any other value is rejected.
 - Header values encoded as arrays of strings. Request and response bodies use
   the base64 envelope defined in
   [Request Headers and Bodies](specs.md#34-request-headers-and-bodies).
@@ -246,7 +249,9 @@ per-connection replay deadline. Time spent waiting for the preceding response
 counts toward the next delta; Replay sleeps only for any remaining time instead
 of adding the full recorded delta after the response completes.
 
-When a recorded response exists for a request (`connection_id` + `sequence`), mismatches increment `validation_failed` and produce `partial_success`.
+When a `DownstreamEnd` record contains captured response expectations,
+enabled-check mismatches increment `validation_failed` and produce
+`partial_success`.
 
 When the target is unreachable or times out, the request is recorded as `send_error`, the run remains `partial_success`, and `replay_status_counter` is incremented with a synthetic transport status.
 
@@ -259,11 +264,28 @@ appears again later in the capture. `max_virtual_users_per_engine` bounds worker
 count, not retained connection state.
 
 Per-instance memory therefore scales with the number of unique connection
-identities assigned to that instance. For large captures, use `shard_index` and
-`shard_count`; sharding keeps every `node` + `connection_id` on one engine and
-isolates checkpoint files with a `.shard-<index>-of-<count>` suffix. Do not split
-a connection using arbitrary byte offsets or timestamp windows.
+identities assigned to that instance. For `N` replay processes, point every
+process at the same complete capture, configure the same `shard_count: N`, and
+give each process a unique `shard_index` in `[0, N)`. Replay hashes `node` +
+`connection_id`, so one process handles every record for an identity in file
+order. Each process still scans the complete input; sharding partitions replay
+execution and retained state, not input-read I/O.
 
-If `checkpoint.file` is set, completed sequences update an in-memory watermark and are persisted at `checkpoint.sync_interval` (default `1s`). Orderly shutdown flushes the latest watermark; after an abrupt termination, replay can repeat requests completed since the last successful sync. Persisted sequences are skipped on the next run using the same `node` + `connection_id` identity.
+Do not split a connection using arbitrary byte offsets, line ranges, or
+timestamp windows. Sharded checkpoint files are isolated with a
+`.shard-<index>-of-<count>` suffix.
+
+If `checkpoint.file` is set, completed sequences update an in-memory watermark
+and are persisted at `checkpoint.sync_interval` (default `1s`). Orderly
+shutdown flushes the latest watermark; after an abrupt termination, replay can
+repeat requests completed since the last successful sync. Persisted sequences
+are skipped on the next run using the same `node` + `connection_id` identity.
+
 For HTTP/2 traffic, `serialized` replays requests sequentially, while
-`multiplexed` dispatches requests concurrently on the shared per-connection client and waits for them at EOF.
+`multiplexed` dispatches requests concurrently on the shared per-connection
+client and waits for them at EOF. Replay consumes records in append order and
+does not reorder them by `timestamp`, `stream_id`, or `sequence`.
+`DownstreamEnd` records can therefore appear in response-completion order. Use
+`DownstreamStart` records when original request-start order is required; those
+records do not provide inline response-validation expectations. A capture must
+still contain exactly one record type for each original request.
