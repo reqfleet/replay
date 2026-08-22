@@ -83,7 +83,7 @@ func TestOutcomeAggregation_ValidationFailure(t *testing.T) {
 
 	requests := []model.Event{
 		{
-			Type:         model.AccessLogTypeDownstreamEnd,
+			Type:         model.EventRequest,
 			ConnectionID: 1,
 			Sequence:     1,
 			ResponseCode: intPointer(http.StatusOK),
@@ -122,7 +122,7 @@ func TestOutcomeAggregation_SkippedSerializedResponseValidation(t *testing.T) {
 
 	requests := []model.Event{
 		{
-			Type:         model.AccessLogTypeDownstreamEnd,
+			Type:         model.EventRequest,
 			ConnectionID: 1,
 			Sequence:     1,
 			ResponseCode: intPointer(http.StatusOK),

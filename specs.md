@@ -42,119 +42,107 @@ Responsibilities:
 
 ---
 
-## 3. Envoy Access-Log Input
+## 3. Recording and Replay Input
 
-Each NDJSON line MUST be one flat Envoy access-log record. When present, the
-`type` field is the dispatch key and MUST be one of the exact, case-sensitive
-values below. If `type` is absent, replay MUST treat the record as
-`DownstreamEnd` for compatibility with Envoy's default completion access logs.
+Recording observations and replay events are different wire contracts. Envoy
+stdout is recorder input. The replay engine accepts only canonical output from
+`replay combine`.
 
-| Type                         | Purpose                                                 |
-| ---------------------------- | ------------------------------------------------------- |
-| `DownstreamStart`            | Request captured when downstream request headers arrive |
-| `DownstreamEnd` or omitted   | Completed request with a recorded response status        |
+### 3.1 Raw Recorder Observations
 
-For each original HTTP request, a capture MUST contain exactly one replayable
-record. It MUST NOT contain both types for the same request because replay does
-not correlate start and end records and would replay the request twice.
+Raw input is UTF-8 NDJSON. Each JSON-looking line MUST be one flat Envoy
+observation with an explicit, case-sensitive `type`:
 
-Replay rejects unknown explicit types, including normalized `request` records,
-`connection_open`, `connection_close`, periodic, upstream, TCP, and tunnel
-events. It also rejects the previous nested `http` representation and the
-aliases `start_time`, `status`, and `log_type`.
+| Type              | Purpose                                                  |
+| ----------------- | -------------------------------------------------------- |
+| `DownstreamStart` | Request observed when downstream request headers arrive  |
+| `DownstreamEnd`   | The same request after its response or stream termination |
 
-### 3.1 Flat Record Schema
+Each original request MUST have exactly one observation of each type. Both
+observations MUST contain:
 
-```json
-{
-  "type": "DownstreamEnd",
-  "node": "envoy-a",
-  "connection_id": 42,
-  "stream_id": 7,
-  "sequence": 12,
-  "timestamp": "2026-02-27T03:10:22.001Z",
-  "method": "POST",
-  "scheme": "https",
-  "authority": "api.example.com",
-  "path": "/api/v1/login?redirect=/home",
-  "protocol": "HTTP/2",
-  "response_code": 200,
-  "duration_ms": 149,
-  "headers": {
-    "content-type": ["application/json"]
-  },
-  "body": {
-    "encoding": "base64",
-    "content": "eyJ1c2VybmFtZSI6ImFuZHkifQ==",
-    "size_bytes": 28
-  },
-  "response_headers": {
-    "content-type": ["application/json"]
-  },
-  "response_body": {
-    "encoding": "base64",
-    "content": "eyJ0b2tlbiI6ImFiYyJ9",
-    "size_bytes": 19
-  }
-}
+* `request_id`: nonempty and not `-`
+* `connection_id`: integer logical connection identifier
+* `timestamp`: valid RFC3339 request-start timestamp
+* `method`, `authority`, `path`, and `protocol`
+
+`node`, `scheme`, and `stream_id` are optional. `DownstreamEnd` additionally
+MUST contain `response_code`. Its `response_flags`, when present, MUST be an
+Envoy string. `-` and the empty string mean no flags; every other value is
+split on commas into exact, nonempty tokens.
+
+The pair identity is `(node, connection_id, request_id)`. The combiner accepts
+either observation order, but never pairs by timestamp, method, path, FIFO
+position, or response-completion order. A pair MUST agree on `node`,
+`connection_id`, `request_id`, `timestamp`, `method`, `authority`, `path`, and
+`protocol`. Nonempty `scheme` and nonzero `stream_id` values MUST also agree;
+a value omitted by one side is filled from the other.
+
+Duplicate, conflicting, malformed, unsupported, missing-ID, and unmatched
+observations are fatal. No partial output is installed. Raw Start-only,
+End-only, omitted-type, and mixed observation files are invalid replay-engine
+input.
+
+### 3.2 Combine Semantics
+
+Run:
+
+```bash
+replay combine -log mixed.ndjson -out canonical.ndjson
 ```
 
-### 3.2 Field Requirements
+`-gzip` and `-zstd` select compressed input and are mutually exclusive. Output
+is plain NDJSON.
 
-`type` is optional; when present, it MUST be `DownstreamStart` or
-`DownstreamEnd`.
+The combiner emits exactly one canonical `request` per pair. Global output
+order is the order of `DownstreamStart` observations, independent of End
+arrival or completion order. The request uses Start identity, timestamp, and
+request descriptors. Missing Start request headers or body are filled from
+End. End supplies response code, duration, response headers, response body, and
+tokenized response flags. Serialized `sequence` is omitted; the parser derives
+it deterministically from canonical order for each connection key.
 
-Every record MUST contain:
+If any End for a connection contains the exact `DC` token, the combiner emits
+one `connection_close` immediately after that connection's final canonical
+request in global Start order. It does not close at the DC-bearing request's
+position because later-started HTTP/2 streams may already belong to the same
+recorded connection. A connection without `DC` has no synthetic close marker
+and is finalized at EOF.
 
-* `connection_id`: integer logical connection identifier
-* `timestamp`: RFC3339 timestamp
-* `method`: HTTP method
-* `authority`: request authority
-* `path`: request path, including its query string
-* `protocol`: HTTP protocol string
+### 3.3 Canonical Replay Events
 
-`scheme` is optional and defaults to `http` during replay. `node` is optional
-and forms part of the logical connection identity when present. `stream_id` is
-optional; replay assigns 1 when it is absent on HTTP/1.1, and rejects any other
-HTTP/1.1 value.
+Canonical input uses explicit `request` and optional `connection_close` events:
+
+```json
+{"type":"request","node":"envoy-a","connection_id":42,"request_id":"opaque-id","timestamp":"2026-02-27T03:10:22.001Z","method":"POST","scheme":"https","authority":"api.example.com","path":"/api/v1/login","protocol":"HTTP/2","stream_id":7,"headers":{"content-type":["application/json"]},"body":{"encoding":"base64","content":"e30=","size_bytes":2},"response_code":200,"duration_ms":149,"response_headers":{"content-type":["application/json"]},"response_body":{"encoding":"base64","content":"e30=","size_bytes":2},"response_flags":["DC"]}
+{"type":"connection_close","node":"envoy-a","connection_id":42}
+```
+
+A `request` MUST contain `request_id`, `connection_id`, `timestamp`, `method`,
+`authority`, `path`, `protocol`, and `response_code`. `scheme` is optional and
+defaults to `http` during replay. `node` is optional and forms part of the
+logical connection identity. `stream_id` is optional; replay assigns `1` when
+it is absent on HTTP/1.1 and rejects any other HTTP/1.1 value.
+
+`response_flags`, when present, MUST be a JSON array containing only strings.
+The replay parser does not accept Envoy's raw string representation.
 
 `sequence` is optional. Replay derives a strictly increasing sequence from
-record order independently for each `node` + `connection_id`. If the producer
-provides `sequence`, replay preserves it and rejects a decrease.
+canonical request order independently for each `node` + `connection_id`. If a
+producer supplies `sequence`, replay preserves it and rejects a decrease.
+`connection_close` requires only `connection_id` plus optional `node`, passes
+directly to the engine, and does not advance request sequence.
 
-Additional Envoy fields such as `response_flags`, `bytes_received`,
-`bytes_sent`, and `upstream_host` MAY be present and are ignored.
-
-### 3.3 Type-Specific Semantics
-
-`DownstreamStart` represents the request at header arrival. It does not provide
-final response expectations, so replay never performs inline response
-validation from this type.
-
-`DownstreamEnd` MUST contain `response_code`. It MAY also contain
-`duration_ms`, `response_headers`, and `response_body`. Those fields describe
-the recorded response and enabled validation checks compare them with the
-replay target response.
-
-### 3.4 Request Headers and Bodies
-
-`headers` and `body` describe the request sent to the replay target. Header
-values are arrays and names SHOULD be lowercase. If `headers` does not contain
-`user-agent`, Replay copies a nonempty `user_agent` field into it.
-
-`body` and `response_body` use base64 encoding:
+`headers` and `response_headers` are maps from header names to arrays of
+strings. Names SHOULD be lowercase. `body` and `response_body` use a base64
+envelope:
 
 ```json
-{
-  "encoding": "base64",
-  "content": "AAEC",
-  "size_bytes": 3
-}
+{"encoding":"base64","content":"AAEC","size_bytes":3}
 ```
 
-This representation preserves binary payloads without encoding corruption.
-`response_headers` has the same `map[string][]string` representation as
-`headers`.
+Malformed JSON, omitted types, raw Envoy observations, `connection_open`, and
+unknown event types are rejected with the input line number.
 
 ---
 
@@ -162,23 +150,21 @@ This representation preserves binary payloads without encoding corruption.
 
 Replay engine MUST:
 
-1. Read events in append order without buffering the full capture.
+1. Read canonical events in append order without buffering the full capture.
 2. Route every event by `node` + `connection_id` to exactly one replay worker.
 3. Preserve the parser's per-connection monotonic `sequence`; replay MUST NOT reorder events.
-4. Open one replay connection state on the first record for each `node` + `connection_id`.
+4. Open one replay connection state on the first request for each `node` + `connection_id`.
 5. Replay requests in observed connection order for HTTP/1.1 and serialized HTTP/2.
 6. In multiplexed HTTP/2 mode, dispatch request sends concurrently as request events arrive.
 7. When pacing is enabled, schedule increasing timestamp deltas against a per-connection replay deadline.
 8. Time elapsed while replaying a request MUST consume the corresponding timestamp delta; synchronous request latency MUST NOT be followed by another sleep for the full recorded delta.
 9. When pacing timestamps move backward or stay equal, keep the existing pacing clock and do not sleep.
-10. Close every connection state at EOF.
+10. On `connection_close`, wait for in-flight HTTP/2 work, close transport resources, and finalize the connection.
+11. At EOF, perform the same finalization for every remaining connection.
 
-Native Envoy HTTP access logs do not contain TCP connection-close records.
-Replay therefore retains sequence and HTTP transport state for every observed
-`node` + `connection_id` until EOF. This preserves keep-alive behavior if a
-connection appears again later in the capture, but makes retained state
-proportional to the number of unique connection identities assigned to the
-engine.
+DC-derived canonical close markers provide confirmed connection termination.
+Connections without DC remain active until EOF because ordinary Envoy HTTP
+access logs do not report a later clean idle close.
 
 ### HTTP/1.1
 
@@ -194,16 +180,12 @@ Two supported modes:
 
 Multiplexed mode uses stream-aware checkpointing so a later completed request cannot advance the checkpoint past an earlier in-flight request.
 
-Replay consumes HTTP/2 records in append order and does not reorder them by
-`timestamp`, `stream_id`, or `sequence`. Envoy emits `DownstreamEnd` records as
-streams complete, so multiplexed streams MAY appear in completion order rather
-than their original request-start order. Serialized mode replays that observed
-completion order.
-
-An HTTP/2 capture that requires the original request-start order MUST use
-`DownstreamStart` records. `DownstreamEnd` remains appropriate when inline
-response validation is required and completion-order replay is acceptable.
-Each request MUST still appear exactly once as required by Section 3.
+Replay consumes HTTP/2 requests in canonical append order and does not reorder
+them by `timestamp`, `stream_id`, or `sequence`. `replay combine` establishes
+that order from `DownstreamStart` observations while merging response metadata
+from the corresponding Ends. Multiplexed mode may execute requests
+concurrently; a close marker waits for all admitted streams before finalizing
+the connection.
 
 ### 4.1 Distributed Replay for Large Captures
 
