@@ -17,6 +17,7 @@ data:
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
               stat_prefix: ingress_http
+              generate_request_id: true
               route_config:
                 name: local_route
                 virtual_hosts:
@@ -46,25 +47,27 @@ data:
                   "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
               access_log_options:
                 flush_access_log_on_new_request: true
-              # Formats request-start logs and flat request-completion logs as NDJSON to stdout.
+              # Formats request-start and flat request-completion logs as NDJSON to stdout.
               # Completion logs use standard Envoy flat fields for inline response validation.
               access_log:
-              # - name: envoy.access_loggers.stdout
-              #   filter:
-              #     log_type_filter:
-              #       types:
-              #       - DownstreamStart
-              #   typed_config:
-              #     "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
-              #     log_format:
-              #       json_format:
-              #         type: "%ACCESS_LOG_TYPE%"
-              #         connection_id: "%CONNECTION_ID%"
-              #         timestamp: "%START_TIME%"
-              #         protocol: "%PROTOCOL%"
-              #         method: "%REQ(:METHOD)%"
-              #         authority: "%REQ(:AUTHORITY)%"
-              #         path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+              - name: envoy.access_loggers.stdout
+                filter:
+                  log_type_filter:
+                    types:
+                    - DownstreamStart
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                  log_format:
+                    json_format:
+                      type: "%ACCESS_LOG_TYPE%"
+                      node: "%HOSTNAME%"
+                      connection_id: "%CONNECTION_ID%"
+                      request_id: "%REQ(X-REQUEST-ID)%"
+                      timestamp: "%START_TIME%"
+                      protocol: "%PROTOCOL%"
+                      method: "%REQ(:METHOD)%"
+                      authority: "%REQ(:AUTHORITY)%"
+                      path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
               - name: envoy.access_loggers.stdout
                 filter:
                   log_type_filter:
@@ -75,7 +78,9 @@ data:
                   log_format:
                     json_format:
                       type: "%ACCESS_LOG_TYPE%"
+                      node: "%HOSTNAME%"
                       connection_id: "%CONNECTION_ID%"
+                      request_id: "%REQ(X-REQUEST-ID)%"
                       timestamp: "%START_TIME%"
                       method: "%REQ(:METHOD)%"
                       path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
