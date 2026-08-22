@@ -1,46 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
-	"slices"
-
 	"github.com/reqfleet/replay/internal/model"
+	"github.com/reqfleet/replay/internal/parser"
+	"github.com/reqfleet/replay/internal/recorder"
 )
-
-func TestGeneratedAccessLogType(t *testing.T) {
-	tests := []struct {
-		input string
-		want  model.EventType
-	}{
-		{input: "downstream-start", want: model.AccessLogTypeDownstreamStart},
-		{input: "downstream_start", want: model.AccessLogTypeDownstreamStart},
-		{input: "DownstreamStart", want: model.AccessLogTypeDownstreamStart},
-		{input: "downstream-end", want: model.AccessLogTypeDownstreamEnd},
-		{input: "downstream_end", want: model.AccessLogTypeDownstreamEnd},
-		{input: "DownstreamEnd", want: model.AccessLogTypeDownstreamEnd},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got, err := generatedAccessLogType(tt.input)
-			if err != nil {
-				t.Fatalf("generatedAccessLogType(%q) error: %v", tt.input, err)
-			}
-			if got != tt.want {
-				t.Fatalf("generatedAccessLogType(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestGeneratedAccessLogTypeRejectsUnknown(t *testing.T) {
-	if _, err := generatedAccessLogType("sideways"); err == nil {
-		t.Fatal("generatedAccessLogType(\"sideways\") error = nil, want error")
-	}
-}
 
 func TestParseGeneratedHeader(t *testing.T) {
 	tests := []struct {
@@ -48,75 +19,39 @@ func TestParseGeneratedHeader(t *testing.T) {
 		wantName  string
 		wantValue string
 	}{
-		{input: "Content-Type: application/json", wantName: "content-type", wantValue: "application/json"},
-		{input: "x-note:value:with:colons", wantName: "x-note", wantValue: "value:with:colons"},
+		{input: "X-Test: value", wantName: "x-test", wantValue: "value"},
+		{input: "authorization:Bearer token", wantName: "authorization", wantValue: "Bearer token"},
 		{input: "x-empty:", wantName: "x-empty", wantValue: ""},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			gotName, gotValue, err := parseGeneratedHeader(tt.input)
-			if err != nil {
-				t.Fatalf("parseGeneratedHeader(%q) error: %v", tt.input, err)
-			}
-			if gotName != tt.wantName {
-				t.Errorf("parseGeneratedHeader(%q) name = %q, want %q", tt.input, gotName, tt.wantName)
-			}
-			if gotValue != tt.wantValue {
-				t.Errorf("parseGeneratedHeader(%q) value = %q, want %q", tt.input, gotValue, tt.wantValue)
-			}
-		})
+	for _, test := range tests {
+		name, value, err := parseGeneratedHeader(test.input)
+		if err != nil {
+			t.Errorf("parseGeneratedHeader(%q) error: %v", test.input, err)
+			continue
+		}
+		if name != test.wantName || value != test.wantValue {
+			t.Errorf("parseGeneratedHeader(%q) = (%q, %q), want (%q, %q)", test.input, name, value, test.wantName, test.wantValue)
+		}
 	}
 }
 
 func TestParseGeneratedHeaderRejectsMalformedValue(t *testing.T) {
-	for _, input := range []string{"missing-colon", ": value"} {
-		t.Run(input, func(t *testing.T) {
-			if _, _, err := parseGeneratedHeader(input); err == nil {
-				t.Errorf("parseGeneratedHeader(%q) error = nil, want error", input)
-			}
-		})
+	for _, input := range []string{"missing-separator", ": missing-name"} {
+		if _, _, err := parseGeneratedHeader(input); err == nil {
+			t.Errorf("parseGeneratedHeader(%q) error = nil, want error", input)
+		}
 	}
 }
 
-func TestGeneratedDownstreamStartRequestOmitsResponseFields(t *testing.T) {
-	req := generatedRequestEvent(model.AccessLogTypeDownstreamStart, 7, time.Unix(100, 0).UTC(), generatedRequestOptions{
+func TestGeneratedRequestIncludesCanonicalIdentityAndResponse(t *testing.T) {
+	request := generatedRequestEvent(7, 3, time.Unix(100, 0).UTC(), generatedRequestOptions{
 		authority:   "example.com",
 		scheme:      "http",
 		port:        "80",
 		apiKey:      "key",
 		requestPath: "/resource",
-		status:      503,
-		durationMS:  16,
-		body:        generatedRequestBody("hello"),
-	})
-
-	if got, want := req.Type, model.AccessLogTypeDownstreamStart; got != want {
-		t.Fatalf("req.Type = %q, want %q", got, want)
-	}
-	if req.ResponseCode != nil {
-		t.Errorf("req.ResponseCode = %d, want nil", *req.ResponseCode)
-	}
-	if got, want := req.DurationMS, float64(0); got != want {
-		t.Fatalf("req.DurationMS = %v, want %v", got, want)
-	}
-	if got, want := req.Scheme, "http"; got != want {
-		t.Fatalf("req.Scheme = %q, want %q", got, want)
-	}
-	if req.Body != nil {
-		t.Errorf("generatedRequestEvent(DownstreamStart).Body = %+v, want nil", req.Body)
-	}
-}
-
-func TestGeneratedDownstreamEndRequestIncludesRequestAndResponseFields(t *testing.T) {
-	req := generatedRequestEvent(model.AccessLogTypeDownstreamEnd, 7, time.Unix(100, 0).UTC(), generatedRequestOptions{
-		authority:   "example.com",
-		scheme:      "http",
-		port:        "80",
-		apiKey:      "key",
-		requestPath: "/resource",
-		status:      503,
-		durationMS:  16,
+		status:      201,
+		durationMS:  12.5,
 		extraHeaders: map[string][]string{
 			"content-type": {"application/json"},
 			"x-real-ip":    {"198.51.100.7"},
@@ -125,125 +60,161 @@ func TestGeneratedDownstreamEndRequestIncludesRequestAndResponseFields(t *testin
 		body: generatedRequestBody("hello"),
 	})
 
-	if got, want := req.Type, model.AccessLogTypeDownstreamEnd; got != want {
-		t.Fatalf("req.Type = %q, want %q", got, want)
+	if got, want := request.Type, model.EventRequest; got != want {
+		t.Errorf("generatedRequestEvent().Type = %q, want %q", got, want)
 	}
-	if req.ResponseCode == nil {
-		t.Fatal("req.ResponseCode = nil, want 503")
+	if got, want := request.RequestID, "connection-7-request-3"; got != want {
+		t.Errorf("generatedRequestEvent().RequestID = %q, want %q", got, want)
 	}
-	if got, want := *req.ResponseCode, 503; got != want {
-		t.Fatalf("req.ResponseCode = %d, want %d", got, want)
+	if request.ResponseCode == nil || *request.ResponseCode != 201 {
+		t.Errorf("generatedRequestEvent().ResponseCode = %v, want 201", request.ResponseCode)
 	}
-	if got, want := req.DurationMS, float64(16); got != want {
-		t.Fatalf("req.DurationMS = %v, want %v", got, want)
+	if got, want := request.DurationMS, 12.5; got != want {
+		t.Errorf("generatedRequestEvent().DurationMS = %v, want %v", got, want)
 	}
-	if got, want := req.Headers["content-type"], "application/json"; len(got) != 1 || got[0] != want {
-		t.Errorf("generatedRequestEvent(DownstreamEnd).Headers[content-type] = %v, want [%q]", got, want)
+	if got, want := request.Headers["x-trace"], []string{"one", "two"}; !slices.Equal(got, want) {
+		t.Errorf("generatedRequestEvent().Headers[x-trace] = %v, want %v", got, want)
 	}
-	if got, want := req.Headers["x-real-ip"], "198.51.100.7"; len(got) != 1 || got[0] != want {
-		t.Errorf("generatedRequestEvent(DownstreamEnd).Headers[x-real-ip] = %v, want [%q]", got, want)
-	}
-	if got, want := req.Headers["x-trace"], []string{"one", "two"}; !slices.Equal(got, want) {
-		t.Errorf("generatedRequestEvent(DownstreamEnd).Headers[x-trace] = %v, want %v", got, want)
-	}
-	if got, want := req.Headers["x-api-key"], "key"; len(got) != 1 || got[0] != want {
-		t.Errorf("generatedRequestEvent(DownstreamEnd).Headers[x-api-key] = %v, want [%q]", got, want)
-	}
-	if req.Body == nil {
-		t.Fatal("generatedRequestEvent(DownstreamEnd).Body = nil, want body")
-	}
-	if got, want := req.Body.Encoding, "base64"; got != want {
-		t.Errorf("generatedRequestEvent(DownstreamEnd).Body.Encoding = %q, want %q", got, want)
-	}
-	if got, want := req.Body.Content, "aGVsbG8="; got != want {
-		t.Errorf("generatedRequestEvent(DownstreamEnd).Body.Content = %q, want %q", got, want)
-	}
-	if got, want := req.Body.SizeBytes, int64(5); got != want {
-		t.Errorf("generatedRequestEvent(DownstreamEnd).Body.SizeBytes = %d, want %d", got, want)
+	if request.Body == nil || request.Body.Content != "aGVsbG8=" || request.Body.SizeBytes != 5 {
+		t.Errorf("generatedRequestEvent().Body = %+v, want base64 hello body", request.Body)
 	}
 }
 
-func TestGeneratedDownstreamEndSerializesZeroResponseCode(t *testing.T) {
-	req := generatedRequestEvent(model.AccessLogTypeDownstreamEnd, 7, time.Unix(100, 0).UTC(), generatedRequestOptions{
-		authority:   "example.com",
-		scheme:      "http",
-		port:        "80",
-		apiKey:      "key",
-		requestPath: "/resource",
-		status:      0,
+func TestGeneratedRequestSerializesZeroResponseCode(t *testing.T) {
+	request := generatedRequestEvent(1, 1, time.Unix(100, 0).UTC(), generatedRequestOptions{
+		authority: "example.com",
+		scheme:    "http",
+		port:      "80",
+		status:    0,
 	})
-
-	encoded, err := json.Marshal(req)
+	encoded, err := json.Marshal(request)
 	if err != nil {
-		t.Fatalf("json.Marshal(generatedRequestEvent(DownstreamEnd)) error: %v", err)
+		t.Fatalf("json.Marshal(generatedRequestEvent()) error: %v", err)
 	}
-	var output struct {
-		ResponseCode *int `json:"response_code"`
+	var fields map[string]any
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatalf("json.Unmarshal(%q) error: %v", encoded, err)
 	}
-	if err := json.Unmarshal(encoded, &output); err != nil {
-		t.Fatalf("json.Unmarshal(generatedRequestEvent(DownstreamEnd)) error: %v", err)
-	}
-	if output.ResponseCode == nil {
-		t.Fatal("serialized response_code = missing, want 0")
-	}
-	if got, want := *output.ResponseCode, 0; got != want {
-		t.Errorf("serialized response_code = %d, want %d", got, want)
-	}
-}
-
-func TestGeneratedRequestUsesBaseScheme(t *testing.T) {
-	req := generatedRequestEvent(model.AccessLogTypeDownstreamStart, 7, time.Unix(100, 0).UTC(), generatedRequestOptions{
-		authority:   "example.com",
-		scheme:      "https",
-		port:        "443",
-		apiKey:      "key",
-		requestPath: "/resource",
-		status:      503,
-		durationMS:  16,
-	})
-
-	if got, want := req.Scheme, "https"; got != want {
-		t.Fatalf("req.Scheme = %q, want %q", got, want)
+	if got, ok := fields["response_code"]; !ok || got != float64(0) {
+		t.Errorf("serialized response_code = %v, present=%t, want 0 and present", got, ok)
 	}
 }
 
 func TestGeneratedEventsInterleaveConnectionsByRequestStep(t *testing.T) {
-	now := time.Date(2026, 6, 29, 3, 11, 15, 0, time.UTC)
-	events := generatedEvents(model.AccessLogTypeDownstreamStart, 2, 3, now, generatedRequestOptions{
+	now := time.Unix(100, 0).UTC()
+	events := generatedEvents(2, 2, now, generatedRequestOptions{
 		authority:   "example.com",
 		scheme:      "http",
 		port:        "80",
-		apiKey:      "key",
-		requestPath: "api/v1/resource",
+		requestPath: "/base",
+		status:      200,
+	})
+	if got, want := len(events), 4; got != want {
+		t.Fatalf("len(generatedEvents(2, 2)) = %d, want %d", got, want)
+	}
+	wantConnections := []int{1, 2, 1, 2}
+	wantIDs := []string{
+		"connection-1-request-1",
+		"connection-2-request-1",
+		"connection-1-request-2",
+		"connection-2-request-2",
+	}
+	wantPaths := []string{"/base", "/base", "/base/2", "/base/2"}
+	for i, event := range events {
+		if event.ConnectionID != wantConnections[i] || event.RequestID != wantIDs[i] || event.Path != wantPaths[i] {
+			t.Errorf("generatedEvents()[%d] identity = connection %d request_id %q path %q, want connection %d request_id %q path %q",
+				i, event.ConnectionID, event.RequestID, event.Path, wantConnections[i], wantIDs[i], wantPaths[i])
+		}
+		if event.Type != model.EventRequest || event.ResponseCode == nil || *event.ResponseCode != 200 {
+			t.Errorf("generatedEvents()[%d] canonical response metadata = type %q response_code %v, want request/200", i, event.Type, event.ResponseCode)
+		}
+	}
+}
+
+func TestGeneratedObservationsReverseCompletionAndCombineInStartOrder(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	var observations []generatedObservation
+	err := emitGeneratedObservations(2, 1, now, generatedRequestOptions{
+		authority:   "example.com",
+		scheme:      "https",
+		port:        "443",
+		requestPath: "/base",
 		status:      200,
 		durationMS:  16,
+	}, func(observation generatedObservation) error {
+		observations = append(observations, observation)
+		return nil
 	})
-
-	if got, want := len(events), 6; got != want {
-		t.Fatalf("len(generatedEvents()) = %d, want %d", got, want)
+	if err != nil {
+		t.Fatalf("emitGeneratedObservations() error: %v", err)
 	}
-	for i, event := range events {
-		if event.Type != model.AccessLogTypeDownstreamStart {
-			t.Fatalf("events[%d].Type = %q, want %q", i, event.Type, model.AccessLogTypeDownstreamStart)
-		}
+	if got, want := len(observations), 4; got != want {
+		t.Fatalf("len(observations) = %d, want %d", got, want)
 	}
 
-	requestConnectionIDs := []int{}
-	requestTimestamps := []string{}
-	for _, event := range events {
-		requestConnectionIDs = append(requestConnectionIDs, event.ConnectionID)
-		requestTimestamps = append(requestTimestamps, event.Timestamp)
+	wantTypes := []string{
+		generatedDownstreamStart,
+		generatedDownstreamStart,
+		generatedDownstreamEnd,
+		generatedDownstreamEnd,
 	}
-	wantConnectionIDs := []int{1, 2, 3, 1, 2, 3}
-	for i, want := range wantConnectionIDs {
-		if got := requestConnectionIDs[i]; got != want {
-			t.Fatalf("requestConnectionIDs[%d] = %d, want %d", i, got, want)
+	wantIDs := []string{
+		"connection-1-request-1",
+		"connection-1-request-2",
+		"connection-1-request-2",
+		"connection-1-request-1",
+	}
+	for i, observation := range observations {
+		if observation.Type != wantTypes[i] || observation.RequestID != wantIDs[i] {
+			t.Errorf("observations[%d] = type %q request_id %q, want type %q request_id %q",
+				i, observation.Type, observation.RequestID, wantTypes[i], wantIDs[i])
 		}
 	}
-	if requestTimestamps[0] != requestTimestamps[1] || requestTimestamps[1] != requestTimestamps[2] {
-		t.Fatalf("first request batch timestamps = %v, want identical timestamps", requestTimestamps[:3])
+	if observations[2].ResponseFlags != "-" || observations[3].ResponseFlags != "DC" {
+		t.Errorf("End response_flags = [%q %q], want [- DC]",
+			observations[2].ResponseFlags, observations[3].ResponseFlags)
 	}
-	if requestTimestamps[2] == requestTimestamps[3] {
-		t.Fatalf("requestTimestamps[2] = requestTimestamps[3] = %q, want later second batch", requestTimestamps[2])
+	completionTime := func(observation generatedObservation) time.Time {
+		start, err := time.Parse(time.RFC3339Nano, observation.Timestamp)
+		if err != nil {
+			t.Fatalf("time.Parse(%q) error: %v", observation.Timestamp, err)
+		}
+		return start.Add(time.Duration(observation.DurationMS * float64(time.Millisecond)))
+	}
+	if secondEnd, firstEnd := completionTime(observations[2]), completionTime(observations[3]); !secondEnd.Before(firstEnd) {
+		t.Errorf("completion times = request 2 %v, request 1 %v; want request 2 before request 1", secondEnd, firstEnd)
+	}
+
+	var raw bytes.Buffer
+	encoder := json.NewEncoder(&raw)
+	for _, observation := range observations {
+		if err := encoder.Encode(observation); err != nil {
+			t.Fatalf("json.Encoder.Encode(%+v) error: %v", observation, err)
+		}
+	}
+	var canonical bytes.Buffer
+	summary, err := recorder.CombineStream(&raw, &canonical)
+	if err != nil {
+		t.Fatalf("recorder.CombineStream() error: %v", err)
+	}
+	if summary.Records != 2 || summary.ConnectionsClosed != 1 {
+		t.Errorf("recorder.CombineStream() summary = %+v, want 2 records and 1 closed connection", summary)
+	}
+
+	var events []model.Event
+	if err := parser.ParseStream(strings.NewReader(canonical.String()), func(event model.Event) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatalf("parser.ParseStream() error: %v", err)
+	}
+	if got, want := len(events), 3; got != want {
+		t.Fatalf("len(canonical events) = %d, want %d", got, want)
+	}
+	if events[0].RequestID != "connection-1-request-1" ||
+		events[1].RequestID != "connection-1-request-2" ||
+		events[2].Type != model.EventConnectionClose {
+		t.Errorf("canonical event order = [%q %q %q], want [request-1 request-2 connection_close]",
+			events[0].RequestID, events[1].RequestID, events[2].Type)
 	}
 }

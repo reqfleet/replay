@@ -141,6 +141,12 @@ func main() {
 }
 
 func run() int {
+	if len(os.Args) > 1 && os.Args[1] == "combine" {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		return runCombineContext(ctx, os.Args[2:], os.Stdout, os.Stderr)
+	}
+
 	configPath := flag.String("config", "", "path to config.yaml (optional)")
 	logPath := flag.String("log", "", "path to requests.log NDJSON file")
 	zstdFlag := flag.Bool("zstd", false, "read log file compressed with zstd")

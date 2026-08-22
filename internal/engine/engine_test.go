@@ -526,7 +526,7 @@ func TestExpectationFreeRecordingPreservesResponseProcessing(t *testing.T) {
 	eng := New(cfg, reg)
 	requestEvent := func(sequence int) model.Event {
 		return model.Event{
-			Type:         model.AccessLogTypeDownstreamStart,
+			Type:         model.EventRequest,
 			ConnectionID: 1,
 			Sequence:     sequence,
 			Method:       http.MethodGet,
@@ -735,7 +735,7 @@ func TestMetricStatusForSendErrorUsesStructuredErrors(t *testing.T) {
 	}
 }
 
-func TestDownstreamStartRequestSkipsInlineResponseValidation(t *testing.T) {
+func TestCanonicalRequestValidatesInlineResponseStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("boom"))
@@ -753,49 +753,7 @@ func TestDownstreamStartRequestSkipsInlineResponseValidation(t *testing.T) {
 	events := []model.Event{
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
-			Type:         model.AccessLogTypeDownstreamStart,
-			ConnectionID: 1,
-			Sequence:     1,
-			ResponseCode: intPointer(http.StatusOK),
-			Method:       http.MethodGet,
-			Scheme:       target.Scheme,
-			Authority:    target.Host,
-			Path:         "/",
-		},
-		{Type: model.EventConnectionClose, ConnectionID: 1},
-	}
-
-	summary, err := runReplay(eng, events)
-	if err != nil {
-		t.Fatalf("replay failed: %v", err)
-	}
-	if got, want := summary.ValidationFailed, int64(0); got != want {
-		t.Fatalf("summary.ValidationFailed = %d, want %d", got, want)
-	}
-	if got, want := summary.Outcome, RunSuccess; got != want {
-		t.Fatalf("summary.Outcome = %s, want %s", got, want)
-	}
-}
-
-func TestDownstreamEndRequestValidatesInlineResponseStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("boom"))
-	}))
-	defer srv.Close()
-	target, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("url parse failed: %v", err)
-	}
-
-	cfg := config.Default()
-
-	cfg.Replay.Validation.Status = true
-	eng := New(cfg, metrics.New(cfg.Metrics))
-	events := []model.Event{
-		{Type: model.EventConnectionOpen, ConnectionID: 1},
-		{
-			Type:         model.AccessLogTypeDownstreamEnd,
+			Type:         model.EventRequest,
 			ConnectionID: 1,
 			Sequence:     1,
 			ResponseCode: intPointer(http.StatusOK),
@@ -877,7 +835,7 @@ func TestReplayDoesNotValidateResponseAfterTransportSendError(t *testing.T) {
 	events := []model.Event{
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
-			Type:         model.AccessLogTypeDownstreamEnd,
+			Type:         model.EventRequest,
 			ConnectionID: 1,
 			Sequence:     1,
 			ResponseCode: intPointer(http.StatusOK),
@@ -1017,7 +975,7 @@ func TestReplayHeaderValidationIgnoresConfiguredHeaders(t *testing.T) {
 	events := []model.Event{
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
-			Type:         model.AccessLogTypeDownstreamEnd,
+			Type:         model.EventRequest,
 			ConnectionID: 1,
 			Sequence:     1,
 			ResponseCode: intPointer(http.StatusOK),
@@ -1079,7 +1037,7 @@ func TestReplayBodyValidationMismatch(t *testing.T) {
 	events := []model.Event{
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
-			Type:         model.AccessLogTypeDownstreamEnd,
+			Type:         model.EventRequest,
 			ConnectionID: 1,
 			Sequence:     1,
 			ResponseCode: intPointer(http.StatusOK),
@@ -1149,7 +1107,7 @@ func TestReplayBodyValidationDistinguishesEmptyFromAbsent(t *testing.T) {
 			events := []model.Event{
 				{Type: model.EventConnectionOpen, ConnectionID: 1},
 				{
-					Type:         model.AccessLogTypeDownstreamEnd,
+					Type:         model.EventRequest,
 					ConnectionID: 1,
 					Sequence:     1,
 					ResponseCode: intPointer(http.StatusOK),
@@ -1252,7 +1210,7 @@ func TestFinishRequestSuccessValidatesInlineImmediately(t *testing.T) {
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
 	req := model.Event{
-		Type:         model.AccessLogTypeDownstreamEnd,
+		Type:         model.EventRequest,
 		ConnectionID: 1,
 		Sequence:     1,
 		ResponseCode: intPointer(http.StatusOK),
@@ -1851,8 +1809,8 @@ func TestReplayHTTP2MultiplexedMode(t *testing.T) {
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
-		{Type: model.AccessLogTypeDownstreamEnd, ConnectionID: 1, StreamID: 1, Sequence: 1, ResponseCode: intPointer(http.StatusOK), Protocol: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"},
-		{Type: model.AccessLogTypeDownstreamEnd, ConnectionID: 1, StreamID: 3, Sequence: 2, ResponseCode: intPointer(http.StatusCreated), Protocol: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 1, Sequence: 1, ResponseCode: intPointer(http.StatusOK), Protocol: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/a"},
+		{Type: model.EventRequest, ConnectionID: 1, StreamID: 3, Sequence: 2, ResponseCode: intPointer(http.StatusCreated), Protocol: "HTTP/2", Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/b"},
 		{Type: model.EventConnectionClose, ConnectionID: 1},
 	}
 
