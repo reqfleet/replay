@@ -149,6 +149,19 @@ For a quick parser and engine check when only End records were captured, run:
 go run ./cmd/replay -log ./downstream-end.ndjson -dry-run
 ```
 
+Generate deterministic End-only data for local verification with:
+
+```bash
+go run ./tools/generate_requests.go \
+  -base http://localhost:8080 \
+  -downstream-end \
+  -out ./downstream-end.ndjson
+```
+
+`-downstream-end` emits only flat `DownstreamEnd` records and is mutually
+exclusive with `-observations`, which emits paired Start/End input for
+`replay combine`.
+
 Each record may use explicit `type: "DownstreamEnd"` or omit `type`. This
 convenience path preserves file append order, which may be response-completion
 order rather than request-start order. **Request order is not guaranteed; use

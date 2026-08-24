@@ -197,6 +197,12 @@ func emitGeneratedEvents(reqs, conns int, now time.Time, options generatedReques
 	return nil
 }
 
+func emitGeneratedDownstreamEnds(reqs, conns int, now time.Time, options generatedRequestOptions, emit func(generatedObservation) error) error {
+	return emitGeneratedEvents(reqs, conns, now, options, func(request model.Event) error {
+		return emit(generatedObservationForRequest(generatedDownstreamEnd, request, options.durationMS, "-"))
+	})
+}
+
 func generatedEvents(reqs, conns int, now time.Time, options generatedRequestOptions) []model.Event {
 	events := []model.Event{}
 	if err := emitGeneratedEvents(reqs, conns, now, options, func(event model.Event) error {
@@ -210,16 +216,17 @@ func generatedEvents(reqs, conns int, now time.Time, options generatedRequestOpt
 
 func main() {
 	var (
-		baseURL      = flag.String("base", "http://localhost:8080", "Base URL to generate requests for")
-		requestPath  = flag.String("subpath", "api/v1/resource", "Subpath for generated requests")
-		reqs         = flag.Int("reqs", 5, "Number of requests per connection")
-		conns        = flag.Int("conns", 1, "Number of simulated connections")
-		out          = flag.String("out", "requests.ndjson", "Output file path")
-		status       = flag.Int("status", 200, "HTTP response status code to simulate")
-		dur          = flag.Float64("duration", 16.0, "Request duration in milliseconds")
-		apiKey       = flag.String("apikey", "rqt_api_dummy-apikey-local", "API key header value")
-		body         = flag.String("body", "", "Request body to include")
-		observations = flag.Bool("observations", false, "Emit mixed HTTP/2 DownstreamStart/DownstreamEnd observations in reverse completion order")
+		baseURL       = flag.String("base", "http://localhost:8080", "Base URL to generate requests for")
+		requestPath   = flag.String("subpath", "api/v1/resource", "Subpath for generated requests")
+		reqs          = flag.Int("reqs", 5, "Number of requests per connection")
+		conns         = flag.Int("conns", 1, "Number of simulated connections")
+		out           = flag.String("out", "requests.ndjson", "Output file path")
+		status        = flag.Int("status", 200, "HTTP response status code to simulate")
+		dur           = flag.Float64("duration", 16.0, "Request duration in milliseconds")
+		apiKey        = flag.String("apikey", "rqt_api_dummy-apikey-local", "API key header value")
+		body          = flag.String("body", "", "Request body to include")
+		observations  = flag.Bool("observations", false, "Emit mixed HTTP/2 DownstreamStart/DownstreamEnd observations in reverse completion order")
+		downstreamEnd = flag.Bool("downstream-end", false, "Emit DownstreamEnd-only access log records")
 	)
 	extraHeaders := make(map[string][]string)
 	flag.Func("header", "Request header in name:value format; repeatable and replaces generated values for the same name", func(raw string) error {
@@ -233,6 +240,10 @@ func main() {
 	flag.StringVar(baseURL, "url", *baseURL, "Alias for -base")
 	flag.StringVar(requestPath, "path", *requestPath, "Alias for -subpath")
 	flag.Parse()
+	if *observations && *downstreamEnd {
+		fmt.Fprintln(os.Stderr, "-observations and -downstream-end are mutually exclusive")
+		os.Exit(2)
+	}
 
 	u, err := url.Parse(*baseURL)
 	if err != nil {
@@ -276,6 +287,16 @@ func main() {
 			os.Exit(2)
 		}
 		fmt.Printf("Generated %d connections with %d observation pairs each to %s\n", *conns, *reqs, *out)
+		return
+	}
+	if *downstreamEnd {
+		if err := emitGeneratedDownstreamEnds(*reqs, *conns, time.Now().UTC(), options, func(observation generatedObservation) error {
+			return writeJSONLine(file, observation)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "write DownstreamEnd: %v\n", err)
+			os.Exit(2)
+		}
+		fmt.Printf("Generated %d connections with %d DownstreamEnd records each to %s\n", *conns, *reqs, *out)
 		return
 	}
 	if err := emitGeneratedEvents(*reqs, *conns, time.Now().UTC(), options, func(event model.Event) error {

@@ -131,6 +131,75 @@ func TestGeneratedEventsInterleaveConnectionsByRequestStep(t *testing.T) {
 	}
 }
 
+func TestGeneratedDownstreamEndsAreDirectReplayInput(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	var observations []generatedObservation
+	err := emitGeneratedDownstreamEnds(2, 2, now, generatedRequestOptions{
+		authority:   "example.com",
+		scheme:      "http",
+		port:        "80",
+		requestPath: "/base",
+		status:      201,
+		durationMS:  12.5,
+		extraHeaders: map[string][]string{
+			"content-type": {"application/json"},
+		},
+		body: generatedRequestBody("hello"),
+	}, func(observation generatedObservation) error {
+		observations = append(observations, observation)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("emitGeneratedDownstreamEnds() error: %v", err)
+	}
+	if got, want := len(observations), 4; got != want {
+		t.Fatalf("len(DownstreamEnd observations) = %d, want %d", got, want)
+	}
+
+	wantIDs := []string{
+		"connection-1-request-1",
+		"connection-2-request-1",
+		"connection-1-request-2",
+		"connection-2-request-2",
+	}
+	var raw bytes.Buffer
+	encoder := json.NewEncoder(&raw)
+	for i, observation := range observations {
+		if observation.Type != generatedDownstreamEnd ||
+			observation.RequestID != wantIDs[i] ||
+			observation.Protocol != "HTTP/1.1" ||
+			observation.ResponseCode == nil ||
+			*observation.ResponseCode != 201 ||
+			observation.ResponseFlags != "-" {
+			t.Errorf("DownstreamEnd observations[%d] = %+v, want ID %q with HTTP/1.1 response 201 and flags -",
+				i, observation, wantIDs[i])
+		}
+		if err := encoder.Encode(observation); err != nil {
+			t.Fatalf("json.Encoder.Encode(%+v) error: %v", observation, err)
+		}
+	}
+
+	var events []model.Event
+	if err := parser.ParseStream(&raw, func(event model.Event) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatalf("parser.ParseStream(generated DownstreamEnd input) error: %v", err)
+	}
+	if got, want := len(events), 4; got != want {
+		t.Fatalf("len(parsed DownstreamEnd events) = %d, want %d", got, want)
+	}
+	wantSequences := []int{1, 1, 2, 2}
+	for i, event := range events {
+		if event.Type != model.EventRequest ||
+			event.RequestID != wantIDs[i] ||
+			event.Sequence != wantSequences[i] {
+			t.Errorf("parsed DownstreamEnd events[%d] = type %q request_id %q sequence %d, want request/%q/%d",
+				i, event.Type, event.RequestID, event.Sequence, wantIDs[i], wantSequences[i])
+		}
+	}
+}
+
 func TestGeneratedObservationsReverseCompletionAndCombineInStartOrder(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	var observations []generatedObservation
