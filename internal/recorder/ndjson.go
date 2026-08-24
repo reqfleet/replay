@@ -146,30 +146,6 @@ func (s spoolCodec) read(ref spoolRef, value any) error {
 	return nil
 }
 
-func responseFlags(line int, raw json.RawMessage) ([]string, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	valueJSON := bytes.TrimSpace(raw)
-	if len(valueJSON) == 0 || valueJSON[0] != '"' {
-		return nil, fmt.Errorf("line %d: response_flags must be a string", line)
-	}
-	var value string
-	if err := json.Unmarshal(valueJSON, &value); err != nil {
-		return nil, fmt.Errorf("line %d: invalid response_flags: %w", line, err)
-	}
-	if value == "" || value == "-" {
-		return nil, nil
-	}
-	flags := strings.Split(value, ",")
-	for _, flag := range flags {
-		if flag == "" {
-			return nil, fmt.Errorf("line %d: response_flags contains an empty token", line)
-		}
-	}
-	return flags, nil
-}
-
 func decodeBody(line int, field string, raw json.RawMessage) (*model.Body, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -248,7 +224,7 @@ func normalizeObservation(line int, raw rawObservation) (string, observation, er
 		return "", observation{}, fmt.Errorf("line %d: DownstreamEnd observation missing response_flags", line)
 	}
 
-	flags, err := responseFlags(line, raw.ResponseFlags)
+	flags, err := parser.ParseObservationResponseFlags(line, raw.ResponseFlags)
 	if err != nil {
 		return "", observation{}, err
 	}

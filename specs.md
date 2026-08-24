@@ -45,9 +45,10 @@ Responsibilities:
 
 ## 3. Recording and Replay Input
 
-Recording observations and replay events are different wire contracts. Envoy
-stdout is recorder input. The replay engine accepts only canonical output from
-`replay combine`.
+Recording observations and replay events are different wire contracts. The
+recommended fidelity path sends paired Envoy stdout observations through
+`replay combine` and replays its canonical output. End-only completion logs MAY
+be replayed directly under the limited contract in Section 3.4.
 
 ### 3.1 Raw Recorder Observations
 
@@ -101,9 +102,9 @@ observations, nonzero `stream_id` values MUST agree; a value omitted by one side
 is filled from the other.
 
 Duplicate, conflicting, malformed, unsupported, missing-ID, and unmatched
-observations are fatal. No partial output is installed. Raw Start-only,
-End-only, omitted-type, and mixed observation files are invalid replay-engine
-input.
+observations are fatal. No partial output is installed. A file containing
+`DownstreamStart` or both observation sides is combiner input and MUST NOT be
+sent directly to replay.
 
 ### 3.2 Combine Semantics
 
@@ -147,8 +148,9 @@ to `http` during replay. `node` is optional and forms part of the logical
 connection identity. HTTP/1.1 requests MUST omit `stream_id`; replay uses
 internal stream ID `1` for them. `stream_id` is optional for other protocols.
 
-`response_flags`, when present, MUST be a JSON array containing only strings.
-The replay parser does not accept Envoy's raw string representation.
+`response_flags`, when present on a canonical request, MUST be a JSON array
+containing only strings. Canonical requests do not accept Envoy's raw string
+representation.
 
 `sequence` is optional. Replay derives a strictly increasing sequence from
 canonical request order independently for each `node` + `connection_id`. If a
@@ -159,8 +161,52 @@ directly to the engine, and does not advance request sequence.
 Canonical `headers`, `body`, `response_headers`, and `response_body` use the
 same header-map and base64-envelope representations as raw payload fields.
 
-Malformed JSON, omitted types, raw Envoy observations, `connection_open`, and
-unknown event types are rejected with the input line number.
+Within the canonical family, malformed JSON, absent or invalid explicit types,
+raw Envoy observations, `connection_open`, and unknown event types are rejected
+with the physical input line number.
+
+### 3.4 Direct Completion Replay Input
+
+Direct completion input is a quick-verification convenience, not the
+recommended fidelity path. Every record MUST either use the exact,
+case-sensitive `type: "DownstreamEnd"` or omit `type`. Explicit and untyped End
+records MAY coexist.
+
+Each record MUST contain integer `connection_id`, valid RFC3339 `timestamp`,
+nonempty `method`, `authority`, `path`, and `protocol`, and integer
+`response_code`. `request_id` is optional and is preserved when supplied.
+`node`, `scheme`, `sequence`, `stream_id`, request metadata, and response
+metadata are optional and use their existing event representations.
+
+`response_flags` is optional. When present, it MUST be an Envoy string. `-` and
+the empty string mean no flags; every other value is split on commas into exact,
+nonempty tokens. Arrays, non-strings, and empty tokens are invalid. An HTTP/1.1
+record MUST omit `stream_id` or use integer `1`; replay normalizes either form
+to internal stream ID `1`. A nonempty, non-`-` `user_agent` is copied to
+`headers["user-agent"]` only when no case-insensitive user-agent header exists.
+
+The parser normalizes every accepted direct record to `request`. For each
+connection, it derives sequence in file append order when `sequence` is omitted
+or non-positive. A supplied positive sequence is preserved, and a decrease is
+rejected. Replay MUST NOT sort by timestamp, duration, or stream ID. Completion
+append order can be response-completion order rather than request-start order.
+
+One input file MUST contain only canonical events or only direct completion
+records. Crossing those families is fatal before the conflicting record is
+forwarded; records already forwarded are not rolled back. Operators MUST run
+`-dry-run` before sending traffic. `type: null`, empty, lowercase, or unknown
+types, `DownstreamStart`, and `connection_open` are invalid.
+
+After the first direct record passes validation and immediately before it is
+forwarded, replay MUST log this warning exactly once per file:
+
+> DownstreamEnd access logs are suitable only for quick verification because
+> request order is not guaranteed; use combined logs to preserve replay
+> fidelity
+
+Direct input does not synthesize `connection_close`, including for the exact
+`DC` flag. Safe marker placement requires Start order. Direct-input connections
+therefore finalize only at EOF.
 
 ---
 
@@ -168,7 +214,7 @@ unknown event types are rejected with the input line number.
 
 Replay engine MUST:
 
-1. Read canonical events in append order without buffering the full capture.
+1. Read accepted input events in append order without buffering the full capture.
 2. Route every event by `node` + `connection_id` to exactly one replay worker.
 3. Preserve the parser's per-connection monotonic `sequence`; replay MUST NOT reorder events.
 4. Open one replay connection state on the first request for each `node` + `connection_id`.
@@ -181,8 +227,9 @@ Replay engine MUST:
 11. At EOF, perform the same finalization for every remaining connection.
 
 DC-derived canonical close markers provide confirmed connection termination.
-Connections without DC remain active until EOF because ordinary Envoy HTTP
-access logs do not report a later clean idle close.
+Canonical connections without DC and all direct-completion connections remain
+active until EOF. Direct completion input cannot place a DC-derived close
+safely because it lacks request-start order.
 
 ### HTTP/1.1
 
@@ -198,12 +245,13 @@ Two supported modes:
 
 Multiplexed mode uses stream-aware checkpointing so a later completed request cannot advance the checkpoint past an earlier in-flight request.
 
-Replay consumes HTTP/2 requests in canonical append order and does not reorder
-them by `timestamp`, `stream_id`, or `sequence`. `replay combine` establishes
-that order from `DownstreamStart` observations while merging response metadata
-from the corresponding Ends. Multiplexed mode may execute requests
-concurrently; a close marker waits for all admitted streams before finalizing
-the connection.
+Replay consumes HTTP/2 requests in input append order and does not reorder them
+by `timestamp`, `stream_id`, or `sequence`. `replay combine` establishes
+canonical order from `DownstreamStart` observations while merging response
+metadata from the corresponding Ends. Direct completion input preserves End
+append order instead. Multiplexed mode may execute requests concurrently; a
+canonical close marker waits for all admitted streams before finalizing the
+connection.
 
 ### 4.1 Distributed Replay for Large Captures
 

@@ -89,6 +89,32 @@ func TestRunReplayFromFileAcceptsCanonicalRequestWithoutConnectionOpen(t *testin
 	}
 }
 
+func TestRunReplayFromFileAcceptsDownstreamEndForQuickVerification(t *testing.T) {
+	cfg := config.Default()
+	cfg.Replay.DryRun = true
+	logPath := filepath.Join(t.TempDir(), "downstream-end.ndjson")
+	content := `{"type":"DownstreamEnd","connection_id":7,"stream_id":2,"timestamp":"2026-08-03T01:11:07.531Z","method":"GET","authority":"envoy-recorder-proxy:8080","path":"/b","protocol":"HTTP/2","response_code":200,"response_flags":"DC"}` + "\n" +
+		`{"connection_id":7,"stream_id":1,"timestamp":"2026-08-03T01:11:06.531Z","method":"GET","authority":"envoy-recorder-proxy:8080","path":"/a","protocol":"HTTP/2","response_code":201,"response_flags":"-"}` + "\n"
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", logPath, err)
+	}
+
+	registry := metrics.New(cfg.Metrics)
+	summary, err := runReplayFromFile(context.Background(), cfg, registry, logPath, "")
+	if err != nil {
+		t.Fatalf("runReplayFromFile(%q) error: %v", logPath, err)
+	}
+	if got, want := summary.Outcome, engine.RunSuccess; got != want {
+		t.Errorf("runReplayFromFile(%q) outcome = %s, want %s", logPath, got, want)
+	}
+	if got, want := summary.Skipped, int64(2); got != want {
+		t.Errorf("runReplayFromFile(%q) skipped = %d, want %d", logPath, got, want)
+	}
+	if got, want := summary.ConnectionsDone, int64(1); got != want {
+		t.Errorf("runReplayFromFile(%q) completed connections = %d, want %d", logPath, got, want)
+	}
+}
+
 func TestRunReplayFromFile_TransportFailures(t *testing.T) {
 	tests := []struct {
 		name            string

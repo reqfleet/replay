@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -17,7 +18,35 @@ import (
 	"github.com/reqfleet/replay/internal/model"
 )
 
-const maxNDJSONLineBytes = 16 * 1024 * 1024
+const (
+	maxNDJSONLineBytes   = 16 * 1024 * 1024
+	downstreamEndWarning = "DownstreamEnd access logs are suitable only for quick verification because request order is not guaranteed; use combined logs to preserve replay fidelity"
+)
+
+// ParseObservationResponseFlags decodes Envoy's comma-separated response flag field.
+func ParseObservationResponseFlags(line int, raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	valueJSON := bytes.TrimSpace(raw)
+	if len(valueJSON) == 0 || valueJSON[0] != '"' {
+		return nil, fmt.Errorf("line %d: response_flags must be a string", line)
+	}
+	var value string
+	if err := json.Unmarshal(valueJSON, &value); err != nil {
+		return nil, fmt.Errorf("line %d: invalid response_flags: %w", line, err)
+	}
+	if value == "" || value == "-" {
+		return nil, nil
+	}
+	flags := strings.Split(value, ",")
+	for _, flag := range flags {
+		if flag == "" {
+			return nil, fmt.Errorf("line %d: response_flags contains an empty token", line)
+		}
+	}
+	return flags, nil
+}
 
 type connectionSequenceState struct {
 	nextRequestSequence int
@@ -156,51 +185,115 @@ func ScanObjects(r io.Reader, handler func(line int, object []byte) error) error
 	return nil
 }
 
+type streamInputFamily uint8
+
+const (
+	streamInputUnknown streamInputFamily = iota
+	streamInputCanonical
+	streamInputDownstreamEnd
+)
+
+const downstreamEndType model.EventType = "DownstreamEnd"
+
 type canonicalWireEvent struct {
 	model.Event
-	Type          *model.EventType `json:"type"`
-	ConnectionID  *int             `json:"connection_id"`
-	StreamID      json.RawMessage  `json:"stream_id"`
-	ResponseFlags json.RawMessage  `json:"response_flags"`
+	Type            json.RawMessage `json:"type"`
+	ConnectionID    *int            `json:"connection_id"`
+	StreamID        json.RawMessage `json:"stream_id"`
+	ResponseFlags   json.RawMessage `json:"response_flags"`
+	NestedHTTP      json.RawMessage `json:"http"`
+	LegacyStartTime *string         `json:"start_time"`
+	LegacyStatus    *int            `json:"status"`
+	LegacyLogType   model.EventType `json:"log_type"`
 }
 
-func (raw canonicalWireEvent) event(line int) (model.Event, error) {
-	if raw.Type == nil {
-		return model.Event{}, fmt.Errorf("line %d: event missing type", line)
+func (raw canonicalWireEvent) event(line int) (model.Event, streamInputFamily, error) {
+	family := streamInputDownstreamEnd
+	var eventType model.EventType
+	if len(raw.Type) != 0 {
+		typeJSON := bytes.TrimSpace(raw.Type)
+		if len(typeJSON) == 0 || typeJSON[0] != '"' {
+			return model.Event{}, streamInputUnknown, fmt.Errorf("line %d: event type must be a string", line)
+		}
+		if err := json.Unmarshal(typeJSON, &eventType); err != nil {
+			return model.Event{}, streamInputUnknown, fmt.Errorf("line %d: invalid event type: %w", line, err)
+		}
+		switch eventType {
+		case model.EventRequest, model.EventConnectionClose:
+			family = streamInputCanonical
+		case downstreamEndType:
+		default:
+			return model.Event{}, streamInputUnknown, fmt.Errorf("line %d: unsupported event type %q", line, eventType)
+		}
 	}
+
+	if family == streamInputDownstreamEnd &&
+		(len(raw.NestedHTTP) != 0 || raw.LegacyStartTime != nil || raw.LegacyStatus != nil || raw.LegacyLogType != "") {
+		return model.Event{}, streamInputUnknown, fmt.Errorf("line %d: access log must use the flat Envoy schema", line)
+	}
+
 	if raw.ConnectionID == nil {
-		return model.Event{}, fmt.Errorf("line %d: event missing connection_id", line)
+		if family == streamInputDownstreamEnd {
+			return model.Event{}, streamInputUnknown, fmt.Errorf("line %d: DownstreamEnd access log missing connection_id", line)
+		}
+		return model.Event{}, streamInputUnknown, fmt.Errorf("line %d: event missing connection_id", line)
 	}
 
 	event := raw.Event
-	event.Type = *raw.Type
+	event.Type = eventType
 	event.ConnectionID = *raw.ConnectionID
 	if len(raw.StreamID) != 0 {
 		if err := json.Unmarshal(raw.StreamID, &event.StreamID); err != nil {
-			return model.Event{}, fmt.Errorf("line %d: invalid stream_id: %w", line, err)
+			return model.Event{}, streamInputUnknown, fmt.Errorf("line %d: invalid stream_id: %w", line, err)
 		}
 	}
+
+	if family == streamInputDownstreamEnd {
+		flags, err := ParseObservationResponseFlags(line, raw.ResponseFlags)
+		if err != nil {
+			return model.Event{}, streamInputUnknown, err
+		}
+		event.Type = model.EventRequest
+		event.ResponseFlags = flags
+		if event.UserAgent != "" && event.UserAgent != "-" {
+			hasUserAgentHeader := false
+			for name := range event.Headers {
+				if strings.EqualFold(name, "user-agent") {
+					hasUserAgentHeader = true
+					break
+				}
+			}
+			if !hasUserAgentHeader {
+				if event.Headers == nil {
+					event.Headers = make(map[string][]string, 1)
+				}
+				event.Headers["user-agent"] = []string{event.UserAgent}
+			}
+		}
+		return event, family, nil
+	}
+
 	if len(raw.ResponseFlags) != 0 {
 		flagsJSON := bytes.TrimSpace(raw.ResponseFlags)
 		if len(flagsJSON) == 0 || flagsJSON[0] != '[' {
-			return model.Event{}, fmt.Errorf("line %d: response_flags must be an array of strings", line)
+			return model.Event{}, streamInputUnknown, fmt.Errorf("line %d: response_flags must be an array of strings", line)
 		}
 		var tokens []json.RawMessage
 		if err := json.Unmarshal(flagsJSON, &tokens); err != nil {
-			return model.Event{}, fmt.Errorf("line %d: response_flags must be an array of strings: %w", line, err)
+			return model.Event{}, streamInputUnknown, fmt.Errorf("line %d: response_flags must be an array of strings: %w", line, err)
 		}
 		event.ResponseFlags = make([]string, len(tokens))
 		for index, token := range tokens {
 			token = bytes.TrimSpace(token)
 			if len(token) == 0 || token[0] != '"' {
-				return model.Event{}, fmt.Errorf("line %d: response_flags[%d] must be a string", line, index)
+				return model.Event{}, streamInputUnknown, fmt.Errorf("line %d: response_flags[%d] must be a string", line, index)
 			}
 			if err := json.Unmarshal(token, &event.ResponseFlags[index]); err != nil {
-				return model.Event{}, fmt.Errorf("line %d: response_flags[%d] must be a string: %w", line, index, err)
+				return model.Event{}, streamInputUnknown, fmt.Errorf("line %d: response_flags[%d] must be a string: %w", line, index, err)
 			}
 		}
 	}
-	return event, nil
+	return event, family, nil
 }
 
 func validateRequest(line int, event model.Event) error {
@@ -231,8 +324,34 @@ func validateRequest(line int, event model.Event) error {
 	return nil
 }
 
-// ParseStream reads canonical NDJSON events from r and invokes handler for each
-// parsed event. The handler may return an error to stop processing early.
+func validateDownstreamEnd(line int, event model.Event) error {
+	if event.Timestamp == "" {
+		return fmt.Errorf("line %d: DownstreamEnd access log missing timestamp", line)
+	}
+	if _, ok := model.ParseTimestamp(event.Timestamp); !ok {
+		return fmt.Errorf("line %d: invalid timestamp", line)
+	}
+	if event.Method == "" {
+		return fmt.Errorf("line %d: DownstreamEnd access log missing method", line)
+	}
+	if event.Authority == "" {
+		return fmt.Errorf("line %d: DownstreamEnd access log missing authority", line)
+	}
+	if event.Path == "" {
+		return fmt.Errorf("line %d: DownstreamEnd access log missing path", line)
+	}
+	if event.Protocol == "" {
+		return fmt.Errorf("line %d: DownstreamEnd access log missing protocol", line)
+	}
+	if event.ResponseCode == nil {
+		return fmt.Errorf("line %d: DownstreamEnd access log missing response_code", line)
+	}
+	return nil
+}
+
+// ParseStream reads canonical replay events or direct DownstreamEnd access logs
+// from r and invokes handler for each parsed event. The handler may return an
+// error to stop processing early.
 func ParseStream(r io.Reader, handler func(model.Event) error) error {
 	states := make(map[model.ConnectionKey]*connectionSequenceState)
 	stateForConnection := func(connectionKey model.ConnectionKey) *connectionSequenceState {
@@ -243,42 +362,73 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		}
 		return state
 	}
+	inputFamily := streamInputUnknown
 
 	return ScanObjects(r, func(line int, object []byte) error {
 		var raw canonicalWireEvent
 		if err := json.Unmarshal(object, &raw); err != nil {
 			return fmt.Errorf("line %d: invalid json: %w", line, err)
 		}
-		event, err := raw.event(line)
+		event, recordFamily, err := raw.event(line)
 		if err != nil {
 			return err
 		}
 
-		switch event.Type {
-		case model.EventConnectionClose:
-			return handler(event)
-		case model.EventRequest:
-			if err := validateRequest(line, event); err != nil {
+		switch recordFamily {
+		case streamInputCanonical:
+			switch event.Type {
+			case model.EventConnectionClose:
+			case model.EventRequest:
+				if err := validateRequest(line, event); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("line %d: unsupported event type %q", line, event.Type)
+			}
+		case streamInputDownstreamEnd:
+			if err := validateDownstreamEnd(line, event); err != nil {
 				return err
 			}
 		default:
-			return fmt.Errorf("line %d: unsupported event type %q", line, event.Type)
+			return fmt.Errorf("line %d: unsupported input family", line)
 		}
 
-		isHTTP11 := len(event.Protocol) >= 8 && strings.EqualFold(event.Protocol[:8], "HTTP/1.1")
-		if isHTTP11 && len(raw.StreamID) != 0 {
-			return fmt.Errorf("line %d: HTTP/1.1 requests must omit stream_id", line)
-		}
-		if isHTTP11 {
-			event.StreamID = 1
+		if event.Type == model.EventRequest {
+			isHTTP11 := len(event.Protocol) >= 8 && strings.EqualFold(event.Protocol[:8], "HTTP/1.1")
+			if isHTTP11 {
+				switch recordFamily {
+				case streamInputCanonical:
+					if len(raw.StreamID) != 0 {
+						return fmt.Errorf("line %d: HTTP/1.1 requests must omit stream_id", line)
+					}
+				case streamInputDownstreamEnd:
+					if len(raw.StreamID) != 0 && event.StreamID != 1 {
+						return fmt.Errorf("line %d: HTTP/1.1 DownstreamEnd access logs must omit stream_id or use stream_id=1", line)
+					}
+				}
+				event.StreamID = 1
+			}
 		}
 
-		connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
-		sequence, err := stateForConnection(connectionKey).recordRequest(event.Sequence)
-		if err != nil {
-			return fmt.Errorf("line %d: %w", line, err)
+		if inputFamily != streamInputUnknown && inputFamily != recordFamily {
+			return fmt.Errorf("line %d: cannot mix canonical replay events with DownstreamEnd access logs", line)
 		}
-		event.Sequence = sequence
+
+		if event.Type == model.EventRequest {
+			connectionKey := model.ConnectionKey{Node: event.Node, ConnectionID: event.ConnectionID}
+			sequence, err := stateForConnection(connectionKey).recordRequest(event.Sequence)
+			if err != nil {
+				return fmt.Errorf("line %d: %w", line, err)
+			}
+			event.Sequence = sequence
+		}
+
+		if inputFamily == streamInputUnknown {
+			inputFamily = recordFamily
+			if recordFamily == streamInputDownstreamEnd {
+				slog.Warn(downstreamEndWarning)
+			}
+		}
 
 		return handler(event)
 	})

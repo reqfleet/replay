@@ -148,7 +148,7 @@ func run() int {
 	}
 
 	configPath := flag.String("config", "", "path to config.yaml (optional)")
-	logPath := flag.String("log", "", "path to requests.log NDJSON file")
+	logPath := flag.String("log", "", "path to canonical or DownstreamEnd NDJSON log file")
 	zstdFlag := flag.Bool("zstd", false, "read log file compressed with zstd")
 	gzipFlag := flag.Bool("gzip", false, "read log file compressed with gzip")
 	dryRunFlag := flag.Bool("dry-run", false, "dry run mode: do not send network requests")
