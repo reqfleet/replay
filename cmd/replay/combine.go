@@ -68,6 +68,10 @@ func runCombineContext(ctx context.Context, args []string, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "combine: %v\n", err)
 		return 2
 	}
+	if summary.DiscardedStarts != 0 || summary.DiscardedEnds != 0 {
+		fmt.Fprintf(stderr, "combine: warning: discarded unmatched observations starts=%d ends=%d\n",
+			summary.DiscardedStarts, summary.DiscardedEnds)
+	}
 	fmt.Fprintf(stdout, "combine complete starts=%d ends=%d records=%d connections_closed=%d\n",
 		summary.Starts, summary.Ends, summary.Records, summary.ConnectionsClosed)
 	return 0

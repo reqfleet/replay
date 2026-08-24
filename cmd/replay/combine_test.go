@@ -129,6 +129,35 @@ func TestRunCombineInstallsCanonicalOutputAtomically(t *testing.T) {
 	}
 }
 
+func TestRunCombineWarnsWhenDiscardingUnmatchedObservations(t *testing.T) {
+	input := strings.Join([]string{
+		`{"type":"DownstreamEnd","node":"envoy-a","connection_id":7,"request_id":"unmatched-end","timestamp":"2026-08-21T10:00:00Z","method":"GET","scheme":"https","authority":"example.test","path":"/end","protocol":"HTTP/2","stream_id":1,"response_code":200,"response_flags":"DC"}`,
+		`{"type":"DownstreamStart","node":"envoy-a","connection_id":7,"request_id":"unmatched-start","timestamp":"2026-08-21T10:00:00Z","method":"GET","scheme":"https","authority":"example.test","path":"/start","protocol":"HTTP/2","stream_id":3}`,
+	}, "\n") + "\n"
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "mixed.ndjson")
+	outputPath := filepath.Join(dir, "canonical.ndjson")
+	if err := os.WriteFile(inputPath, []byte(input), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", inputPath, err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if got, want := runCombine([]string{"-log", inputPath, "-out", outputPath}, &stdout, &stderr), 0; got != want {
+		t.Fatalf("runCombine(unmatched observations) = %d, want %d; stderr=%q", got, want, stderr.String())
+	}
+	wantStdout := "combine complete starts=1 ends=1 records=0 connections_closed=0\n"
+	if stdout.String() != wantStdout {
+		t.Errorf("runCombine(unmatched observations) stdout = %q, want %q", stdout.String(), wantStdout)
+	}
+	wantStderr := "combine: warning: discarded unmatched observations starts=1 ends=1\n"
+	if stderr.String() != wantStderr {
+		t.Errorf("runCombine(unmatched observations) stderr = %q, want %q", stderr.String(), wantStderr)
+	}
+	if output := mustReadFile(t, outputPath); len(output) != 0 {
+		t.Errorf("runCombine(unmatched observations) output = %q, want empty", output)
+	}
+}
+
 func TestRunCombineSupportsLongOutputBasename(t *testing.T) {
 	dir := t.TempDir()
 	inputPath := filepath.Join(dir, "mixed.ndjson")
@@ -305,10 +334,12 @@ func TestRunCombineErrorPreservesExistingOutput(t *testing.T) {
 		`{"type":"DownstreamStart","node":"envoy-a","connection_id":7,"request_id":"request-a","timestamp":"2026-08-21T10:00:00Z","method":"GET","scheme":"https","authority":"example.test","path":"/","protocol":"HTTP/1.1","stream_id":2}`,
 		`{"type":"DownstreamEnd","node":"envoy-a","connection_id":7,"request_id":"request-a","timestamp":"2026-08-21T10:00:00Z","method":"GET","scheme":"https","authority":"example.test","path":"/","protocol":"HTTP/1.1","stream_id":2,"response_code":200,"response_flags":"-"}`,
 	}, "\n") + "\n"
+	start := strings.Split(mixedCapture(), "\n")[0]
+	duplicateStart := start + "\n" + start + "\n"
 	tests := []struct {
 		name, input, wantError string
 	}{
-		{name: "unmatched_pair", input: strings.Split(mixedCapture(), "\n")[0] + "\n", wantError: "unmatched DownstreamStart"},
+		{name: "duplicate_start", input: duplicateStart, wantError: "duplicate DownstreamStart"},
 		{name: "invalid_http11_stream_id", input: invalidHTTP11StreamID, wantError: "HTTP/1.1 observations must omit stream_id"},
 	}
 	for _, test := range tests {

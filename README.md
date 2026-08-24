@@ -157,9 +157,10 @@ combined logs to preserve replay fidelity.** A file containing any
 
 `kubectl logs` can combine access logs with Envoy process logs. `combine`
 ignores blank lines and lines that do not begin with `{`; a malformed JSON line
-that does begin with `{` is fatal. `-gzip` and `-zstd` select compressed input.
-Combined output is always plain NDJSON and is installed atomically only after
-every Start/End pair validates.
+that does begin with `{` is fatal. At EOF, it discards unmatched Start or End
+observations and writes their counts as a warning to stderr. `-gzip` and `-zstd`
+select compressed input. Combined output is always plain NDJSON and is installed
+atomically only after every complete Start/End pair validates.
 
 The example captures request headers and the response status, but not request
 or response bodies or response headers. Consequently, it supports status

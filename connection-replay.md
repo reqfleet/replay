@@ -79,7 +79,7 @@ go run ./cmd/replay combine \
 ```
 
 `combine` accepts plain, gzip, or zstd input. Output is always plain NDJSON and
-is atomically installed only after the complete capture validates.
+is atomically installed only after the input and every complete pair validate.
 
 ### Strict request pairing
 
@@ -91,9 +91,10 @@ The pair key is:
 
 `request_id` establishes identity, not order. The combiner never infers a pair
 from timestamps, methods, paths, FIFO position, or response completion order.
-It accepts End before Start because collection can reorder observations, but it
-rejects missing IDs, duplicate sides, shared-field conflicts, and unmatched
-observations.
+It accepts End before Start because collection can reorder observations. Missing
+IDs, duplicate sides, shared-field conflicts, and connection-identity conflicts
+are fatal. Unmatched observations at EOF are discarded, and `combine` warns
+with the discarded Start and End counts.
 
 Node, connection ID, request ID, timestamp, method, authority, path, and
 protocol must agree. Nonempty scheme and nonzero stream ID values must also
@@ -227,11 +228,12 @@ remain monotonic within each connection.
 The combined workflow preserves exact pairing and recorded request-start order
 when both observations carry the same stable request ID. It preserves
 Start-preferred request metadata, End-side status, headers, body, duration, and
-response flags. It confirms connection termination only when an End contains
-exact `DC`; otherwise termination is inferred at EOF.
+response flags. It confirms connection termination only when a paired End
+contains exact `DC`; otherwise termination is inferred at EOF.
 
-Missing, duplicate, conflicting, or unmatched paired observations are fatal.
-There is no heuristic fallback and no partial canonical output.
+Missing, duplicate, and conflicting paired observations are fatal. Unmatched
+observations are discarded without heuristic pairing or partial canonical
+events, and their counts are reported in the command warning.
 
 The direct End-only workflow preserves only completion-record append order and
 the fields available on each End. It cannot validate pairs, recover Start

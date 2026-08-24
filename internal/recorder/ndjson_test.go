@@ -397,6 +397,44 @@ func TestCombineStreamRejectsInvalidPayloads(t *testing.T) {
 	}
 }
 
+func TestCombineStreamDiscardsUnmatchedObservations(t *testing.T) {
+	unmatchedEnd := fixture(downstreamEnd, 1, "unmatched-end", "/unmatched-end")
+	unmatchedEnd.ResponseFlags = "DC"
+	completeStart := fixture(downstreamStart, 1, "complete", "/complete")
+	unmatchedStart := fixture(downstreamStart, 1, "unmatched-start", "/unmatched-start")
+	completeEnd := fixture(downstreamEnd, 1, "complete", "/complete")
+
+	summary, output := combineCapture(t, observationsNDJSON(
+		t,
+		unmatchedEnd,
+		completeStart,
+		unmatchedStart,
+		completeEnd,
+	))
+	wantSummary := CombineSummary{
+		Starts:          2,
+		Ends:            2,
+		Records:         1,
+		DiscardedStarts: 1,
+		DiscardedEnds:   1,
+	}
+	if summary != wantSummary {
+		t.Errorf("CombineStream(unmatched observations) summary = %+v, want %+v", summary, wantSummary)
+	}
+	if got := strings.Count(output, `"type":"request"`); got != 1 {
+		t.Errorf("CombineStream(unmatched observations) request count = %d, want 1; output=%q", got, output)
+	}
+	if !strings.Contains(output, `"request_id":"complete"`) {
+		t.Errorf("CombineStream(unmatched observations) output = %q, want complete request", output)
+	}
+	if strings.Contains(output, "unmatched-") {
+		t.Errorf("CombineStream(unmatched observations) output = %q, want unmatched observations discarded", output)
+	}
+	if strings.Contains(output, `"type":"connection_close"`) {
+		t.Errorf("CombineStream(unmatched DC End) output = %q, want no connection close", output)
+	}
+}
+
 func TestCombineStreamRejectsInvalidObservations(t *testing.T) {
 	validStart := fixture(downstreamStart, 1, "request-a", "/")
 	validEnd := fixture(downstreamEnd, 1, "request-a", "/")
@@ -437,8 +475,6 @@ func TestCombineStreamRejectsInvalidObservations(t *testing.T) {
 		{name: "reused_start", input: reusedStart},
 		{name: "shared_field_mismatch", input: observationsNDJSON(t, validStart, mismatchEnd)},
 		{name: "connection_identity_mismatch", input: observationsNDJSON(t, validStart, otherConnectionEnd)},
-		{name: "unmatched_start", input: observationsNDJSON(t, validStart)},
-		{name: "unmatched_end", input: observationsNDJSON(t, validEnd)},
 		{name: "empty_flag_token", input: observationsNDJSON(t, validStart, emptyFlagEnd)},
 		{name: "array_flags", input: observationsNDJSON(t, validStart, arrayFlagEnd)},
 		{name: "missing_response_flags", input: observationsNDJSON(t, validStart, missingFlagEnd)},
@@ -514,6 +550,7 @@ func TestCombineStreamReturnsZeroSummaryOnSpoolFailure(t *testing.T) {
 
 func TestObservationErrorIncludesOriginalLine(t *testing.T) {
 	start := fixture(downstreamStart, 1, "request-a", "/")
+	start.RequestID = "-"
 	input := fmt.Sprintf("process\n\n%s", observationsNDJSON(t, start))
 	_, err := CombineStream(strings.NewReader(input), &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "line 3") {

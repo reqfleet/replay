@@ -24,6 +24,8 @@ type CombineSummary struct {
 	Starts            int64
 	Ends              int64
 	Records           int64
+	DiscardedStarts   int64
+	DiscardedEnds     int64
 	ConnectionsClosed int64
 }
 
@@ -104,14 +106,15 @@ type spoolRef struct {
 }
 
 type pairState struct {
-	startSeen bool
-	endSeen   bool
-	complete  bool
-	startLine int
-	endLine   int
-	startRef  spoolRef
-	endRef    spoolRef
-	ordinal   int
+	startSeen        bool
+	endSeen          bool
+	complete         bool
+	connectionClosed bool
+	startLine        int
+	endLine          int
+	startRef         spoolRef
+	endRef           spoolRef
+	ordinal          int
 }
 
 type outputRecord struct {
@@ -375,7 +378,7 @@ func completePair(spool spoolCodec, state *pairState, output []outputRecord, sta
 	return nil
 }
 
-func unmatchedError(order []pairKey, pairs map[pairKey]*pairState) error {
+func connectionIdentityError(order []pairKey, pairs map[pairKey]*pairState) error {
 	for _, key := range order {
 		state := pairs[key]
 		if state.startSeen == state.endSeen {
@@ -393,10 +396,6 @@ func unmatchedError(order []pairKey, pairs map[pairKey]*pairState) error {
 				return fmt.Errorf("line %d: connection identity for request_id %q conflicts with DownstreamEnd on line %d", other.startLine, key.RequestID, state.endLine)
 			}
 		}
-		if state.startSeen {
-			return fmt.Errorf("line %d: unmatched DownstreamStart for request_id %q", state.startLine, key.RequestID)
-		}
-		return fmt.Errorf("line %d: unmatched DownstreamEnd for request_id %q", state.endLine, key.RequestID)
 	}
 	return nil
 }
@@ -405,7 +404,6 @@ func combineWithSpool(r io.Reader, w io.Writer, spool spoolCodec) (CombineSummar
 	pairs := make(map[pairKey]*pairState)
 	pairOrder := make([]pairKey, 0)
 	output := make([]outputRecord, 0)
-	closedConnections := make(map[model.ConnectionKey]struct{})
 	summary := CombineSummary{}
 
 	err := parser.ScanObjects(r, func(line int, object []byte) error {
@@ -455,9 +453,7 @@ func combineWithSpool(r io.Reader, w io.Writer, spool spoolCodec) (CombineSummar
 			state.endSeen = true
 			state.endLine = line
 			summary.Ends++
-			if containsExactFlag(current.Event.ResponseFlags, "DC") {
-				closedConnections[key.Connection] = struct{}{}
-			}
+			state.connectionClosed = containsExactFlag(current.Event.ResponseFlags, "DC")
 			if state.startSeen {
 				var start observation
 				if err := spool.read(state.startRef, &start); err != nil {
@@ -476,12 +472,26 @@ func combineWithSpool(r io.Reader, w io.Writer, spool spoolCodec) (CombineSummar
 	if err != nil {
 		return CombineSummary{}, err
 	}
-	if err := unmatchedError(pairOrder, pairs); err != nil {
+	if err := connectionIdentityError(pairOrder, pairs); err != nil {
 		return CombineSummary{}, err
 	}
-	if summary.Starts != summary.Ends || summary.Starts != int64(len(output)) {
-		return CombineSummary{}, fmt.Errorf("combine invariant violated: starts=%d ends=%d records=%d", summary.Starts, summary.Ends, len(output))
+
+	completeOutput := output[:0]
+	closedConnections := make(map[model.ConnectionKey]struct{})
+	for _, item := range output {
+		state := pairs[item.key]
+		if !state.complete {
+			continue
+		}
+		completeOutput = append(completeOutput, item)
+		if state.connectionClosed {
+			closedConnections[item.key.Connection] = struct{}{}
+		}
 	}
+	output = completeOutput
+	summary.Records = int64(len(output))
+	summary.DiscardedStarts = summary.Starts - summary.Records
+	summary.DiscardedEnds = summary.Ends - summary.Records
 
 	lastOrdinal := make(map[model.ConnectionKey]int, len(closedConnections))
 	for ordinal, item := range output {
@@ -491,9 +501,6 @@ func combineWithSpool(r io.Reader, w io.Writer, spool spoolCodec) (CombineSummar
 	}
 	encoder := json.NewEncoder(w)
 	for ordinal, item := range output {
-		if !pairs[item.key].complete {
-			return CombineSummary{}, fmt.Errorf("combine invariant violated: request_id %q is incomplete", item.key.RequestID)
-		}
 		if _, err := io.CopyN(w, io.NewSectionReader(spool.file, item.record.Offset, item.record.Length), item.record.Length); err != nil {
 			return CombineSummary{}, fmt.Errorf("write combined request %q: %w", item.key.RequestID, err)
 		}
@@ -509,13 +516,13 @@ func combineWithSpool(r io.Reader, w io.Writer, spool spoolCodec) (CombineSummar
 		}
 	}
 
-	summary.Records = int64(len(output))
 	summary.ConnectionsClosed = int64(len(closedConnections))
 	return summary, nil
 }
 
 // CombineStream joins mixed Envoy DownstreamStart and DownstreamEnd observations
-// into canonical replay events ordered by the Start observations.
+// into canonical replay events ordered by the Start observations. Unmatched
+// observations at EOF are discarded and counted in the returned summary.
 func CombineStream(r io.Reader, w io.Writer) (summary CombineSummary, returnErr error) {
 	spoolFile, err := os.CreateTemp("", "replay-combine-*.ndjson")
 	if err != nil {

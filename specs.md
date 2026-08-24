@@ -101,8 +101,10 @@ position, or response-completion order. A pair MUST agree on `node`,
 observations, nonzero `stream_id` values MUST agree; a value omitted by one side
 is filled from the other.
 
-Duplicate, conflicting, malformed, unsupported, missing-ID, and unmatched
-observations are fatal. No partial output is installed. A file containing
+Duplicate, conflicting, malformed, unsupported, and missing-ID observations are
+fatal. Unmatched observations at EOF are discarded instead of producing partial
+canonical events. A Start and End with the same `request_id` but different
+connection identities remain a fatal conflict. A file containing
 `DownstreamStart` or both observation sides is combiner input and MUST NOT be
 sent directly to replay.
 
@@ -117,6 +119,16 @@ replay combine -log mixed.ndjson -out canonical.ndjson
 `-gzip` and `-zstd` select compressed input and are mutually exclusive. Output
 is plain NDJSON.
 
+When at least one unmatched observation is discarded, the command succeeds and
+writes one warning to stderr:
+
+```text
+combine: warning: discarded unmatched observations starts=<N> ends=<N>
+```
+
+The counts cover discarded `DownstreamStart` and `DownstreamEnd` observations,
+respectively. Complete pairs are still emitted normally.
+
 The combiner emits exactly one canonical `request` per pair. Global output
 order is the order of `DownstreamStart` observations, independent of End
 arrival or completion order. The request uses Start identity, timestamp, and
@@ -125,7 +137,7 @@ End. End supplies response code, duration, response headers, response body, and
 tokenized response flags. Serialized `sequence` is omitted; the parser derives
 it deterministically from canonical order for each connection key.
 
-If any End for a connection contains the exact `DC` token, the combiner emits
+If any paired End for a connection contains the exact `DC` token, the combiner emits
 one `connection_close` immediately after that connection's final canonical
 request in global Start order. It does not close at the DC-bearing request's
 position because later-started HTTP/2 streams may already belong to the same
