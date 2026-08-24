@@ -119,6 +119,11 @@ replay combine -log mixed.ndjson -out canonical.ndjson
 `-gzip` and `-zstd` select compressed input and are mutually exclusive. Output
 is plain NDJSON.
 
+Each encoded input or canonical output line is limited to 16 MiB. A complete
+pair whose merged canonical record exceeds that limit is fatal, even when its
+individual Start and End lines fit. The command does not install or replace
+the output file after this validation failure.
+
 When at least one unmatched observation is discarded, the command succeeds and
 writes one warning to stderr:
 

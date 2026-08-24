@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	maxNDJSONLineBytes   = 16 * 1024 * 1024
+	// MaxNDJSONLineBytes is the maximum encoded line size accepted by ScanObjects.
+	MaxNDJSONLineBytes   = 16 * 1024 * 1024
 	downstreamEndWarning = "DownstreamEnd access logs are suitable only for quick verification because request order is not guaranteed; use combined logs to preserve replay fidelity"
 )
 
@@ -165,7 +166,7 @@ func ParseFileStream(path string, format string, handler func(model.Event) error
 // ignored. Object bytes are valid only until handler returns.
 func ScanObjects(r io.Reader, handler func(line int, object []byte) error) error {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 1024*1024), maxNDJSONLineBytes)
+	scanner.Buffer(make([]byte, 0, 1024*1024), MaxNDJSONLineBytes)
 
 	line := 0
 	for scanner.Scan() {

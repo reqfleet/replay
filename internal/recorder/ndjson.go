@@ -373,6 +373,14 @@ func completePair(spool spoolCodec, state *pairState, output []outputRecord, sta
 	if err != nil {
 		return fmt.Errorf("spool combined request %q: %w", combined.RequestID, err)
 	}
+	if record.Length > parser.MaxNDJSONLineBytes {
+		return fmt.Errorf(
+			"combined request %q encodes to %d bytes, exceeds %d-byte canonical record limit",
+			combined.RequestID,
+			record.Length,
+			parser.MaxNDJSONLineBytes,
+		)
+	}
 	output[state.ordinal].record = record
 	state.complete = true
 	return nil

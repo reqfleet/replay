@@ -17,6 +17,7 @@ import (
 	"github.com/reqfleet/replay/internal/config"
 	"github.com/reqfleet/replay/internal/engine"
 	"github.com/reqfleet/replay/internal/metrics"
+	"github.com/reqfleet/replay/internal/parser"
 )
 
 func mixedCapture() string {
@@ -365,6 +366,52 @@ func TestRunCombineErrorPreservesExistingOutput(t *testing.T) {
 				t.Errorf("runCombine(%s) stderr = %q, want %q", test.name, stderr.String(), test.wantError)
 			}
 		})
+	}
+}
+
+func TestRunCombineRejectsCanonicalRecordOverParserLimit(t *testing.T) {
+	bodyContent := strings.Repeat("AAAA", parser.MaxNDJSONLineBytes/8)
+	decodedBodyBytes := len(bodyContent) / 4 * 3
+	start := fmt.Sprintf(
+		`{"type":"DownstreamStart","node":"envoy-a","connection_id":7,"request_id":"request-a","timestamp":"2026-08-21T10:00:00Z","method":"POST","scheme":"https","authority":"example.test","path":"/","protocol":"HTTP/2","stream_id":1,"body":{"encoding":"base64","content":"%s","size_bytes":%d}}`,
+		bodyContent,
+		decodedBodyBytes,
+	)
+	end := fmt.Sprintf(
+		`{"type":"DownstreamEnd","node":"envoy-a","connection_id":7,"request_id":"request-a","timestamp":"2026-08-21T10:00:00Z","method":"POST","scheme":"https","authority":"example.test","path":"/","protocol":"HTTP/2","stream_id":1,"response_code":200,"response_flags":"-","response_body":{"encoding":"base64","content":"%s","size_bytes":%d}}`,
+		bodyContent,
+		decodedBodyBytes,
+	)
+	for name, line := range map[string]string{"start": start, "end": end} {
+		if got := len(line) + 1; got > parser.MaxNDJSONLineBytes {
+			t.Fatalf("%s observation line size = %d, want at most %d", name, got, parser.MaxNDJSONLineBytes)
+		}
+	}
+
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "input.ndjson")
+	outputPath := filepath.Join(dir, "canonical.ndjson")
+	if err := os.WriteFile(inputPath, []byte(start+"\n"+end+"\n"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", inputPath, err)
+	}
+	const existingOutput = "existing output\n"
+	if err := os.WriteFile(outputPath, []byte(existingOutput), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", outputPath, err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if got, want := runCombine([]string{"-log", inputPath, "-out", outputPath}, &stdout, &stderr), 2; got != want {
+		t.Errorf("runCombine(oversized canonical record) = %d, want %d", got, want)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("runCombine(oversized canonical record) stdout = %q, want empty", stdout.String())
+	}
+	wantError := fmt.Sprintf("exceeds %d-byte canonical record limit", parser.MaxNDJSONLineBytes)
+	if !strings.Contains(stderr.String(), wantError) {
+		t.Errorf("runCombine(oversized canonical record) stderr = %q, want %q", stderr.String(), wantError)
+	}
+	if got := mustReadFile(t, outputPath); !bytes.Equal(got, []byte(existingOutput)) {
+		t.Errorf("output after oversized canonical record changed: size=%d, want preserved %q", len(got), existingOutput)
 	}
 }
 
