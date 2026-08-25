@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -355,6 +356,22 @@ func validateDownstreamEnd(line int, event model.Event) error {
 	return nil
 }
 
+func validateBodyEncoding(line int, field string, body *model.Body) error {
+	if body == nil {
+		return nil
+	}
+	if body.Encoding != "base64" {
+		return fmt.Errorf("line %d: %s encoding must be %q", line, field, "base64")
+	}
+	if _, err := io.Copy(
+		io.Discard,
+		base64.NewDecoder(base64.StdEncoding, strings.NewReader(body.Content)),
+	); err != nil {
+		return fmt.Errorf("line %d: decode %s content: %w", line, field, err)
+	}
+	return nil
+}
+
 // ParseStream reads canonical replay events or direct DownstreamEnd access logs
 // from r and invokes handler for each parsed event. The handler may return an
 // error to stop processing early.
@@ -403,6 +420,15 @@ func ParseStreamWithOptions(r io.Reader, options StreamOptions, handler func(mod
 			}
 		default:
 			return fmt.Errorf("line %d: unsupported input family", line)
+		}
+
+		if event.Type == model.EventRequest {
+			if err := validateBodyEncoding(line, "body", event.Body); err != nil {
+				return err
+			}
+			if err := validateBodyEncoding(line, "response_body", event.ResponseBody); err != nil {
+				return err
+			}
 		}
 
 		if event.Type == model.EventRequest {

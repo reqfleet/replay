@@ -68,6 +68,46 @@ func TestValidateStreamRejectsMixedInputFamilies(t *testing.T) {
 	}
 }
 
+func TestValidateStreamRejectsInvalidBodyEncoding(t *testing.T) {
+	canonicalPrefix := strings.TrimSuffix(canonicalRequest, "}\n")
+	tests := []struct {
+		name   string
+		suffix string
+		want   string
+	}{
+		{
+			name:   "request_encoding",
+			suffix: `,"body":{"encoding":"plain","content":"YQ==","size_bytes":1}`,
+			want:   `body encoding must be "base64"`,
+		},
+		{
+			name:   "request_content",
+			suffix: `,"body":{"encoding":"base64","content":"%%%","size_bytes":3}`,
+			want:   "decode body content",
+		},
+		{
+			name:   "response_encoding",
+			suffix: `,"response_body":{"encoding":"plain","content":"YQ==","size_bytes":1}`,
+			want:   `response_body encoding must be "base64"`,
+		},
+		{
+			name:   "response_content",
+			suffix: `,"response_body":{"encoding":"base64","content":"%%%","size_bytes":3}`,
+			want:   "decode response_body content",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := canonicalPrefix + test.suffix + "}\n"
+			err := validation.ValidateStream(strings.NewReader(input), validation.FormatNDJSON)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Errorf("ValidateStream(%s) error = %v, want error containing %q", test.name, err, test.want)
+			}
+		})
+	}
+}
+
 func TestUnsupportedInputFormatDoesNotRead(t *testing.T) {
 	const format = validation.InputFormat(255)
 	tests := []struct {
