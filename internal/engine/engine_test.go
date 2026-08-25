@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -18,7 +17,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +31,7 @@ import (
 	"github.com/reqfleet/replay/internal/config"
 	"github.com/reqfleet/replay/internal/metrics"
 	"github.com/reqfleet/replay/internal/model"
+	"github.com/reqfleet/replay/internal/sharding"
 )
 
 // runReplay streams the provided events into the engine's ReplayStream and
@@ -1425,7 +1424,7 @@ func TestReplayRespectsShardAssignment(t *testing.T) {
 				Path:      "/"},
 			model.Event{Type: model.EventConnectionClose, ConnectionID: conn},
 		)
-		if connectionBelongsToShard(model.ConnectionKey{ConnectionID: conn}, cfg.Replay.Sharding.ShardIndex, cfg.Replay.Sharding.ShardCount) {
+		if sharding.ConnectionBelongsToShard(model.ConnectionKey{ConnectionID: conn}, cfg.Replay.Sharding.ShardIndex, cfg.Replay.Sharding.ShardCount) {
 			expectedSent++
 		}
 	}
@@ -1451,7 +1450,7 @@ func TestRouteEventsSkipsNonShardEventsBeforeLifecycleTracking(t *testing.T) {
 	connKey := model.ConnectionKey{}
 	for connectionID := 1; connectionID <= 128; connectionID++ {
 		candidate := model.ConnectionKey{ConnectionID: connectionID}
-		if !connectionBelongsToShard(candidate, cfg.Replay.Sharding.ShardIndex, cfg.Replay.Sharding.ShardCount) {
+		if !sharding.ConnectionBelongsToShard(candidate, cfg.Replay.Sharding.ShardIndex, cfg.Replay.Sharding.ShardCount) {
 			connKey = candidate
 			break
 		}
@@ -1595,36 +1594,6 @@ func TestReplayRampupStagesWorkerActivation(t *testing.T) {
 	}
 	if got, want := result.summary.RequestsSent, int64(3); got != want {
 		t.Fatalf("summary.RequestsSent = %d, want %d", got, want)
-	}
-}
-
-func TestConnectionBelongsToShardUsesNode(t *testing.T) {
-	baseKey := model.ConnectionKey{ConnectionID: 1}
-	baseShard := connectionBelongsToShard(baseKey, 0, 2)
-	for i := range 256 {
-		candidate := model.ConnectionKey{Node: fmt.Sprintf("envoy-%d", i), ConnectionID: 1}
-		if connectionBelongsToShard(candidate, 0, 2) != baseShard {
-			return
-		}
-	}
-	t.Fatal("expected node to affect shard assignment")
-}
-
-func TestConnectionBelongsToShardSupportsFullHashSpace(t *testing.T) {
-	if strconv.IntSize < 64 {
-		t.Skip("int cannot represent the full 32-bit hash space")
-	}
-
-	const shardIndex = 1803821790
-	shardCount := int(uint64(1) << 32)
-	connectionKey := model.ConnectionKey{ConnectionID: 1}
-	if !connectionBelongsToShard(connectionKey, shardIndex, shardCount) {
-		t.Errorf(
-			"connectionBelongsToShard(%v, %d, %d) = false, want true",
-			connectionKey,
-			shardIndex,
-			shardCount,
-		)
 	}
 }
 

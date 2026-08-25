@@ -24,6 +24,11 @@ const (
 	downstreamEndWarning = "DownstreamEnd access logs are suitable only for quick verification because request order is not guaranteed; use combined logs to preserve replay fidelity"
 )
 
+// StreamOptions controls optional ParseStreamWithOptions behavior.
+type StreamOptions struct {
+	WarnDownstreamEnd bool
+}
+
 // ParseObservationResponseFlags decodes Envoy's comma-separated response flag field.
 func ParseObservationResponseFlags(line int, raw json.RawMessage) ([]string, error) {
 	if len(raw) == 0 {
@@ -354,6 +359,12 @@ func validateDownstreamEnd(line int, event model.Event) error {
 // from r and invokes handler for each parsed event. The handler may return an
 // error to stop processing early.
 func ParseStream(r io.Reader, handler func(model.Event) error) error {
+	return ParseStreamWithOptions(r, StreamOptions{WarnDownstreamEnd: true}, handler)
+}
+
+// ParseStreamWithOptions reads the same input as ParseStream with configurable
+// parser behavior.
+func ParseStreamWithOptions(r io.Reader, options StreamOptions, handler func(model.Event) error) error {
 	states := make(map[model.ConnectionKey]*connectionSequenceState)
 	stateForConnection := func(connectionKey model.ConnectionKey) *connectionSequenceState {
 		state := states[connectionKey]
@@ -426,7 +437,7 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 
 		if inputFamily == streamInputUnknown {
 			inputFamily = recordFamily
-			if recordFamily == streamInputDownstreamEnd {
+			if recordFamily == streamInputDownstreamEnd && options.WarnDownstreamEnd {
 				slog.Warn(downstreamEndWarning)
 			}
 		}

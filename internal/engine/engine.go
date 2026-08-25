@@ -6,10 +6,8 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log/slog"
 	"math"
@@ -26,6 +24,7 @@ import (
 	"github.com/reqfleet/replay/internal/config"
 	"github.com/reqfleet/replay/internal/metrics"
 	"github.com/reqfleet/replay/internal/model"
+	"github.com/reqfleet/replay/internal/sharding"
 )
 
 type RunOutcome string
@@ -286,7 +285,7 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 	for ev := range events {
 
 		connKey := model.ConnectionKey{Node: ev.Node, ConnectionID: ev.ConnectionID}
-		if !connectionBelongsToShard(connKey, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
+		if !sharding.ConnectionBelongsToShard(connKey, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
 			continue
 		}
 
@@ -982,19 +981,6 @@ func groupRequestsByStream(requests []model.Event) map[int][]model.Event {
 		grouped[streamID] = append(grouped[streamID], req)
 	}
 	return grouped
-}
-
-func connectionBelongsToShard(connectionKey model.ConnectionKey, shardIndex, shardCount int) bool {
-	if shardCount <= 1 {
-		return true
-	}
-	hasher := fnv.New32a()
-	var buf [8]byte
-	_, _ = hasher.Write([]byte(connectionKey.Node))
-	_, _ = hasher.Write([]byte{0})
-	binary.LittleEndian.PutUint64(buf[:], uint64(connectionKey.ConnectionID))
-	_, _ = hasher.Write(buf[:])
-	return uint64(hasher.Sum32())%uint64(shardCount) == uint64(shardIndex)
 }
 
 func (e *Engine) paceTimestamp(ctx context.Context, clock *pacingClock, currentRaw string) error {
