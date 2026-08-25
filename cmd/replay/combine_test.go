@@ -18,6 +18,7 @@ import (
 	"github.com/reqfleet/replay/internal/engine"
 	"github.com/reqfleet/replay/internal/metrics"
 	"github.com/reqfleet/replay/internal/parser"
+	"github.com/reqfleet/replay/internal/recorder"
 )
 
 func mixedCapture() string {
@@ -327,6 +328,39 @@ func TestCombineFilesCancellationCleansTemporaryFiles(t *testing.T) {
 				t.Errorf("combineFiles(%s) files after cancellation = %v, want only %q", test.name, leftovers, filepath.Base(inputPath))
 			}
 		})
+	}
+}
+
+type cancelOnFirstWrite struct {
+	cancel context.CancelFunc
+	writes int
+}
+
+func (w *cancelOnFirstWrite) Write(data []byte) (int, error) {
+	w.writes++
+	if w.writes == 1 {
+		w.cancel()
+	}
+	return len(data), nil
+}
+
+func TestContextWriterStopsCombineOutputAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	output := &cancelOnFirstWrite{cancel: cancel}
+
+	summary, err := recorder.CombineStream(
+		strings.NewReader(mixedCapture()),
+		contextWriter{ctx: ctx, writer: output},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("recorder.CombineStream(canceled output) error = %v, want context.Canceled", err)
+	}
+	if summary != (recorder.CombineSummary{}) {
+		t.Errorf("recorder.CombineStream(canceled output) summary = %+v, want zero", summary)
+	}
+	if got, want := output.writes, 1; got != want {
+		t.Errorf("recorder.CombineStream(canceled output) writes = %d, want %d", got, want)
 	}
 }
 

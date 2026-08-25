@@ -149,6 +149,18 @@ func joinCleanupError(primary, cleanup error) error {
 	return fmt.Errorf("%w; %w", primary, cleanup)
 }
 
+type contextWriter struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+func (w contextWriter) Write(data []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return w.writer.Write(data)
+}
+
 func combineFiles(ctx context.Context, inputPath, outputPath, format string) (summary recorder.CombineSummary, returnErr error) {
 	same, err := sameInputAndOutput(inputPath, outputPath)
 	if err != nil {
@@ -223,7 +235,7 @@ func combineFiles(ctx context.Context, inputPath, outputPath, format string) (su
 		return recorder.CombineSummary{}, fmt.Errorf("set temporary output permissions: %w", err)
 	}
 
-	summary, err = recorder.CombineStream(input, temporary)
+	summary, err = recorder.CombineStream(input, contextWriter{ctx: ctx, writer: temporary})
 	finishCancelInterrupt()
 	if err := ctx.Err(); err != nil {
 		return recorder.CombineSummary{}, fmt.Errorf("canceled: %w", err)
