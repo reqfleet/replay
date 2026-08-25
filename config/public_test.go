@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,33 @@ metrics:
 	}
 	if got.Metrics.Namespace != "embedded" {
 		t.Errorf("config.Parse(content).Metrics.Namespace = %q, want %q", got.Metrics.Namespace, "embedded")
+	}
+}
+
+func TestParseEmptyContentUsesDefaults(t *testing.T) {
+	got, err := config.Parse(nil)
+	if err != nil {
+		t.Fatalf("config.Parse(nil) error: %v", err)
+	}
+	want := config.Default()
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("config.Parse(nil) = %+v, want Default() %+v", got, want)
+	}
+}
+
+func TestParseWithOverridesAppliesBeforeValidation(t *testing.T) {
+	content := []byte("target:\n  disallow_recorded_targets: true\n")
+	got, err := config.ParseWithOverrides(content, func(cfg *config.Config) {
+		cfg.Target.OverrideURL = "https://override.example.test"
+	})
+	if err != nil {
+		t.Fatalf("config.ParseWithOverrides(content, apply) error: %v", err)
+	}
+	if got.Target.OverrideURL != "https://override.example.test" {
+		t.Errorf("config.ParseWithOverrides(content, apply).Target.OverrideURL = %q, want %q", got.Target.OverrideURL, "https://override.example.test")
+	}
+	if !got.Target.DisallowRecordedTargets {
+		t.Error("config.ParseWithOverrides(content, apply).Target.DisallowRecordedTargets = false, want true")
 	}
 }
 

@@ -213,9 +213,20 @@ func Default() Config {
 // Parse overlays YAML content onto Default and validates the resulting
 // configuration.
 func Parse(content []byte) (Config, error) {
+	return ParseWithOverrides(content, nil)
+}
+
+// ParseWithOverrides overlays YAML content onto Default, applies higher-
+// precedence overrides, and validates the resulting configuration.
+func ParseWithOverrides(content []byte, apply func(*Config)) (Config, error) {
 	cfg := Default()
-	if err := yaml.Unmarshal(content, &cfg); err != nil {
-		return Config{}, fmt.Errorf("parse yaml: %w", err)
+	if len(content) > 0 {
+		if err := yaml.Unmarshal(content, &cfg); err != nil {
+			return Config{}, fmt.Errorf("parse yaml: %w", err)
+		}
+	}
+	if apply != nil {
+		apply(&cfg)
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -223,17 +234,23 @@ func Parse(content []byte) (Config, error) {
 	return cfg, nil
 }
 
-// Load reads, parses, and validates path. An empty path returns Default.
+// Load reads, parses, and validates path. An empty path uses Default.
 func Load(path string) (Config, error) {
+	return LoadWithOverrides(path, nil)
+}
+
+// LoadWithOverrides reads path, applies higher-precedence overrides to the
+// decoded configuration, and validates the result. An empty path uses Default.
+func LoadWithOverrides(path string, apply func(*Config)) (Config, error) {
 	if path == "" {
-		return Default(), nil
+		return ParseWithOverrides(nil, apply)
 	}
 
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
-	return Parse(content)
+	return ParseWithOverrides(content, apply)
 }
 
 func (c Config) Validate() error {

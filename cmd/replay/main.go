@@ -20,6 +20,31 @@ import (
 	"github.com/reqfleet/replay/internal/parser"
 )
 
+type runtimeOverrides struct {
+	overrideURL             string
+	dryRun                  bool
+	disallowRecordedTargets bool
+	verbose                 bool
+}
+
+func resolveConfig(path string, overrides runtimeOverrides) (config.Config, error) {
+	return config.LoadWithOverrides(path, func(cfg *config.Config) {
+		cfg.ApplyEnv()
+		if overrides.dryRun {
+			cfg.Replay.DryRun = true
+		}
+		if overrides.overrideURL != "" {
+			cfg.Target.OverrideURL = overrides.overrideURL
+		}
+		if overrides.disallowRecordedTargets {
+			cfg.Target.DisallowRecordedTargets = true
+		}
+		if overrides.verbose {
+			cfg.Replay.Verbose = true
+		}
+	})
+}
+
 func exitCodeForSummary(summary engine.Summary, cfg config.Config) int {
 	switch summary.Outcome {
 	case engine.RunSuccess:
@@ -180,37 +205,17 @@ func run() int {
 		slog.Error("cannot specify both -zstd and -gzip")
 		return 2
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, err := resolveConfig(*configPath, runtimeOverrides{
+		overrideURL:             *overrideFlag,
+		dryRun:                  *dryRunFlag,
+		disallowRecordedTargets: *disallowRecordedTargets,
+		verbose:                 *verboseFlag,
+	})
 	if err != nil {
-		slog.Error("load config", "error", err)
-		return 2
-	}
-	// Apply environment overrides (env > YAML)
-	cfg.ApplyEnv()
-	if err := cfg.Validate(); err != nil {
-		slog.Error("validate config", "error", err)
+		slog.Error("resolve config", "error", err)
 		return 2
 	}
 	slog.Info("resolved metric labels", cfg.Metrics.CommonLabelAttrs()...)
-	// Apply CLI overrides with higher precedence for safety-related flags
-	if *dryRunFlag {
-		cfg.Replay.DryRun = true
-	}
-	if *overrideFlag != "" {
-		cfg.Target.OverrideURL = *overrideFlag
-	}
-	if *disallowRecordedTargets {
-		cfg.Target.DisallowRecordedTargets = true
-	}
-	if *verboseFlag {
-		cfg.Replay.Verbose = true
-	}
-
-	if _, err := cfg.Target.ParseURL(); err != nil {
-		slog.Error("validate target override", "error", err)
-		return 2
-	}
-
 	registry := metrics.New(cfg.Metrics)
 	metricLabelValues := cfg.Metrics.CommonLabelValues()
 	registry.SeedEngineLabels(metricLabelValues)
