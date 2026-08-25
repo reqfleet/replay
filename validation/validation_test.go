@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -208,6 +209,24 @@ func TestSummarizeStreamWithShardingRejectsInvalidParametersBeforeReading(t *tes
 				)
 			}
 		})
+	}
+}
+
+func TestSummarizeStreamWithShardingRejectsShardCountAboveHashSpace(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("int cannot represent a shard count above the FNV-32 hash space")
+	}
+
+	const maxShardCount = uint64(1) << 32
+	shardCount := int(maxShardCount + 1)
+	reader := &trackingReader{}
+	_, err := validation.SummarizeStreamWithSharding(reader, validation.FormatNDJSON, 0, shardCount)
+	want := "invalid shardCount: 4294967297 (must be <= 4294967296)"
+	if err == nil || err.Error() != want {
+		t.Errorf("SummarizeStreamWithSharding(index=0, count=%d) error = %v, want %q", shardCount, err, want)
+	}
+	if reader.reads != 0 {
+		t.Errorf("SummarizeStreamWithSharding(index=0, count=%d) reads = %d, want 0", shardCount, reader.reads)
 	}
 }
 

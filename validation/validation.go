@@ -48,6 +48,13 @@ func SummarizeStreamWithSharding(r io.Reader, format InputFormat, shardIndex, sh
 	if shardCount <= 0 {
 		return Summary{}, fmt.Errorf("invalid shardCount: %d (must be > 0)", shardCount)
 	}
+	if uint64(shardCount) > sharding.MaxShardCount {
+		return Summary{}, fmt.Errorf(
+			"invalid shardCount: %d (must be <= %d)",
+			shardCount,
+			sharding.MaxShardCount,
+		)
+	}
 	if shardIndex < 0 || shardIndex >= shardCount {
 		return Summary{}, fmt.Errorf("invalid shardIndex: %d (must be within [0, %d))", shardIndex, shardCount)
 	}

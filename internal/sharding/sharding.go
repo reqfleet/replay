@@ -7,6 +7,9 @@ import (
 	"github.com/reqfleet/replay/internal/model"
 )
 
+// MaxShardCount is the number of distinct values in the FNV-32 hash space.
+const MaxShardCount = uint64(1) << 32
+
 // ConnectionBelongsToShard reports whether connectionKey is assigned to the
 // requested shard. Callers must validate shard parameters before calling.
 func ConnectionBelongsToShard(connectionKey model.ConnectionKey, shardIndex, shardCount int) bool {
