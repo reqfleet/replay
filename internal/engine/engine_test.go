@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1272,6 +1273,42 @@ func TestReplaySkipsMutationWithoutIdempotencyHeader(t *testing.T) {
 	}
 	if atomic.LoadInt64(&attempts) != 0 {
 		t.Fatalf("attempt count = %d, want 0", attempts)
+	}
+}
+
+func TestEffectiveRequestHeadersCanonicalizesAndCopies(t *testing.T) {
+	recorded := map[string][]string{
+		"x-trace":    {"one", "two"},
+		"X-Trace":    {"three"},
+		"empty":      {},
+		":authority": {"recorded.example"},
+	}
+
+	got := New(config.Default(), nil).effectiveRequestHeaders(recorded)
+	values := slices.Clone(got.Values("X-Trace"))
+	slices.Sort(values)
+	wantValues := []string{"one", "three", "two"}
+	if !slices.Equal(values, wantValues) {
+		t.Errorf("effectiveRequestHeaders(%v)[X-Trace] = %v, want %v", recorded, values, wantValues)
+	}
+	if _, ok := got["X-Trace"]; !ok {
+		t.Errorf("effectiveRequestHeaders(%v) lacks canonical X-Trace key", recorded)
+	}
+	for name := range got {
+		if name == "x-trace" {
+			t.Errorf("effectiveRequestHeaders(%v) retained non-canonical x-trace key", recorded)
+		}
+	}
+	if _, ok := got["Empty"]; ok {
+		t.Errorf("effectiveRequestHeaders(%v) retained empty-valued header", recorded)
+	}
+	if _, ok := got[":authority"]; ok {
+		t.Errorf("effectiveRequestHeaders(%v) retained pseudo-header :authority", recorded)
+	}
+
+	recorded["x-trace"][0] = "mutated"
+	if slices.Contains(got.Values("X-Trace"), "mutated") {
+		t.Errorf("effectiveRequestHeaders(%v) aliases recorded values: %v", recorded, got.Values("X-Trace"))
 	}
 }
 

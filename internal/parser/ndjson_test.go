@@ -206,6 +206,7 @@ func TestParseDownstreamEndRejectsLegacySchema(t *testing.T) {
 		input string
 	}{
 		{name: "nested_http_untyped", input: `{` + fields + `,"http":{"method":"GET"}}`},
+		{name: "nested_http_null", input: `{` + fields + `,"http":null}`},
 		{name: "start_time", input: `{"type":"DownstreamEnd",` + fields + `,"start_time":"2026-02-27T03:10:22Z"}`},
 		{name: "status", input: `{"type":"DownstreamEnd",` + fields + `,"status":200}`},
 		{name: "log_type", input: `{"type":"DownstreamEnd",` + fields + `,"log_type":"response"}`},

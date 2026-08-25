@@ -13,6 +13,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"slices"
 	"sort"
@@ -1071,12 +1072,15 @@ func requestHeaderRewriteName(name string) string {
 func (e *Engine) effectiveRequestHeaders(recorded map[string][]string) http.Header {
 	headers := make(http.Header, len(recorded)+len(e.cfg.Header.Set))
 	for key, values := range recorded {
-		if strings.HasPrefix(key, ":") {
+		if strings.HasPrefix(key, ":") || len(values) == 0 {
 			continue
 		}
-		for _, value := range values {
-			headers.Add(key, value)
+		key = textproto.CanonicalMIMEHeaderKey(key)
+		if existing := headers[key]; len(existing) != 0 {
+			headers[key] = append(existing, values...)
+			continue
 		}
+		headers[key] = slices.Clone(values)
 	}
 	for _, headerName := range e.cfg.Header.Drop {
 		headers.Del(requestHeaderRewriteName(headerName))
