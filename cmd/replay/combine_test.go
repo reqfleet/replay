@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -50,7 +49,6 @@ func TestRunCombineRejectsInvalidArguments(t *testing.T) {
 	}{
 		{name: "missing_log", args: nil},
 		{name: "missing_out", args: []string{"-log", "input.ndjson"}},
-		{name: "compression_conflict", args: []string{"-log", "input.ndjson", "-out", "output.ndjson", "-gzip", "-zstd"}},
 		{name: "trailing_argument", args: []string{"-log", "input.ndjson", "-out", "output.ndjson", "extra"}},
 	}
 	for _, test := range tests {
@@ -185,7 +183,7 @@ func TestCombineFilesCancellationWhileOpeningInput(t *testing.T) {
 		openWriter bool
 	}{
 		{name: "fifo_without_writer"},
-		{name: "gzip_without_header", format: "gzip", openWriter: true},
+		{name: "zstd_without_header", format: "zstd", openWriter: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -245,11 +243,6 @@ func TestCombineFilesCancellationCleansTemporaryFiles(t *testing.T) {
 		inputPrefix  []byte
 	}{
 		{name: "plain"},
-		{
-			name:        "gzip",
-			format:      "gzip",
-			inputPrefix: []byte{0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-		},
 		{name: "zstd", format: "zstd"},
 	}
 	for _, test := range tests {
@@ -449,32 +442,20 @@ func TestRunCombineRejectsCanonicalRecordOverParserLimit(t *testing.T) {
 	}
 }
 
-func TestRunCombineCompressedInput(t *testing.T) {
-	tests := []struct {
-		name   string
-		flag   string
-		encode func(*testing.T, []byte) []byte
-	}{
-		{name: "gzip", flag: "-gzip", encode: gzipCapture},
-		{name: "zstd", flag: "-zstd", encode: zstdCapture},
+func TestRunCombineZstdInput(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "mixed.bin")
+	outputPath := filepath.Join(dir, "canonical.ndjson")
+	if err := os.WriteFile(inputPath, zstdCapture(t, []byte(mixedCapture())), 0o600); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", inputPath, err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			dir := t.TempDir()
-			inputPath := filepath.Join(dir, "mixed.bin")
-			outputPath := filepath.Join(dir, "canonical.ndjson")
-			if err := os.WriteFile(inputPath, test.encode(t, []byte(mixedCapture())), 0o600); err != nil {
-				t.Fatalf("os.WriteFile(%q) error: %v", inputPath, err)
-			}
-			var stdout, stderr bytes.Buffer
-			args := []string{"-log", inputPath, "-out", outputPath, test.flag}
-			if got, want := runCombine(args, &stdout, &stderr), 0; got != want {
-				t.Fatalf("runCombine(%s input) = %d, want %d; stderr=%q", test.name, got, want, stderr.String())
-			}
-			if !strings.Contains(string(mustReadFile(t, outputPath)), `"request_id":"request-a"`) {
-				t.Errorf("runCombine(%s input) output missing request-a", test.name)
-			}
-		})
+	var stdout, stderr bytes.Buffer
+	args := []string{"-log", inputPath, "-out", outputPath, "-zstd"}
+	if got, want := runCombine(args, &stdout, &stderr), 0; got != want {
+		t.Fatalf("runCombine(zstd input) = %d, want %d; stderr=%q", got, want, stderr.String())
+	}
+	if !strings.Contains(string(mustReadFile(t, outputPath)), `"request_id":"request-a"`) {
+		t.Error("runCombine(zstd input) output missing request-a")
 	}
 }
 
@@ -530,19 +511,6 @@ func TestCombinedCaptureReplaysExactlyOneRequestPerPair(t *testing.T) {
 	if summary.Outcome != engine.RunSuccess || summary.Skipped != 2 || summary.ConnectionsDone != 1 || summary.RequestsSent != 0 {
 		t.Errorf("runReplayFromFile(combined output) summary = %+v, want success skipped=2 connections_done=1 sent=0", summary)
 	}
-}
-
-func gzipCapture(t *testing.T, data []byte) []byte {
-	t.Helper()
-	var buffer bytes.Buffer
-	writer := gzip.NewWriter(&buffer)
-	if _, err := writer.Write(data); err != nil {
-		t.Fatalf("gzip.Writer.Write() error: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("gzip.Writer.Close() error: %v", err)
-	}
-	return buffer.Bytes()
 }
 
 func zstdCapture(t *testing.T, data []byte) []byte {

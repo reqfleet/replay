@@ -2,7 +2,6 @@ package parser
 
 import (
 	"bytes"
-	"compress/gzip"
 	"errors"
 	"io"
 	"os"
@@ -24,7 +23,6 @@ func TestOpenFileAndParseFileStream(t *testing.T) {
 		encode func(*testing.T, []byte) []byte
 	}{
 		{name: "plain", format: "", encode: func(_ *testing.T, data []byte) []byte { return data }},
-		{name: "gzip", format: "gzip", encode: gzipBytes},
 		{name: "zstd", format: "zstd", encode: zstdBytes},
 	}
 	for _, test := range tests {
@@ -94,19 +92,6 @@ func TestOpenFileCloseUnblocksZstdDecoder(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("OpenFile(zstd FIFO).Close() did not return within 2s")
 	}
-}
-
-func gzipBytes(t *testing.T, data []byte) []byte {
-	t.Helper()
-	var buffer bytes.Buffer
-	writer := gzip.NewWriter(&buffer)
-	if _, err := writer.Write(data); err != nil {
-		t.Fatalf("gzip.Writer.Write() error: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("gzip.Writer.Close() error: %v", err)
-	}
-	return buffer.Bytes()
 }
 
 func zstdBytes(t *testing.T, data []byte) []byte {

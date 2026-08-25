@@ -3,7 +3,6 @@ package parser
 import (
 	"bufio"
 	"bytes"
-	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -133,13 +132,6 @@ func OpenFile(path, format string) (InterruptibleReadCloser, error) {
 	switch format {
 	case "":
 		return &fileReadCloser{Reader: file, file: file}, nil
-	case "gzip":
-		reader, err := gzip.NewReader(file)
-		if err != nil {
-			_ = file.Close() // Reader construction error is the actionable failure.
-			return nil, fmt.Errorf("gzip reader: %w", err)
-		}
-		return &fileReadCloser{Reader: reader, compressed: reader, file: file}, nil
 	case "zstd":
 		reader, err := zstd.NewReader(file)
 		if err != nil {

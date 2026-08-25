@@ -78,8 +78,8 @@ go run ./cmd/replay combine \
   -out canonical.ndjson
 ```
 
-`combine` accepts plain, gzip, or zstd input. Output is always plain NDJSON and
-is atomically installed only after the input and every complete pair validate.
+`combine` accepts plain or zstd input. Output is always plain NDJSON and is
+atomically installed only after the input and every complete pair validate.
 
 ### Strict request pairing
 
