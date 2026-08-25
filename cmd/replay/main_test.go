@@ -14,10 +14,73 @@ import (
 	"testing"
 	"time"
 
-	"github.com/reqfleet/replay/internal/config"
+	"github.com/reqfleet/replay/config"
 	"github.com/reqfleet/replay/internal/engine"
 	"github.com/reqfleet/replay/internal/metrics"
 )
+
+func TestResolveConfigAppliesTargetOverridesBeforeValidation(t *testing.T) {
+	tests := []struct {
+		name            string
+		yaml            string
+		envOverrideURL  string
+		envDisallow     string
+		overrides       runtimeOverrides
+		wantOverrideURL string
+		wantDisallow    bool
+	}{
+		{
+			name:            "yaml_disallow_with_environment_override",
+			yaml:            "target:\n  disallow_recorded_targets: true\n",
+			envOverrideURL:  "https://env.example.test",
+			wantOverrideURL: "https://env.example.test",
+			wantDisallow:    true,
+		},
+		{
+			name:        "environment_disallow_with_cli_override",
+			envDisallow: "true",
+			overrides: runtimeOverrides{
+				overrideURL: "https://cli.example.test",
+			},
+			wantOverrideURL: "https://cli.example.test",
+			wantDisallow:    true,
+		},
+		{
+			name: "invalid_yaml_override_replaced_by_cli",
+			yaml: "target:\n  override_url: ftp://yaml.example.test\n",
+			overrides: runtimeOverrides{
+				overrideURL: "https://cli.example.test",
+			},
+			wantOverrideURL: "https://cli.example.test",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("REPLAY_OVERRIDE_URL", test.envOverrideURL)
+			t.Setenv("REPLAY_DISALLOW_RECORDED_TARGETS", test.envDisallow)
+
+			configPath := ""
+			if test.yaml != "" {
+				configPath = filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(configPath, []byte(test.yaml), 0o644); err != nil {
+					t.Fatalf("os.WriteFile(%q) error: %v", configPath, err)
+				}
+			}
+
+			cfg, err := resolveConfig(configPath, test.overrides)
+			if err != nil {
+				t.Fatalf("resolveConfig(%s) error: %v", test.name, err)
+			}
+			if got := cfg.Target.OverrideURL; got != test.wantOverrideURL {
+				t.Errorf("resolveConfig(%s).Target.OverrideURL = %q, want %q", test.name, got, test.wantOverrideURL)
+			}
+			if got := cfg.Target.DisallowRecordedTargets; got != test.wantDisallow {
+				t.Errorf("resolveConfig(%s).Target.DisallowRecordedTargets = %t, want %t", test.name, got, test.wantDisallow)
+			}
+		})
+	}
+}
 
 func TestExitCodeForSummary(t *testing.T) {
 	tests := []struct {

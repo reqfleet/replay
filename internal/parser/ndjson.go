@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,11 @@ const (
 	MaxNDJSONLineBytes   = 16 * 1024 * 1024
 	downstreamEndWarning = "DownstreamEnd access logs are suitable only for quick verification because request order is not guaranteed; use combined logs to preserve replay fidelity"
 )
+
+// StreamOptions controls optional ParseStreamWithOptions behavior.
+type StreamOptions struct {
+	WarnDownstreamEnd bool
+}
 
 // ParseObservationResponseFlags decodes Envoy's comma-separated response flag field.
 func ParseObservationResponseFlags(line int, raw json.RawMessage) ([]string, error) {
@@ -350,10 +356,32 @@ func validateDownstreamEnd(line int, event model.Event) error {
 	return nil
 }
 
+func validateBodyEncoding(line int, field string, body *model.Body) error {
+	if body == nil {
+		return nil
+	}
+	if body.Encoding != "base64" {
+		return fmt.Errorf("line %d: %s encoding must be %q", line, field, "base64")
+	}
+	if _, err := io.Copy(
+		io.Discard,
+		base64.NewDecoder(base64.StdEncoding, strings.NewReader(body.Content)),
+	); err != nil {
+		return fmt.Errorf("line %d: decode %s content: %w", line, field, err)
+	}
+	return nil
+}
+
 // ParseStream reads canonical replay events or direct DownstreamEnd access logs
 // from r and invokes handler for each parsed event. The handler may return an
 // error to stop processing early.
 func ParseStream(r io.Reader, handler func(model.Event) error) error {
+	return ParseStreamWithOptions(r, StreamOptions{WarnDownstreamEnd: true}, handler)
+}
+
+// ParseStreamWithOptions reads the same input as ParseStream with configurable
+// parser behavior.
+func ParseStreamWithOptions(r io.Reader, options StreamOptions, handler func(model.Event) error) error {
 	states := make(map[model.ConnectionKey]*connectionSequenceState)
 	stateForConnection := func(connectionKey model.ConnectionKey) *connectionSequenceState {
 		state := states[connectionKey]
@@ -395,6 +423,15 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 		}
 
 		if event.Type == model.EventRequest {
+			if err := validateBodyEncoding(line, "body", event.Body); err != nil {
+				return err
+			}
+			if err := validateBodyEncoding(line, "response_body", event.ResponseBody); err != nil {
+				return err
+			}
+		}
+
+		if event.Type == model.EventRequest {
 			isHTTP11 := len(event.Protocol) >= 8 && strings.EqualFold(event.Protocol[:8], "HTTP/1.1")
 			if isHTTP11 {
 				switch recordFamily {
@@ -426,7 +463,7 @@ func ParseStream(r io.Reader, handler func(model.Event) error) error {
 
 		if inputFamily == streamInputUnknown {
 			inputFamily = recordFamily
-			if recordFamily == streamInputDownstreamEnd {
+			if recordFamily == streamInputDownstreamEnd && options.WarnDownstreamEnd {
 				slog.Warn(downstreamEndWarning)
 			}
 		}

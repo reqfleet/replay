@@ -12,6 +12,43 @@ Go-based HTTP replay engine that consumes NDJSON traffic logs and exposes Promet
   `type`
 - Optional: `config.yaml` (timeouts, retry, target override, and metrics settings)
 
+## Go library
+
+The `validation` package validates and summarizes Replay streams without
+exposing Replay's internal event model. Summarization also validates the input,
+so callers that only need totals can omit the separate validation pass.
+
+The `config` package exposes the runtime configuration schema, defaults,
+parsing, loading, environment overrides, and validation for embedding
+applications.
+
+```go
+package main
+
+import (
+	"bytes"
+
+	replayconfig "github.com/reqfleet/replay/config"
+	"github.com/reqfleet/replay/validation"
+)
+
+func inspect(data []byte, compressed bool) (validation.Summary, error) {
+	format := validation.FormatNDJSON
+	if compressed {
+		format = validation.FormatZstd
+	}
+
+	if err := validation.ValidateStream(bytes.NewReader(data), format); err != nil {
+		return validation.Summary{}, err
+	}
+	return validation.SummarizeStream(bytes.NewReader(data), format)
+}
+
+func loadConfig(path string) (replayconfig.Config, error) {
+	return replayconfig.Load(path)
+}
+```
+
 ## Development
 
 The development environment is an Ubuntu VM managed by

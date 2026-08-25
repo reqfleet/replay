@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/goccy/go-yaml"
+	"github.com/reqfleet/replay/internal/sharding"
 )
 
 type Config struct {
@@ -85,7 +86,6 @@ type ShardingConfig struct {
 	ShardCount int `yaml:"shard_count"`
 }
 
-const maxShardCount = uint64(1) << 32
 const defaultCheckpointSyncInterval = time.Second
 const (
 	maxPathTemplates               = 256
@@ -210,23 +210,47 @@ func Default() Config {
 	}
 }
 
+// Parse overlays YAML content onto Default and validates the resulting
+// configuration.
+func Parse(content []byte) (Config, error) {
+	return ParseWithOverrides(content, nil)
+}
+
+// ParseWithOverrides overlays YAML content onto Default, applies higher-
+// precedence overrides, and validates the resulting configuration.
+func ParseWithOverrides(content []byte, apply func(*Config)) (Config, error) {
+	cfg := Default()
+	if len(content) > 0 {
+		if err := yaml.Unmarshal(content, &cfg); err != nil {
+			return Config{}, fmt.Errorf("parse yaml: %w", err)
+		}
+	}
+	if apply != nil {
+		apply(&cfg)
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// Load reads, parses, and validates path. An empty path uses Default.
 func Load(path string) (Config, error) {
+	return LoadWithOverrides(path, nil)
+}
+
+// LoadWithOverrides reads path, applies higher-precedence overrides to the
+// decoded configuration, and validates the result. An empty path uses Default.
+func LoadWithOverrides(path string, apply func(*Config)) (Config, error) {
 	if path == "" {
-		return Default(), nil
+		return ParseWithOverrides(nil, apply)
 	}
 
-	base := Default()
-	b, err := os.ReadFile(path)
+	content, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
-	if err := yaml.Unmarshal(b, &base); err != nil {
-		return Config{}, fmt.Errorf("parse yaml: %w", err)
-	}
-	if err := base.Validate(); err != nil {
-		return Config{}, err
-	}
-	return base, nil
+	return ParseWithOverrides(content, apply)
 }
 
 func (c Config) Validate() error {
@@ -260,11 +284,14 @@ func (c Config) Validate() error {
 	if c.Replay.Sharding.ShardCount <= 0 {
 		return errors.New("replay.sharding.shard_count must be > 0")
 	}
-	if uint64(c.Replay.Sharding.ShardCount) > maxShardCount {
-		return fmt.Errorf("replay.sharding.shard_count must be <= %d", maxShardCount)
+	if uint64(c.Replay.Sharding.ShardCount) > sharding.MaxShardCount {
+		return fmt.Errorf("replay.sharding.shard_count must be <= %d", sharding.MaxShardCount)
 	}
 	if c.Replay.Sharding.ShardIndex < 0 || c.Replay.Sharding.ShardIndex >= c.Replay.Sharding.ShardCount {
 		return errors.New("replay.sharding.shard_index must be within [0, shard_count)")
+	}
+	if _, err := c.Target.ParseURL(); err != nil {
+		return err
 	}
 	if c.Metrics.GracefulTerminationPeriod < 0 {
 		return errors.New("metrics.graceful_termination_period must be >= 0")

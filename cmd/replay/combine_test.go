@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/reqfleet/replay/internal/config"
+	"github.com/reqfleet/replay/config"
 	"github.com/reqfleet/replay/internal/engine"
 	"github.com/reqfleet/replay/internal/metrics"
 	"github.com/reqfleet/replay/internal/parser"

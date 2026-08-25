@@ -10,7 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/reqfleet/containerstats"
-	"github.com/reqfleet/replay/internal/config"
+	"github.com/reqfleet/replay/config"
 )
 
 const (

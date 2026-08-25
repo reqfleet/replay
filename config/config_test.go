@@ -285,7 +285,7 @@ func TestLoadRejectsEmptyHTTP2Mode(t *testing.T) {
 }
 
 func TestSampleConfigLoads(t *testing.T) {
-	if _, err := Load("../../config.yaml"); err != nil {
+	if _, err := Load("../config.yaml"); err != nil {
 		t.Fatalf("Load sample config: %v", err)
 	}
 }
