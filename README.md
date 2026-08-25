@@ -4,7 +4,12 @@ Go-based HTTP replay engine that consumes NDJSON traffic logs and exposes Promet
 
 ## Inputs
 
-- Required: `requests.log` (NDJSON traffic file)
+- Recommended replay input: canonical `request`/`connection_close` NDJSON such
+  as `canonical.ndjson`
+- Recommended capture preparation: paired `DownstreamStart`/`DownstreamEnd`
+  observations in `requests.log`, processed by `replay combine`
+- Quick verification only: End-only NDJSON with explicit `DownstreamEnd` or no
+  `type`
 - Optional: `config.yaml` (timeouts, retry, target override, and metrics settings)
 
 ## Development
@@ -77,16 +82,27 @@ instance retains the configuration and mount selected when it was created.
 
 ## Recording traffic
 
-Replay consumes compatible Envoy access logs. The bundled example below shows
-how to capture those logs from Kubernetes; [`specs.md`](specs.md#3-envoy-access-log-input)
-defines the accepted log schema.
+For replay fidelity, prepare canonical replay events from paired Envoy
+access-log observations with `replay combine`. Replay also accepts End-only
+completion logs directly for quick verification. The bundled example shows the
+recommended Kubernetes capture and preprocessing workflow;
+[`specs.md`](specs.md#3-recording-and-replay-input) defines every wire schema.
 
 ### Basic capture with the Envoy example
 
 [`example/envoy-standalone-proxy-full-headers.yaml`](example/envoy-standalone-proxy-full-headers.yaml)
-deploys a single Envoy reverse proxy that emits one flat `DownstreamEnd` JSON
-object per completed request to the Envoy container's stdout. To record a
-Kubernetes traffic window:
+deploys one Envoy reverse proxy. Its stdout contains a `DownstreamStart` and a
+`DownstreamEnd` observation for every request, correlated by the request's
+`X-Request-ID`, recorded as `request_id`. Envoy generates a value when that
+header is absent but may preserve a value supplied by the client or an upstream
+proxy.
+
+The capture format treats `request_id` as physical-request identity, not as a
+logical trace or transaction identifier. Every physical request—including each
+retry and fan-out request—MUST have an ID that is not reused by another request
+on the same `(node, connection_id)` during the capture. Applications that need
+one correlation value across several physical requests must carry that value
+separately. Reusing an ID makes `combine` reject the capture as ambiguous.
 
 1. Copy the manifest and change the `test_cluster` endpoint from
    `testhttp:8080` to the application service being recorded.
@@ -107,15 +123,57 @@ Kubernetes traffic window:
 4. Route clients to `envoy-recorder-proxy:8080` instead of directly to the
    application. Stop the log command with `Ctrl-C` when the recording window
    ends. Requests that bypass the proxy are not recorded.
-5. Parse the resulting file without sending any requests:
+5. Pair the mixed observations into canonical replay input:
 
    ```bash
-   go run ./cmd/replay --log ./requests.log --dry-run
+   go run ./cmd/replay combine \
+     -log ./requests.log \
+     -out ./canonical.ndjson
    ```
 
-`kubectl logs` can combine access logs with Envoy process logs. Replay ignores
-blank lines and lines that do not begin with `{`; a malformed JSON line that
-does begin with `{` fails parsing.
+6. Inspect the canonical NDJSON, then parse it without sending requests:
+
+   ```bash
+   go run ./cmd/replay -log ./canonical.ndjson -dry-run
+   ```
+
+7. Replay the prepared capture:
+
+   ```bash
+   go run ./cmd/replay -log ./canonical.ndjson -config ./config.yaml
+   ```
+
+For a quick parser and engine check when only End records were captured, run:
+
+```bash
+go run ./cmd/replay -log ./downstream-end.ndjson -dry-run
+```
+
+Generate deterministic End-only data for local verification with:
+
+```bash
+go run ./tools/generate_requests.go \
+  -base http://localhost:8080 \
+  -downstream-end \
+  -out ./downstream-end.ndjson
+```
+
+`-downstream-end` emits only flat `DownstreamEnd` records and is mutually
+exclusive with `-observations`, which emits paired Start/End input for
+`replay combine`.
+
+Each record may use explicit `type: "DownstreamEnd"` or omit `type`. This
+convenience path preserves file append order, which may be response-completion
+order rather than request-start order. **Request order is not guaranteed; use
+combined logs to preserve replay fidelity.** A file containing any
+`DownstreamStart` still requires `replay combine`.
+
+`kubectl logs` can combine access logs with Envoy process logs. `combine`
+ignores blank lines and lines that do not begin with `{`; a malformed JSON line
+that does begin with `{` is fatal. At EOF, it discards unmatched Start or End
+observations and writes their counts as a warning to stderr. `-gzip` and `-zstd`
+select compressed input. Combined output is always plain NDJSON and is installed
+atomically only after every complete Start/End pair validates.
 
 The example captures request headers and the response status, but not request
 or response bodies or response headers. Consequently, it supports status
@@ -123,24 +181,39 @@ validation but not recorded response-header or body validation.
 
 ### Capture log conformance
 
-Logs produced by another Envoy configuration or capture tool must follow the
-[flat record schema](specs.md#31-flat-record-schema), including:
+Raw observations from another Envoy configuration or capture tool must follow
+the [recorder observation schema](specs.md#31-raw-recorder-observations):
 
-- UTF-8 NDJSON with one flat JSON object per captured request, in append order.
-- Exactly one record per original request. If `type` is present, it must be
-  `DownstreamStart` or `DownstreamEnd`; when omitted, Replay treats the record
-  as `DownstreamEnd`. Emitting both types replays the request twice.
-- `connection_id`, `timestamp`, `method`, `authority`, `path`, and `protocol`
-  on every record, plus `response_code` on `DownstreamEnd` records, including
-  records with an omitted `type`.
-- `scheme`, `node`, `stream_id`, and `sequence` are optional. Replay defaults
-  `scheme` to `http`. When present, `node` forms the connection identity with
-  `connection_id`. Replay derives `sequence` from record order independently
-  for each identity when it is omitted; supplied values must not decrease. For
-  HTTP/1.1, `stream_id` defaults to `1`, and any other value is rejected.
-- Header values encoded as arrays of strings. Request and response bodies use
-  the base64 envelope defined in
-  [Request Headers and Bodies](specs.md#34-request-headers-and-bodies).
+- UTF-8 NDJSON containing exactly one explicit `DownstreamStart` and one
+  explicit `DownstreamEnd` per original request.
+- A nonempty, non-`-` `request_id` shared by the pair and unique among physical
+  requests with the same `(node, connection_id)` throughout the capture.
+  `node`, `connection_id`, nonempty request descriptors, and start timestamp
+  must also agree within the pair.
+- `response_code` and Envoy's string `response_flags` on the End observation.
+  `-` and an empty flag string mean no flags; other values are comma-separated
+  exact tokens.
+
+`replay -log` accepts either of two homogeneous input families:
+
+- Canonical records with explicit `type: "request"` or
+  `type: "connection_close"`.
+- Direct completion records with explicit `type: "DownstreamEnd"` or no `type`.
+
+Never mix those families in one file. `DownstreamStart`, `connection_open`, and
+unknown types are invalid replay input. A paired or mixed observation capture
+must pass through `replay combine`.
+
+Canonical requests contain a nonempty `request_id`, valid `timestamp`, nonempty
+`method`, `authority`, `path`, and `protocol`, integer `connection_id`, and
+integer `response_code`. Header values and `response_flags` are arrays of
+strings. `scheme` and `node` are optional. `stream_id` is optional for
+non-HTTP/1.1 requests and must be omitted from HTTP/1.1 canonical records.
+
+Direct completion records require the same fields except `request_id` is
+optional. Their optional `response_flags` uses Envoy's comma-separated string
+form. HTTP/1.1 direct records may omit `stream_id` or use `1`. Replay normalizes
+both input families to internal stream ID `1` for HTTP/1.1.
 
 Capture files can contain credentials, cookies, and personal data. Restrict
 their storage and access, and redact fields before sharing them. The sample
@@ -149,11 +222,20 @@ remove those values from an already recorded file.
 
 ## Run
 
+Recommended fidelity path:
+
 ```bash
-go run ./cmd/replay -log ./requests.log -config ./config.yaml
+go run ./cmd/replay -log ./canonical.ndjson -config ./config.yaml
 ```
 
-If `-config` is omitted, safe defaults are used.
+End-only quick verification path:
+
+```bash
+go run ./cmd/replay -log ./downstream-end.ndjson -dry-run
+```
+
+**Request order is not guaranteed for direct End logs; use combined logs to
+preserve replay fidelity.** If `-config` is omitted, safe defaults are used.
 
 ## Metrics
 
@@ -243,30 +325,36 @@ In addition to the summary printed to stdout, the engine maintains aggregate out
 
 See `config.yaml` in this directory for a ready-to-use example demonstrating safe defaults, metrics, and override usage.
 
-## Envoy access-log input
+## Canonical replay input
 
-Replay accepts one flat JSON object per line. When present, `type` must be the
-exact, case-sensitive value `DownstreamStart` or `DownstreamEnd`; that field
-selects the parser behavior. For compatibility with Envoy's default
-request-completion access logs, a missing `type` is treated as
-`DownstreamEnd`. The required common fields are `connection_id`, `timestamp`,
-`method`, `authority`, `path`, and `protocol`. `DownstreamEnd` additionally
-requires `response_code`.
+Replay accepts one JSON object per line from exactly one input family.
 
-Each original HTTP request must produce exactly one record: choose either start
-or end. If both are present, Replay treats them as separate requests and
-replays the original request twice. Normalized `request` records, nested `http`
-objects, connection lifecycle events, and explicit unknown Envoy access-log
-types are rejected.
+Canonical input requires explicit, case-sensitive `type: "request"` or
+`type: "connection_close"`. A `request` requires `request_id`, `connection_id`,
+`timestamp`, `method`, `authority`, `path`, `protocol`, and `response_code`.
+`response_flags`, when present, must be an array of strings. A
+`connection_close` requires only `connection_id`; `node` is optional and
+participates in the connection key. Close events do not advance request
+sequence.
+
+Direct completion input uses explicit, case-sensitive
+`type: "DownstreamEnd"` or omits `type`. It requires `connection_id`,
+`timestamp`, `method`, `authority`, `path`, `protocol`, and `response_code`;
+`request_id` and Envoy string `response_flags` are optional. Replay normalizes
+each accepted completion to a request event and preserves append order.
+
+Canonical and direct completion records must not coexist in one file. Malformed
+JSON, `type: null`, empty, lowercase, or unknown types, `DownstreamStart`, and
+`connection_open` are rejected with the physical input line number. Use
+`replay combine` for paired or mixed Envoy observations.
 
 ## Retry and validation config
 
 Use `config.yaml` to control retry, response validation, pacing, and idempotency safeguards.
 Each `validation.status`, `validation.headers`, and `validation.body` field
 directly enables that check; there is no aggregate validation toggle.
-On `DownstreamEnd` events, `response_code`, `response_headers`, and
-`response_body` provide response-validation expectations. `DownstreamStart`
-events carry request data only and never trigger inline response validation.
+On canonical `request` events, `response_code`, `response_headers`, and
+`response_body` provide response-validation expectations.
 
 ```yaml
 replay:
@@ -317,27 +405,31 @@ per-connection replay deadline. Time spent waiting for the preceding response
 counts toward the next delta; Replay sleeps only for any remaining time instead
 of adding the full recorded delta after the response completes.
 
-When a `DownstreamEnd` record contains captured response expectations,
+When a canonical `request` contains captured response expectations,
 enabled-check mismatches increment `validation_failed` and produce
 `partial_success`.
 
 When the target is unreachable or times out, the request is recorded as `send_error`, the run remains `partial_success`, and `replay_status_counter` is incremented with a synthetic transport status.
 
 When idempotency safeguards are enabled, mutation methods are skipped unless one of the allow headers is present.
-Native Envoy HTTP access logs do not contain TCP connection-close records.
-Replay initializes connection state from the first record for each
-`node` + `connection_id` and retains its sequence and HTTP transport state until
-EOF. This preserves keep-alive reuse and socket isolation if the connection
-appears again later in the capture. `max_virtual_users_per_engine` bounds worker
-count, not retained connection state.
+The combiner converts an exact `DC` response-flag token into one
+`connection_close` after that connection's final Start-ordered request. Replay
+waits for in-flight HTTP/2 work, closes the transport, and finalizes the
+connection at that marker. Connections without `DC` retain their sequence and
+transport state until EOF, where Replay finalizes them.
 
-Per-instance memory therefore scales with the number of unique connection
-identities assigned to that instance. For `N` replay processes, point every
-process at the same complete capture, configure the same `shard_count: N`, and
-give each process a unique `shard_index` in `[0, N)`. Replay hashes `node` +
-`connection_id`, so one process handles every record for an identity in file
-order. Each process still scans the complete input; sharding partitions replay
-execution and retained state, not input-read I/O.
+Active connection-state and transport memory scales with simultaneously active
+connection identities. Run summaries retain one aggregate `ConnectionResult`
+for every finalized connection but do not populate per-request result
+collections. Result memory therefore scales with total connections processed,
+not total requests.
+
+For `N` replay processes, point every process at the same complete capture,
+configure the same `shard_count: N`, and give each process a unique
+`shard_index` in `[0, N)`. Replay hashes `node` + `connection_id`, so one
+process handles every record for an identity in file order. Each process still
+scans the complete input; sharding partitions replay execution, active state,
+and retained results, not input-read I/O.
 
 Do not split a connection using arbitrary byte offsets, line ranges, or
 timestamp windows. Sharded checkpoint files are isolated with a
@@ -351,9 +443,8 @@ are skipped on the next run using the same `node` + `connection_id` identity.
 
 For HTTP/2 traffic, `serialized` replays requests sequentially, while
 `multiplexed` dispatches requests concurrently on the shared per-connection
-client and waits for them at EOF. Replay consumes records in append order and
-does not reorder them by `timestamp`, `stream_id`, or `sequence`.
-`DownstreamEnd` records can therefore appear in response-completion order. Use
-`DownstreamStart` records when original request-start order is required; those
-records do not provide inline response-validation expectations. A capture must
-still contain exactly one record type for each original request.
+client and joins in-flight requests at `connection_close` or EOF. Canonical
+records produced by `combine` are globally ordered by `DownstreamStart`
+observation order, not response-completion order. Direct completion logs retain
+their append order, which may be response-completion order. Replay never
+reorders either family by `timestamp`, `stream_id`, or `sequence`.

@@ -3,31 +3,32 @@ package model
 type EventType string
 
 const (
-	EventConnectionOpen          EventType = "connection_open"
-	EventRequest                 EventType = "request"
-	EventConnectionClose         EventType = "connection_close"
-	AccessLogTypeDownstreamStart EventType = "DownstreamStart"
-	AccessLogTypeDownstreamEnd   EventType = "DownstreamEnd"
+	EventConnectionOpen  EventType = "connection_open"
+	EventRequest         EventType = "request"
+	EventConnectionClose EventType = "connection_close"
 )
 
 type Event struct {
+	ResponseFlags []string `json:"response_flags,omitempty"`
+
+	RequestID               string    `json:"request_id,omitempty"`
+	Type                    EventType `json:"type"`
+	Node                    string    `json:"node,omitempty"`
+	Timestamp               string    `json:"timestamp,omitempty"`
+	Method                  string    `json:"method,omitempty"`
+	Scheme                  string    `json:"scheme,omitempty"`
+	Authority               string    `json:"authority,omitempty"`
+	Path                    string    `json:"path,omitempty"`
+	Protocol                string    `json:"protocol,omitempty"`
+	DownstreamRemoteAddress string    `json:"downstream_remote_address,omitempty"`
+	UserAgent               string    `json:"user_agent,omitempty"`
+
 	ResponseCode    *int                `json:"response_code,omitempty"`
 	TLS             *TLSInfo            `json:"tls,omitempty"`
 	Headers         map[string][]string `json:"headers,omitempty"`
 	Body            *Body               `json:"body,omitempty"`
 	ResponseHeaders map[string][]string `json:"response_headers,omitempty"`
 	ResponseBody    *Body               `json:"response_body,omitempty"`
-
-	Type                    EventType `json:"type"`
-	Node                    string    `json:"node,omitempty"`
-	Timestamp               string    `json:"timestamp"`
-	Method                  string    `json:"method"`
-	Scheme                  string    `json:"scheme,omitempty"`
-	Authority               string    `json:"authority"`
-	Path                    string    `json:"path"`
-	Protocol                string    `json:"protocol"`
-	DownstreamRemoteAddress string    `json:"downstream_remote_address,omitempty"`
-	UserAgent               string    `json:"user_agent,omitempty"`
 
 	ConnectionID int     `json:"connection_id"`
 	StreamID     int     `json:"stream_id,omitempty"`

@@ -15,6 +15,13 @@ import (
 	"github.com/reqfleet/replay/internal/model"
 )
 
+const (
+	generatedDownstreamStart = "DownstreamStart"
+	generatedDownstreamEnd   = "DownstreamEnd"
+	generatedRequestInterval = 100 * time.Millisecond
+	reverseCompletionStepMS  = 200.0
+)
+
 func writeJSONLine(f *os.File, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -29,17 +36,6 @@ func writeJSONLine(f *os.File, v any) error {
 	return nil
 }
 
-func generatedAccessLogType(raw string) (model.EventType, error) {
-	switch strings.ToLower(raw) {
-	case "downstream_start", "downstreamstart", "downstream-start":
-		return model.AccessLogTypeDownstreamStart, nil
-	case "downstream_end", "downstreamend", "downstream-end":
-		return model.AccessLogTypeDownstreamEnd, nil
-	default:
-		return "", fmt.Errorf("unsupported access log type %q", raw)
-	}
-}
-
 type generatedRequestOptions struct {
 	authority    string
 	scheme       string
@@ -50,6 +46,24 @@ type generatedRequestOptions struct {
 	durationMS   float64
 	extraHeaders map[string][]string
 	body         *model.Body
+}
+type generatedObservation struct {
+	Type          string `json:"type"`
+	RequestID     string `json:"request_id"`
+	Timestamp     string `json:"timestamp"`
+	Method        string `json:"method"`
+	Scheme        string `json:"scheme,omitempty"`
+	Authority     string `json:"authority"`
+	Path          string `json:"path"`
+	Protocol      string `json:"protocol"`
+	ResponseFlags string `json:"response_flags,omitempty"`
+
+	ConnectionID int                 `json:"connection_id"`
+	StreamID     int                 `json:"stream_id,omitempty"`
+	Headers      map[string][]string `json:"headers,omitempty"`
+	Body         *model.Body         `json:"body,omitempty"`
+	ResponseCode *int                `json:"response_code,omitempty"`
+	DurationMS   float64             `json:"duration_ms,omitempty"`
 }
 
 func parseGeneratedHeader(raw string) (string, string, error) {
@@ -73,7 +87,7 @@ func generatedRequestBody(raw string) *model.Body {
 	}
 }
 
-func generatedRequestEvent(logType model.EventType, connID int, ts time.Time, options generatedRequestOptions) model.Event {
+func generatedRequestEvent(connID, requestOrdinal int, ts time.Time, options generatedRequestOptions) model.Event {
 	headers := map[string][]string{
 		"x-api-key":          {options.apiKey},
 		"x-forwarded-proto":  {options.scheme},
@@ -86,8 +100,10 @@ func generatedRequestEvent(logType model.EventType, connID int, ts time.Time, op
 		headers[name] = slices.Clone(values)
 	}
 
-	req := model.Event{
-		Type:         logType,
+	responseCode := options.status
+	request := model.Event{
+		Type:         model.EventRequest,
+		RequestID:    fmt.Sprintf("connection-%d-request-%d", connID, requestOrdinal),
 		ConnectionID: connID,
 		Timestamp:    ts.Format(time.RFC3339Nano),
 		Method:       "GET",
@@ -96,42 +112,100 @@ func generatedRequestEvent(logType model.EventType, connID int, ts time.Time, op
 		Path:         options.requestPath,
 		Protocol:     "HTTP/1.1",
 		Headers:      headers,
+		Body:         options.body,
+		ResponseCode: &responseCode,
+		DurationMS:   options.durationMS,
 	}
-	if logType == model.AccessLogTypeDownstreamEnd {
-		responseCode := options.status
-		req.ResponseCode = &responseCode
-		req.DurationMS = options.durationMS
-		if options.body != nil {
-			body := *options.body
-			req.Body = &body
-		}
+	return request
+}
+func generatedRequestPath(base string, requestOrdinal int) string {
+	requestPath := path.Join("/", base)
+	if requestOrdinal > 1 {
+		requestPath = path.Join(requestPath, fmt.Sprintf("%d", requestOrdinal))
 	}
-	return req
+	return requestPath
 }
 
-func emitGeneratedEvents(logType model.EventType, reqs, conns int, now time.Time, options generatedRequestOptions, emit func(model.Event) error) error {
+func generatedObservationForRequest(kind string, request model.Event, durationMS float64, responseFlags string) generatedObservation {
+	observation := generatedObservation{
+		Type:          kind,
+		RequestID:     request.RequestID,
+		ConnectionID:  request.ConnectionID,
+		Timestamp:     request.Timestamp,
+		Method:        request.Method,
+		Scheme:        request.Scheme,
+		Authority:     request.Authority,
+		Path:          request.Path,
+		Protocol:      request.Protocol,
+		StreamID:      request.StreamID,
+		ResponseFlags: responseFlags,
+	}
+	if kind == generatedDownstreamEnd {
+		observation.Headers = request.Headers
+		observation.Body = request.Body
+		observation.ResponseCode = request.ResponseCode
+		observation.DurationMS = durationMS
+	}
+	return observation
+}
 
-	for r := 1; r <= reqs; r++ {
-		p := path.Join("/", options.requestPath)
-		if r > 1 {
-			p = path.Join(p, fmt.Sprintf("%d", r))
-		}
-		ts := now.Add(time.Duration(r) * 100 * time.Millisecond)
-		for c := 1; c <= conns; c++ {
-			requestOptions := options
-			requestOptions.requestPath = p
-			if err := emit(generatedRequestEvent(logType, c, ts, requestOptions)); err != nil {
+func emitGeneratedObservations(reqs, conns int, now time.Time, options generatedRequestOptions, emit func(generatedObservation) error) error {
+	emitObservation := func(kind string, requestOrdinal, connectionID int, durationMS float64, responseFlags string) error {
+		requestOptions := options
+		requestOptions.requestPath = generatedRequestPath(options.requestPath, requestOrdinal)
+		timestamp := now.Add(time.Duration(requestOrdinal) * generatedRequestInterval)
+		request := generatedRequestEvent(connectionID, requestOrdinal, timestamp, requestOptions)
+		request.Protocol = "HTTP/2"
+		request.StreamID = requestOrdinal*2 - 1
+		return emit(generatedObservationForRequest(kind, request, durationMS, responseFlags))
+	}
+
+	for requestOrdinal := 1; requestOrdinal <= reqs; requestOrdinal++ {
+		for connectionID := 1; connectionID <= conns; connectionID++ {
+			if err := emitObservation(generatedDownstreamStart, requestOrdinal, connectionID, 0, ""); err != nil {
 				return err
 			}
 		}
 	}
-
+	for requestOrdinal := reqs; requestOrdinal >= 1; requestOrdinal-- {
+		durationMS := options.durationMS + float64(reqs-requestOrdinal)*reverseCompletionStepMS
+		responseFlags := "-"
+		if requestOrdinal == 1 {
+			responseFlags = "DC"
+		}
+		for connectionID := 1; connectionID <= conns; connectionID++ {
+			if err := emitObservation(generatedDownstreamEnd, requestOrdinal, connectionID, durationMS, responseFlags); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
-func generatedEvents(logType model.EventType, reqs, conns int, now time.Time, options generatedRequestOptions) []model.Event {
+func emitGeneratedEvents(reqs, conns int, now time.Time, options generatedRequestOptions, emit func(model.Event) error) error {
+	for requestOrdinal := 1; requestOrdinal <= reqs; requestOrdinal++ {
+		requestPath := generatedRequestPath(options.requestPath, requestOrdinal)
+		timestamp := now.Add(time.Duration(requestOrdinal) * generatedRequestInterval)
+		for connectionID := 1; connectionID <= conns; connectionID++ {
+			requestOptions := options
+			requestOptions.requestPath = requestPath
+			if err := emit(generatedRequestEvent(connectionID, requestOrdinal, timestamp, requestOptions)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func emitGeneratedDownstreamEnds(reqs, conns int, now time.Time, options generatedRequestOptions, emit func(generatedObservation) error) error {
+	return emitGeneratedEvents(reqs, conns, now, options, func(request model.Event) error {
+		return emit(generatedObservationForRequest(generatedDownstreamEnd, request, options.durationMS, "-"))
+	})
+}
+
+func generatedEvents(reqs, conns int, now time.Time, options generatedRequestOptions) []model.Event {
 	events := []model.Event{}
-	if err := emitGeneratedEvents(logType, reqs, conns, now, options, func(event model.Event) error {
+	if err := emitGeneratedEvents(reqs, conns, now, options, func(event model.Event) error {
 		events = append(events, event)
 		return nil
 	}); err != nil {
@@ -150,8 +224,9 @@ func main() {
 		status        = flag.Int("status", 200, "HTTP response status code to simulate")
 		dur           = flag.Float64("duration", 16.0, "Request duration in milliseconds")
 		apiKey        = flag.String("apikey", "rqt_api_dummy-apikey-local", "API key header value")
-		accessLogType = flag.String("access-log-type", "downstream-end", "Envoy access log type to simulate: downstream-start or downstream-end")
-		body          = flag.String("body", "", "Request body to include in downstream-end events")
+		body          = flag.String("body", "", "Request body to include")
+		observations  = flag.Bool("observations", false, "Emit mixed HTTP/2 DownstreamStart/DownstreamEnd observations in reverse completion order")
+		downstreamEnd = flag.Bool("downstream-end", false, "Emit DownstreamEnd-only access log records")
 	)
 	extraHeaders := make(map[string][]string)
 	flag.Func("header", "Request header in name:value format; repeatable and replaces generated values for the same name", func(raw string) error {
@@ -164,17 +239,10 @@ func main() {
 	})
 	flag.StringVar(baseURL, "url", *baseURL, "Alias for -base")
 	flag.StringVar(requestPath, "path", *requestPath, "Alias for -subpath")
-	flag.StringVar(accessLogType, "log-type", *accessLogType, "Alias for -access-log-type")
 	flag.Parse()
-
-	logType, err := generatedAccessLogType(*accessLogType)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if logType != model.AccessLogTypeDownstreamEnd && *body != "" {
-		fmt.Fprintln(os.Stderr, "-body is only supported with downstream-end access logs")
-		os.Exit(1)
+	if *observations && *downstreamEnd {
+		fmt.Fprintln(os.Stderr, "-observations and -downstream-end are mutually exclusive")
+		os.Exit(2)
 	}
 
 	u, err := url.Parse(*baseURL)
@@ -193,14 +261,12 @@ func main() {
 		}
 	}
 
-	f, err := os.Create(*out)
+	file, err := os.Create(*out)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create output file: %v\n", err)
 		os.Exit(1)
 	}
-	defer f.Close()
-
-	now := time.Now().UTC()
+	defer file.Close()
 
 	options := generatedRequestOptions{
 		authority:    authority,
@@ -213,8 +279,28 @@ func main() {
 		extraHeaders: extraHeaders,
 		body:         generatedRequestBody(*body),
 	}
-	if err := emitGeneratedEvents(logType, *reqs, *conns, now, options, func(event model.Event) error {
-		return writeJSONLine(f, event)
+	if *observations {
+		if err := emitGeneratedObservations(*reqs, *conns, time.Now().UTC(), options, func(observation generatedObservation) error {
+			return writeJSONLine(file, observation)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "write observation: %v\n", err)
+			os.Exit(2)
+		}
+		fmt.Printf("Generated %d connections with %d observation pairs each to %s\n", *conns, *reqs, *out)
+		return
+	}
+	if *downstreamEnd {
+		if err := emitGeneratedDownstreamEnds(*reqs, *conns, time.Now().UTC(), options, func(observation generatedObservation) error {
+			return writeJSONLine(file, observation)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "write DownstreamEnd: %v\n", err)
+			os.Exit(2)
+		}
+		fmt.Printf("Generated %d connections with %d DownstreamEnd records each to %s\n", *conns, *reqs, *out)
+		return
+	}
+	if err := emitGeneratedEvents(*reqs, *conns, time.Now().UTC(), options, func(event model.Event) error {
+		return writeJSONLine(file, event)
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "write event: %v\n", err)
 		os.Exit(2)

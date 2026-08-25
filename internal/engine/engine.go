@@ -291,8 +291,7 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 		}
 
 		switch ev.Type {
-		case model.EventConnectionOpen, model.EventConnectionClose, model.EventRequest,
-			model.AccessLogTypeDownstreamStart, model.AccessLogTypeDownstreamEnd:
+		case model.EventConnectionOpen, model.EventConnectionClose, model.EventRequest:
 		default:
 			return fmt.Errorf("unsupported event type %q", ev.Type)
 		}
@@ -349,7 +348,7 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 				conns[connKey] = cs
 			}
 
-		case model.EventRequest, model.AccessLogTypeDownstreamStart, model.AccessLogTypeDownstreamEnd:
+		case model.EventRequest:
 			if cs == nil {
 				cs = e.newConnState(connKey)
 				conns[connKey] = cs
@@ -653,7 +652,7 @@ func (e *Engine) finishRequestSuccess(cs *connState, requestEvent model.Event, e
 }
 
 func (e *Engine) expectedResponseFromRequestEvent(requestEvent model.Event) (model.Event, bool) {
-	if !e.responseValidationEnabled() || requestEvent.Type != model.AccessLogTypeDownstreamEnd {
+	if !e.responseValidationEnabled() || requestEvent.Type != model.EventRequest {
 		return model.Event{}, false
 	}
 	if requestEvent.ResponseCode == nil && len(requestEvent.ResponseHeaders) == 0 && requestEvent.ResponseBody == nil {
