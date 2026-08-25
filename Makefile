@@ -1,7 +1,10 @@
 GO ?= go
 BINARY ?= replay
 BIN_DIR ?= bin
+RELEASE_BIN_DIR ?= $(BIN_DIR)/release
 IMG ?= $(BINARY)
+GH ?= gh
+RELEASE_TAG ?=
 PKG ?= ./...
 LOG ?= requests.log
 DEVBOX_PROJECT_DIR ?= $(CURDIR)
@@ -13,7 +16,7 @@ E2E_GENERATED_END_LOG := $(BIN_DIR)/e2e-generated-downstream-end.ndjson
 GOOS ?= $(shell $(GO) env GOOS)
 GOARCH ?= $(shell $(GO) env GOARCH)
 
-.PHONY: test build tidy run run-sample clean docker-build e2e e2e-server-start e2e-server-stop alltests staticcheck
+.PHONY: test build release-cli-build release-cli-upload tidy run run-sample clean docker-build docker-push e2e e2e-server-start e2e-server-stop alltests staticcheck
 
 test: staticcheck
 	$(GO) test $(PKG) -count=1
@@ -101,6 +104,22 @@ build:
 	mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -o $(BIN_DIR)/$(BINARY) ./cmd/replay
 
+release-cli-build:
+	$(MAKE) build BIN_DIR=$(RELEASE_BIN_DIR) BINARY=replay-linux-amd64 GOOS=linux GOARCH=amd64
+	$(MAKE) build BIN_DIR=$(RELEASE_BIN_DIR) BINARY=replay-linux-arm64 GOOS=linux GOARCH=arm64
+	$(MAKE) build BIN_DIR=$(RELEASE_BIN_DIR) BINARY=replay-windows-amd64.exe GOOS=windows GOARCH=amd64
+	$(MAKE) build BIN_DIR=$(RELEASE_BIN_DIR) BINARY=replay-windows-arm64.exe GOOS=windows GOARCH=arm64
+	$(MAKE) build BIN_DIR=$(RELEASE_BIN_DIR) BINARY=replay-darwin-arm64 GOOS=darwin GOARCH=arm64
+
+release-cli-upload:
+	@if [ -z "$(RELEASE_TAG)" ]; then echo "RELEASE_TAG is required"; exit 2; fi
+	$(GH) release upload "$(RELEASE_TAG)" --clobber \
+		"$(RELEASE_BIN_DIR)/replay-linux-amd64" \
+		"$(RELEASE_BIN_DIR)/replay-linux-arm64" \
+		"$(RELEASE_BIN_DIR)/replay-windows-amd64.exe" \
+		"$(RELEASE_BIN_DIR)/replay-windows-arm64.exe" \
+		"$(RELEASE_BIN_DIR)/replay-darwin-arm64"
+
 tidy:
 	$(GO) mod tidy
 
@@ -116,6 +135,10 @@ clean:
 docker-build:
 	$(MAKE) build GOOS=linux
 	docker build --build-arg BIN_DIR=$(BIN_DIR) --build-arg BINARY=$(BINARY) -t $(IMG) .
+
+docker-push:
+	@case "$(IMG)" in */*:*) ;; *) echo "IMG must be a tagged registry reference"; exit 2;; esac
+	docker push "$(IMG)"
 
 .PHONY: devbox
 devbox:
