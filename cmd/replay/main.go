@@ -175,7 +175,6 @@ func run() int {
 	configPath := flag.String("config", "", "path to config.yaml (optional)")
 	logPath := flag.String("log", "", "path to canonical or DownstreamEnd NDJSON log file")
 	zstdFlag := flag.Bool("zstd", false, "read log file compressed with zstd")
-	gzipFlag := flag.Bool("gzip", false, "read log file compressed with gzip")
 	dryRunFlag := flag.Bool("dry-run", false, "dry run mode: do not send network requests")
 	overrideFlag := flag.String("override-url", "", "override target URL (overrides config)")
 	disallowRecordedTargets := flag.Bool("disallow-recorded-targets", false, "fail if no target override is configured")
@@ -199,10 +198,6 @@ func run() int {
 
 	if *logPath == "" {
 		slog.Error("-log is required")
-		return 2
-	}
-	if *zstdFlag && *gzipFlag {
-		slog.Error("cannot specify both -zstd and -gzip")
 		return 2
 	}
 	cfg, err := resolveConfig(*configPath, runtimeOverrides{
@@ -241,9 +236,7 @@ func run() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	var format string
-	if *gzipFlag {
-		format = "gzip"
-	} else if *zstdFlag {
+	if *zstdFlag {
 		format = "zstd"
 	}
 

@@ -41,8 +41,6 @@ e2e: e2e-server-start
 	@$(GO) build -o $(E2E_REPLAY) ./cmd/replay || ($(MAKE) e2e-server-stop; exit 1)
 	@echo "Running e2e tests..."
 	@$(E2E_REPLAY) -log e2e/requests-ndjson.log -verbose || ($(MAKE) e2e-server-stop; exit 1)
-	@echo "Running e2e tests with gzip..."
-	@$(E2E_REPLAY) -log e2e/requests-ndjson.log.gz -gzip -verbose || ($(MAKE) e2e-server-stop; exit 1)
 	@echo "Running e2e tests with zstd..."
 	@$(E2E_REPLAY) -log e2e/requests-ndjson.log.zst -zstd -verbose || ($(MAKE) e2e-server-stop; exit 1)
 	@echo "Running generated canonical request body e2e test..."

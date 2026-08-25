@@ -15,7 +15,7 @@ import (
 )
 
 func combineUsage(flagSet *flag.FlagSet, output io.Writer) {
-	fmt.Fprintln(output, "usage: replay combine -log <mixed-input> -out <canonical-output> [-gzip|-zstd]")
+	fmt.Fprintln(output, "usage: replay combine -log <mixed-input> -out <canonical-output> [-zstd]")
 	flagSet.SetOutput(output)
 	flagSet.PrintDefaults()
 }
@@ -29,7 +29,6 @@ func runCombineContext(ctx context.Context, args []string, stdout, stderr io.Wri
 	flags.SetOutput(io.Discard)
 	logPath := flags.String("log", "", "path to mixed Envoy NDJSON input")
 	outPath := flags.String("out", "", "path to plain canonical NDJSON output")
-	gzipInput := flags.Bool("gzip", false, "read input compressed with gzip")
 	zstdInput := flags.Bool("zstd", false, "read input compressed with zstd")
 
 	if err := flags.Parse(args); err != nil {
@@ -48,19 +47,13 @@ func runCombineContext(ctx context.Context, args []string, stdout, stderr io.Wri
 		fmt.Fprintln(stderr, "combine: validate arguments: -out is required")
 		return 2
 	}
-	if *gzipInput && *zstdInput {
-		fmt.Fprintln(stderr, "combine: validate arguments: -gzip and -zstd are mutually exclusive")
-		return 2
-	}
 	if flags.NArg() != 0 {
 		fmt.Fprintf(stderr, "combine: validate arguments: unexpected positional arguments: %s\n", strings.Join(flags.Args(), " "))
 		return 2
 	}
 
 	format := ""
-	if *gzipInput {
-		format = "gzip"
-	} else if *zstdInput {
+	if *zstdInput {
 		format = "zstd"
 	}
 	summary, err := combineFiles(ctx, *logPath, *outPath, format)
