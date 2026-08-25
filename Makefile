@@ -113,7 +113,7 @@ release-cli-build:
 
 release-cli-upload:
 	@if [ -z "$(RELEASE_TAG)" ]; then echo "RELEASE_TAG is required"; exit 2; fi
-	$(GH) release upload "$(RELEASE_TAG)" \
+	$(GH) release upload "$(RELEASE_TAG)" --clobber \
 		"$(RELEASE_BIN_DIR)/replay-linux-amd64" \
 		"$(RELEASE_BIN_DIR)/replay-linux-arm64" \
 		"$(RELEASE_BIN_DIR)/replay-windows-amd64.exe" \
