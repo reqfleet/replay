@@ -273,6 +273,9 @@ func (c Config) Validate() error {
 	if c.Replay.Sharding.ShardIndex < 0 || c.Replay.Sharding.ShardIndex >= c.Replay.Sharding.ShardCount {
 		return errors.New("replay.sharding.shard_index must be within [0, shard_count)")
 	}
+	if _, err := c.Target.ParseURL(); err != nil {
+		return err
+	}
 	if c.Metrics.GracefulTerminationPeriod < 0 {
 		return errors.New("metrics.graceful_termination_period must be >= 0")
 	}
