@@ -3,7 +3,7 @@ package engine
 import (
 	"testing"
 
-	"github.com/reqfleet/replay/internal/config"
+	"github.com/reqfleet/replay/config"
 	"github.com/reqfleet/replay/internal/model"
 )
 

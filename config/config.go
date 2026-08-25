@@ -210,23 +210,30 @@ func Default() Config {
 	}
 }
 
+// Parse overlays YAML content onto Default and validates the resulting
+// configuration.
+func Parse(content []byte) (Config, error) {
+	cfg := Default()
+	if err := yaml.Unmarshal(content, &cfg); err != nil {
+		return Config{}, fmt.Errorf("parse yaml: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// Load reads, parses, and validates path. An empty path returns Default.
 func Load(path string) (Config, error) {
 	if path == "" {
 		return Default(), nil
 	}
 
-	base := Default()
-	b, err := os.ReadFile(path)
+	content, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
-	if err := yaml.Unmarshal(b, &base); err != nil {
-		return Config{}, fmt.Errorf("parse yaml: %w", err)
-	}
-	if err := base.Validate(); err != nil {
-		return Config{}, err
-	}
-	return base, nil
+	return Parse(content)
 }
 
 func (c Config) Validate() error {

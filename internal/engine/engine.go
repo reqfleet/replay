@@ -21,7 +21,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/reqfleet/replay/internal/config"
+	"github.com/reqfleet/replay/config"
 	"github.com/reqfleet/replay/internal/metrics"
 	"github.com/reqfleet/replay/internal/model"
 	"github.com/reqfleet/replay/internal/sharding"

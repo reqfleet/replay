@@ -18,12 +18,17 @@ The `validation` package validates and summarizes Replay streams without
 exposing Replay's internal event model. Summarization also validates the input,
 so callers that only need totals can omit the separate validation pass.
 
+The `config` package exposes the runtime configuration schema, defaults,
+parsing, loading, environment overrides, and validation for embedding
+applications.
+
 ```go
 package main
 
 import (
 	"bytes"
 
+	replayconfig "github.com/reqfleet/replay/config"
 	"github.com/reqfleet/replay/validation"
 )
 
@@ -37,6 +42,10 @@ func inspect(data []byte, compressed bool) (validation.Summary, error) {
 		return validation.Summary{}, err
 	}
 	return validation.SummarizeStream(bytes.NewReader(data), format)
+}
+
+func loadConfig(path string) (replayconfig.Config, error) {
+	return replayconfig.Load(path)
 }
 ```
 
