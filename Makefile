@@ -1,4 +1,9 @@
 GO ?= go
+# Build and test with the standard library's v2-backed encoding/json
+# implementation.
+GOEXPERIMENT ?= jsonv2
+export GOEXPERIMENT
+
 BINARY ?= replay
 BIN_DIR ?= bin
 RELEASE_BIN_DIR ?= $(BIN_DIR)/release
