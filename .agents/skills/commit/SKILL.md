@@ -1,11 +1,11 @@
 ---
 name: commit
-description: ALWAYS use this skill when committing code changes — never commit directly without it. Creates commits following Sentry conventions with proper conventional commit format and issue references. Trigger on any commit, git commit, save changes, or commit message task.
+description: ALWAYS use this skill when committing code changes — never commit directly without it. Creates Conventional Commit messages for Reqfleet repositories so release-please can derive releases and changelogs. Trigger on any commit, git commit, save changes, or commit message task.
 ---
 
-# Sentry Commit Messages
+# Reqfleet Commit Skill
 
-Follow these conventions when creating commits for Sentry projects.
+Follow these conventions when creating commits for Reqfleet repositories.
 
 ## Prerequisites
 
@@ -22,19 +22,36 @@ git branch --show-current
 git checkout -b <type>-<short-description>
 ```
 
-Branch naming should follow the pattern: `<type>-<short-description>` where type matches the commit type (e.g., `feat-add-user-auth`, `fix-null-pointer-error`, `ref-extract-validation`).
+Branch naming should follow the pattern `<type>-<short-description>`, where the type matches the commit type (for example, `feat-add-access-logs`, `fix-nil-response`, or `refactor-extract-validation`).
 
-## Format
+## Conventional Commit Format
 
+Reqfleet commit messages MUST follow [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/):
+
+```text
+<type>[optional scope][!]: <description>
+
+[optional body]
+
+[optional footer(s)]
 ```
-<type>(<scope>): <subject>
 
-<body>
+The header is required. The scope, body, and footers are optional. Use `!` or a `BREAKING CHANGE:` footer for a breaking change. Keep every line under 100 characters.
 
-<footer>
-```
+## Release Automation
 
-The header is required. Scope is optional. All lines must stay under 100 characters.
+Reqfleet uses [release-please](https://github.com/googleapis/release-please) for releases. Release-please reads Conventional Commit messages on the default branch, opens or updates a release pull request, and derives the changelog and next semantic version. Merging the release pull request creates the version tag and GitHub release.
+
+Commit types determine the release:
+
+| Commit | Semantic version effect |
+|--------|-------------------------|
+| `fix` | Patch release |
+| `feat` | Minor release |
+| Any type with `!` or a `BREAKING CHANGE:` footer | Major release |
+| Other types | No implicit release |
+
+Choose the type from the actual change; never mislabel a commit only to force a version bump. Release-please must see a valid Conventional Commit in the default branch history, so the final squash or merge commit must also follow this format. Do not manually update release versions, tags, or changelogs for a normal release; leave those changes to the release pull request.
 
 ## Commit Types
 
@@ -42,111 +59,118 @@ The header is required. Scope is optional. All lines must stay under 100 charact
 |------|---------|
 | `feat` | New feature |
 | `fix` | Bug fix |
-| `ref` | Refactoring (no behavior change) |
 | `perf` | Performance improvement |
+| `refactor` | Refactoring with no feature or bug fix |
 | `docs` | Documentation only |
 | `test` | Test additions or corrections |
-| `build` | Build system or dependencies |
+| `build` | Build system or dependency changes |
 | `ci` | CI configuration |
-| `chore` | Maintenance tasks |
-| `style` | Code formatting (no logic change) |
-| `meta` | Repository metadata |
-| `license` | License changes |
+| `chore` | Maintenance not covered by another type |
+| `style` | Formatting with no logic change |
+| `revert` | Revert a previous commit |
+
+`feat` and `fix` have SemVer meaning. Other types are valid Conventional Commits but do not imply a version bump unless they contain a breaking change.
 
 ## Subject Line Rules
 
-- Use imperative, present tense: "Add feature" not "Added feature"
-- Capitalize the first letter
-- No period at the end
-- Maximum 70 characters
+- Use the exact form `<type>(<scope>): <description>`; omit the parentheses when there is no scope
+- Use a lowercase type and an optional noun scope describing the affected area
+- Use imperative, present tense: "Add feature" rather than "Added feature"
+- Capitalize the first letter of the description
+- Do not end the description with a period
+- Keep the complete header under 70 characters
 
 ## Body Guidelines
 
-- Explain **what** and **why**, not how
+- Separate the body from the header with one blank line
+- Explain **what** and **why**, not implementation details already clear from the diff
 - Use imperative mood and present tense
-- Include motivation for the change
-- Contrast with previous behavior when relevant
+- Include motivation and contrast with previous behavior when relevant
 
-## Footer: Issue References
+## Footers
 
-Reference issues in the footer using these patterns:
+Separate footers from the body with one blank line. Use Conventional Commit trailer syntax:
 
-```
-Fixes GH-1234
+```text
 Fixes #1234
-Fixes SENTRY-1234
-Refs LINEAR-ABC-123
+Refs: GH-1234
+Refs: LINEAR-ABC-123
 ```
 
-- `Fixes` closes the issue when merged
-- `Refs` links without closing
+- `Fixes #1234` closes the GitHub issue when merged
+- `Refs` links related work without closing it
+- Footer tokens use hyphens instead of spaces, except for the exact token `BREAKING CHANGE`
+
+For a breaking change, add `!` immediately before the colon, a `BREAKING CHANGE:` footer, or both:
+
+```text
+BREAKING CHANGE: Describe the incompatible behavior and migration path
+```
 
 ## AI-Generated Changes
 
-When changes were primarily generated by a coding agent, include the Co-Authored-By attribution in the commit footer and replace the placeholder with the active model's own name:
+When changes were primarily generated by a coding agent, include the `Co-Authored-By` attribution in the commit footer and replace the placeholder with the active model's own name:
 
-```
+```text
 Co-Authored-By: <model name>
 ```
 
-This is the only indicator of AI involvement that should appear in commits. Do not add phrases like "Generated by AI", "Written with Claude", or similar markers in the subject, body, or anywhere else in the commit message.
+This is the only indicator of AI involvement that should appear in commits. Do not add phrases such as "Generated by AI", "Written with Claude", or similar markers elsewhere in the commit message.
 
 ## Examples
 
 ### Simple fix
 
-```
-fix(api): Handle null response in user endpoint
+```text
+fix(replay): Handle nil upstream response
 
-The user API could return null for deleted accounts, causing a crash
-in the dashboard. Add null check before accessing user properties.
+An upstream may close before returning headers, which previously caused a
+panic. Return the existing upstream error instead.
 
-Fixes SENTRY-5678
+Fixes #108
 Co-Authored-By: <model name>
 ```
 
-
 ### Feature with scope
 
-```
-feat(alerts): Add Slack thread replies for alert updates
+```text
+feat(replay): Add Envoy access log combiner
 
-When an alert is updated or resolved, post a reply to the original
-Slack thread instead of creating a new message. This keeps related
-notifications grouped together.
+Allow replay to combine Envoy access logs before processing requests so
+operators can replay split log streams in their original order.
 
-Refs GH-1234
+Refs: GH-102
 ```
 
 ### Refactor
 
-```
-ref: Extract common validation logic to shared module
+```text
+refactor(config): Extract shared validation
 
-Move duplicate validation code from three endpoints into a shared
-validator class. No behavior change.
+Move duplicate validation into the configuration package without changing
+behavior.
 ```
 
 ### Breaking change
 
-```
-feat(api)!: Remove deprecated v1 endpoints
+```text
+feat(replay)!: Remove gzip input support
 
-Remove all v1 API endpoints that were deprecated in version 23.1.
-Clients should migrate to v2 endpoints.
+Remove gzip decoding from the replay input path. Clients must decompress input
+before invoking replay.
 
-BREAKING CHANGE: v1 endpoints no longer available
-Fixes SENTRY-9999
+BREAKING CHANGE: Replay no longer accepts gzip-compressed input
+Fixes #104
 ```
 
 ## Revert Format
 
-```
-revert: feat(api): Add new endpoint
+```text
+revert: Restore gzip input support
 
-This reverts commit abc123def456.
+Revert the removal because deployed clients still send compressed input.
 
-Reason: Caused performance regression in production.
+Refs: abc123def456
 ```
 
 ## Principles
@@ -154,7 +178,9 @@ Reason: Caused performance regression in production.
 - Each commit should be a single, stable change
 - Commits should be independently reviewable
 - The repository should be in a working state after each commit
+- The final commit on the default branch should produce accurate release notes
 
 ## References
 
-- [Sentry Commit Messages](https://develop.sentry.dev/engineering-practices/commit-messages/)
+- [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/)
+- [Release Please](https://github.com/googleapis/release-please)
