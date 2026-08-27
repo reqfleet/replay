@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/reqfleet/replay/compare/v0.1.0...v0.1.1) (2026-08-27)
+
+
+### Bug Fixes
+
+* **release:** Publish multi-architecture images ([#110](https://github.com/reqfleet/replay/issues/110)) ([5d26d48](https://github.com/reqfleet/replay/commit/5d26d48c1265aebccc325aabe3dec3e8d3c5dbe6))
+
 ## 0.1.0 (2026-08-26)
 
 
