@@ -53,25 +53,15 @@ func loadConfig(path string) (replayconfig.Config, error) {
 
 For replay fidelity, prepare canonical replay events from paired Envoy
 access-log observations with `replay combine`. Replay also accepts End-only
-completion logs directly for quick verification. The bundled example shows the
-recommended Kubernetes capture and preprocessing workflow;
-[`specs.md`](specs.md#3-recording-and-replay-input) defines every wire schema.
+completion logs directly for quick verification. The complete recording and
+input contracts are defined in
+[`specs.md`](specs.md#3-recording-and-replay-input).
 
 ### Basic capture with the Envoy example
 
 [`example/envoy-standalone-proxy-full-headers.yaml`](example/envoy-standalone-proxy-full-headers.yaml)
-deploys one Envoy reverse proxy. Its stdout contains a `DownstreamStart` and a
-`DownstreamEnd` observation for every request, correlated by the request's
-`X-Request-ID`, recorded as `request_id`. Envoy generates a value when that
-header is absent but may preserve a value supplied by the client or an upstream
-proxy.
-
-The capture format treats `request_id` as physical-request identity, not as a
-logical trace or transaction identifier. Every physical request—including each
-retry and fan-out request—MUST have an ID that is not reused by another request
-on the same `(node, connection_id)` during the capture. Applications that need
-one correlation value across several physical requests must carry that value
-separately. Reusing an ID makes `combine` reject the capture as ambiguous.
+deploys one Envoy reverse proxy and records paired `DownstreamStart` and
+`DownstreamEnd` observations.
 
 1. Copy the manifest and change the `test_cluster` endpoint from
    `testhttp:8080` to the application service being recorded.
@@ -91,8 +81,8 @@ separately. Reusing an ID makes `combine` reject the capture as ambiguous.
 
 4. Route clients to `envoy-recorder-proxy:8080` instead of directly to the
    application. Stop the log command with `Ctrl-C` when the recording window
-   ends. Requests that bypass the proxy are not recorded.
-5. Pair the mixed observations into canonical replay input:
+   ends.
+5. Pair the observations into canonical replay input:
 
    ```bash
    go run ./cmd/replay combine \
@@ -100,7 +90,7 @@ separately. Reusing an ID makes `combine` reject the capture as ambiguous.
      -out ./canonical.ndjson
    ```
 
-6. Inspect the canonical NDJSON, then parse it without sending requests:
+6. Parse the canonical NDJSON without sending requests:
 
    ```bash
    go run ./cmd/replay -log ./canonical.ndjson -dry-run
@@ -127,67 +117,15 @@ go run ./tools/generate_requests.go \
   -out ./downstream-end.ndjson
 ```
 
-`-downstream-end` emits only flat `DownstreamEnd` records and is mutually
-exclusive with `-observations`, which emits paired Start/End input for
-`replay combine`.
-
-Each record may use explicit `type: "DownstreamEnd"` or omit `type`. This
-convenience path preserves file append order, which may be response-completion
-order rather than request-start order. **Request order is not guaranteed; use
-combined logs to preserve replay fidelity.** A file containing any
-`DownstreamStart` still requires `replay combine`.
-
-`kubectl logs` can combine access logs with Envoy process logs. `combine`
-ignores blank lines and lines that do not begin with `{`; a malformed JSON line
-that does begin with `{` is fatal. At EOF, it discards unmatched Start or End
-observations and writes their counts as a warning to stderr. `-zstd` selects
-compressed input. Combined output is always plain NDJSON and is installed
-atomically only after every complete Start/End pair validates.
-
-The example captures request headers and the response status, but not request
-or response bodies or response headers. Consequently, it supports status
-validation but not recorded response-header or body validation.
-
-### Capture log conformance
-
-Raw observations from another Envoy configuration or capture tool must follow
-the [recorder observation schema](specs.md#31-raw-recorder-observations):
-
-- UTF-8 NDJSON containing exactly one explicit `DownstreamStart` and one
-  explicit `DownstreamEnd` per original request.
-- A nonempty, non-`-` `request_id` shared by the pair and unique among physical
-  requests with the same `(node, connection_id)` throughout the capture.
-  `node`, `connection_id`, nonempty request descriptors, and start timestamp
-  must also agree within the pair.
-- `response_code` and Envoy's string `response_flags` on the End observation.
-  `-` and an empty flag string mean no flags; other values are comma-separated
-  exact tokens.
-
-`replay -log` accepts either of two homogeneous input families:
-
-- Canonical records with explicit `type: "request"` or
-  `type: "connection_close"`.
-- Direct completion records with explicit `type: "DownstreamEnd"` or no `type`.
-
-Never mix those families in one file. `DownstreamStart`, `connection_open`, and
-unknown types are invalid replay input. A paired or mixed observation capture
-must pass through `replay combine`.
-
-Canonical requests contain a nonempty `request_id`, valid `timestamp`, nonempty
-`method`, `authority`, `path`, and `protocol`, integer `connection_id`, and
-integer `response_code`. Header values and `response_flags` are arrays of
-strings. `scheme` and `node` are optional. `stream_id` is optional for
-non-HTTP/1.1 requests and must be omitted from HTTP/1.1 canonical records.
-
-Direct completion records require the same fields except `request_id` is
-optional. Their optional `response_flags` uses Envoy's comma-separated string
-form. HTTP/1.1 direct records may omit `stream_id` or use `1`. Replay normalizes
-both input families to internal stream ID `1` for HTTP/1.1.
+Direct completion input may use response-completion order. Use combined logs
+when replay order matters. The example captures request headers and response
+status, but not bodies or response headers, so it supports status validation
+only.
 
 Capture files can contain credentials, cookies, and personal data. Restrict
-their storage and access, and redact fields before sharing them. The sample
-`config.yaml` drops `authorization` and `cookie` when replaying; it does not
-remove those values from an already recorded file.
+their storage and access, and redact fields before sharing them. Configuration
+that drops sensitive headers during replay does not remove them from the
+recorded file.
 
 ## Run
 
@@ -208,215 +146,49 @@ preserve replay fidelity.** If `-config` is omitted, safe defaults are used.
 
 ## Metrics
 
-By default, metrics are exposed at:
+Metrics are exposed at `http://0.0.0.0:9102/metrics` by default. The endpoint,
+namespace, common labels, label-cardinality limits, path templates, and graceful
+termination period are configurable under `metrics` in
+[`config.yaml`](config.yaml).
 
-- `http://0.0.0.0:9102/metrics`
+See the [metrics specification](specs.md#64-metrics-emission-and-scrape-endpoint)
+for the metric catalog and exact label, path-template, and endpoint behavior.
 
-Metric names with the default `replay` namespace:
+## Outcome and exit status
 
-- `replay_latency_label_milliseconds`
-- `replay_latency_label_milliseconds_bucket`
-- `replay_latency_label_milliseconds_sum`
-- `replay_latency_label_milliseconds_count`
-- `replay_status_counter`
-- `replay_egress_bytes_counter`
-- `replay_threads_gauge`
-- `replay_cpu_gauge`
-- `replay_mem_gauge`
+Replay reports `success`, `partial_success`, or `failed`. `partial_success`
+returns exit code `0` by default; set
+`REPLAY_PARTIAL_SUCCESS_EXIT_ZERO=false` when it must return `1`.
 
-`replay_threads_gauge` reflects active virtual users. It increments when a replay
-worker starts and decrements when that worker finishes.
+See the [outcome specification](specs.md#63-replay-outcome-model) for request,
+connection, and run outcome definitions.
 
-`metrics.path_templates` reduces Prometheus label cardinality by replacing dynamic
-request paths with configured templates. A path segment enclosed in braces is a
-wildcard: with `/users/{id}`, a request to `/users/123` emits `/users/{id}` as
-the metric `label`. Templates must have the same number of segments as the
-request and match every literal segment; the first matching template wins.
-Query strings are excluded before matching, and unmatched paths retain their
-original path label.
+## Configuration
 
-Templates are validated when configuration loads. Each template must be an
-absolute path with at most 64 non-empty segments and no trailing slash, dot
-segments, query, or fragment. Wildcards must occupy an entire segment and use
-a name of at most 64 bytes matching `[A-Za-z_][A-Za-z0-9_]*`; literal segments
-must use RFC 3986 path characters, with non-ASCII bytes percent-encoded.
-Duplicate templates are rejected. A configuration may contain at most 256
-templates, 2 KiB each and 64 KiB in total.
+[`config.yaml`](config.yaml) contains a ready-to-use example for replay safety,
+retry, validation, pacing, sharding, checkpoints, and metrics. Configuration
+precedence is CLI flags, environment variables, YAML, then built-in defaults.
 
-## Outcome model
+Notable safety controls:
 
-- Run outcomes: `success`, `partial_success`, `failed`
-- Exit code:
-  - `0` for `success`
-  - `1` for `failed`
-  - `0` for `partial_success` by default
-  - set `REPLAY_PARTIAL_SUCCESS_EXIT_ZERO=false` to force `1` on `partial_success`
+* `--dry-run` / `REPLAY_DRY_RUN`: parse input without sending requests.
+* `--override-url` / `REPLAY_OVERRIDE_URL`: rewrite the target host and URL.
+* `--disallow-recorded-targets` / `REPLAY_DISALLOW_RECORDED_TARGETS`: require an
+  override instead of sending to captured destinations.
 
-`replay_status_counter` includes both numeric HTTP response codes and synthetic transport statuses such as `timeout`, `connection_refused`, `connection_reset`, `tls`, `network`, and `send_error` when a request fails before any response is received.
+See the [runtime configuration specification](specs.md#65-runtime-configuration-yaml)
+for the complete configuration contract and supported environment overrides.
 
-## CLI & environment precedence
+## Operator checklist
 
-Configuration precedence (highest → lowest): CLI flags > environment variables > YAML config > defaults.
-
-Notable CLI flags (also available via env):
-- `--dry-run` / `REPLAY_DRY_RUN`: do not send network requests.
-- `--override-url` / `REPLAY_OVERRIDE_URL`: rewrite target host and URL.
-- `--disallow-recorded-targets` / `REPLAY_DISALLOW_RECORDED_TARGETS`: fail if no override is configured.
-- `--config` path: YAML config file (loaded before env and CLI overrides).
-
-Environment variables for metrics:
-- `METRICS_ENABLED`, `METRICS_NAMESPACE`, `METRICS_LISTEN_ADDRESS`, `METRICS_PATH`, `METRICS_GRACEFUL_TERMINATION_PERIOD`
-
-`metrics.graceful_termination_period` keeps the endpoint scrapeable for the full configured window after replay stops, including signal cancellation, then gracefully drains in-flight scrapes. The default is `5s`. Replay fails startup if the metrics listener cannot bind.
-
-Common Prometheus labels are configured with `metrics.common_labels`:
-- each entry has `name`, literal fallback `value`, and optional `env`
-- if the configured env var is unset or empty, replay falls back to the literal `value`
-- replay resolves these env-ref keys from the process environment
-
-CLI flags are applied last and take highest precedence for safety-related settings.
-
-## Operator checklist (safe run)
-
-- Always run with `--dry-run` first to confirm traffic parsing and pacing without emitting network requests.
-- When replaying against non-production targets, use `--override-url` and consider setting `--disallow-recorded-targets` in operator configs to prevent accidental traffic to recorded destinations.
-- Verify the metrics endpoint (default `http://0.0.0.0:9102/metrics`) is reachable before and during runs.
-- If you need resumable runs, set `checkpoint.file` in the YAML. Acknowledged sequences update in-memory progress per `node` + `connection_id`; dirty progress is durably synced at `checkpoint.sync_interval` (default `1s`) and flushed on orderly shutdown. An abrupt process or host failure can lose up to approximately one configured interval of progress, and persistence failures fail the run when observed or during shutdown.
-
-## Programmatic outcome details
-
-In addition to the summary printed to stdout, the engine maintains aggregate outcome types for programmatic consumption:
-
-- `ConnectionResult` — fields: `node`, `connection_id`, `outcome` (`completed`/`aborted`), plus per-connection aggregate counters (`requests_sent`, `responses_received`, `send_errors`, `validation_failed`, `skipped`).
-- `RequestResult` — retained as an API type for future bounded detail output; `Summary.RequestResults` and `ConnectionResult.Requests` are not populated during normal replay so large captures do not retain one result per request.
-
-## Example config (replay/config.yaml)
-
-See `config.yaml` in this directory for a ready-to-use example demonstrating safe defaults, metrics, and override usage.
-
-## Canonical replay input
-
-Replay accepts one JSON object per line from exactly one input family.
-
-Canonical input requires explicit, case-sensitive `type: "request"` or
-`type: "connection_close"`. A `request` requires `request_id`, `connection_id`,
-`timestamp`, `method`, `authority`, `path`, `protocol`, and `response_code`.
-`response_flags`, when present, must be an array of strings. A
-`connection_close` requires only `connection_id`; `node` is optional and
-participates in the connection key. Close events do not advance request
-sequence.
-
-Direct completion input uses explicit, case-sensitive
-`type: "DownstreamEnd"` or omits `type`. It requires `connection_id`,
-`timestamp`, `method`, `authority`, `path`, `protocol`, and `response_code`;
-`request_id` and Envoy string `response_flags` are optional. Replay normalizes
-each accepted completion to a request event and preserves append order.
-
-Canonical and direct completion records must not coexist in one file. Malformed
-JSON, `type: null`, empty, lowercase, or unknown types, `DownstreamStart`, and
-`connection_open` are rejected with the physical input line number. Use
-`replay combine` for paired or mixed Envoy observations.
-
-## Retry and validation config
-
-Use `config.yaml` to control retry, response validation, pacing, and idempotency safeguards.
-Each `validation.status`, `validation.headers`, and `validation.body` field
-directly enables that check; there is no aggregate validation toggle.
-On canonical `request` events, `response_code`, `response_headers`, and
-`response_body` provide response-validation expectations.
-
-```yaml
-replay:
-  rampup_duration: 0s  # 0s disables ramp-up; 30s stages VUs over 30 seconds
-  http2:
-    mode: serialized  # serialized|multiplexed
-  retry:
-    max_attempts: 2
-    backoff: exponential  # none|fixed|exponential
-    retry_on_statuses: [429, 502, 503, 504]
-    retry_on_errors: [timeout, connection_reset, network, tls]
-  validation:
-    status: true
-    headers: false
-    body: false
-    ignore_headers: [x-request-id, date]
-  pacing:
-    enabled: false
-    max_sleep_delta: 30s
-  idempotency:
-    enabled: true
-    block_methods: [POST, PUT, PATCH, DELETE]
-    require_header_for_allow: [idempotency-key, x-idempotency-key]
-  sharding:
-    shard_index: 0
-    shard_count: 1
-  checkpoint:
-    file: "./checkpoint.json"
-metrics:
-  namespace: replay
-  path_templates:
-    - /users/{id}
-    - /users/{id}/orders
-  common_labels:
-    - name: run_id
-      value: unknown
-      env: REPLAY_RUN_ID
-    - name: worker_id
-      value: "0"
-      env: REPLAY_WORKER_ID
-    - name: zone
-      value: unknown
-      env: REPLAY_ZONE
-```
-
-With pacing enabled, Replay maps increasing recorded timestamp deltas onto a
-per-connection replay deadline. Time spent waiting for the preceding response
-counts toward the next delta; Replay sleeps only for any remaining time instead
-of adding the full recorded delta after the response completes.
-
-When a canonical `request` contains captured response expectations,
-enabled-check mismatches increment `validation_failed` and produce
-`partial_success`.
-
-When the target is unreachable or times out, the request is recorded as `send_error`, the run remains `partial_success`, and `replay_status_counter` is incremented with a synthetic transport status.
-
-When idempotency safeguards are enabled, mutation methods are skipped unless one of the allow headers is present.
-The combiner converts an exact `DC` response-flag token into one
-`connection_close` after that connection's final Start-ordered request. Replay
-waits for in-flight HTTP/2 work, closes the transport, and finalizes the
-connection at that marker. Connections without `DC` retain their sequence and
-transport state until EOF, where Replay finalizes them.
-
-Active connection-state and transport memory scales with simultaneously active
-connection identities. Run summaries retain one aggregate `ConnectionResult`
-for every finalized connection but do not populate per-request result
-collections. Result memory therefore scales with total connections processed,
-not total requests.
-
-For `N` replay processes, point every process at the same complete capture,
-configure the same `shard_count: N`, and give each process a unique
-`shard_index` in `[0, N)`. Replay hashes `node` + `connection_id`, so one
-process handles every record for an identity in file order. Each process still
-scans the complete input; sharding partitions replay execution, active state,
-and retained results, not input-read I/O.
-
-Do not split a connection using arbitrary byte offsets, line ranges, or
-timestamp windows. Sharded checkpoint files are isolated with a
-`.shard-<index>-of-<count>` suffix.
-
-If `checkpoint.file` is set, completed sequences update an in-memory watermark
-and are persisted at `checkpoint.sync_interval` (default `1s`). Orderly
-shutdown flushes the latest watermark; after an abrupt termination, replay can
-repeat requests completed since the last successful sync. Persisted sequences
-are skipped on the next run using the same `node` + `connection_id` identity.
-
-For HTTP/2 traffic, `serialized` replays requests sequentially, while
-`multiplexed` dispatches requests concurrently on the shared per-connection
-client and joins in-flight requests at `connection_close` or EOF. Canonical
-records produced by `combine` are globally ordered by `DownstreamStart`
-observation order, not response-completion order. Direct completion logs retain
-their append order, which may be response-completion order. Replay never
-reorders either family by `timestamp`, `stream_id`, or `sequence`.
+* Run with `--dry-run` first to verify parsing and pacing without sending
+  requests.
+* For non-production targets, use `--override-url` and consider
+  `--disallow-recorded-targets`.
+* Verify the configured metrics endpoint before and during a run.
+* Set `replay.checkpoint.file` for resumable runs. See
+  [checkpoint persistence](specs.md#42-checkpoint-persistence) for durability
+  and sharding behavior.
 
 ## Development
 
