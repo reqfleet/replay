@@ -2,6 +2,18 @@
 
 Go-based HTTP replay engine that consumes NDJSON traffic logs and exposes Prometheus metrics on `/metrics`.
 
+## Motivation and Goal
+
+Most load tests use synthetic traffic. Tools such as JMeter and Locust can
+generate large volumes of traffic, but synthetic workloads often lack a
+critical property: fidelity to production traffic.
+
+Production traffic patterns are visible in proxy and sidecar logs. Replay uses
+those logs to reproduce real traffic. Envoy is one of the industry's most
+widely used proxies, so it is Replay's initial capture source.
+
+Simply put, Replay reproduces traffic from Envoy logs.
+
 ## Inputs
 
 - Recommended replay input: canonical `request`/`connection_close` NDJSON such
