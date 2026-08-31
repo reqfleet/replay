@@ -224,6 +224,14 @@ Direct input does not synthesize `connection_close`, including for the exact
 `DC` flag. Safe marker placement requires Start order. Direct-input connections
 therefore finalize only at EOF.
 
+### 3.5 Capture Data Handling
+
+Capture files can contain credentials, cookies, and personal data. Operators
+MUST restrict their storage and access and SHOULD redact sensitive fields before
+sharing a capture. Target overrides and header rewrite rules alter outbound
+replay requests only; they do not redact values already stored in an input
+file.
+
 ---
 
 ## 4. Replay Semantics
@@ -259,7 +267,7 @@ Two supported modes:
 1. Serialized mode, which sends requests one at a time in observed connection order.
 2. Multiplexed mode, which sends HTTP/2 requests concurrently on the shared per-connection client and joins in-flight requests at EOF.
 
-Multiplexed mode uses stream-aware checkpointing so a later completed request cannot advance the checkpoint past an earlier in-flight request.
+Checkpoint advancement in multiplexed mode follows Section 4.2.
 
 Replay consumes HTTP/2 requests in input append order and does not reorder them
 by `timestamp`, `stream_id`, or `sequence`. `replay combine` establishes
@@ -286,8 +294,25 @@ Recommended implementation pattern:
 
 * Use a dispatcher to read NDJSON and route events to shard-specific queues/files by `node` + `connection_id`.
 * Preserve append order within each shard output.
-* Persist replay checkpoints per shard to support restart without duplicate sends.
 * Apply capacity controls per replay engine (see Section 6.2).
+
+### 4.2 Checkpoint Persistence
+
+Setting `replay.checkpoint.file` enables resumable replay. The engine records a
+monotonic completed-sequence watermark for each `node` + `connection_id` and
+skips input at or below a loaded watermark. Multiplexed HTTP/2 MUST advance the
+watermark only after every earlier admitted sequence reaches a terminal,
+checkpointable state.
+
+Dirty progress MUST be persisted at `replay.checkpoint.sync_interval`, which
+defaults to `1s`, and flushed during orderly shutdown. An abrupt process or host
+failure can repeat requests completed since the last successful sync.
+Checkpoint read, parse, version, and persistence failures MUST fail the run
+when observed.
+
+When `shard_count` is greater than one, each shard MUST use an isolated
+checkpoint. Replay derives the path by appending
+`.shard-<shard_index>-of-<shard_count>` to the configured file.
 
 ---
 
@@ -357,11 +382,16 @@ transport memory therefore depends on the number of simultaneously active
 `node` + `connection_id` identities assigned to the engine.
 
 Replay retains one aggregate `ConnectionResult` for every finalized connection
-until the run summary is consumed. Normal replay does not populate
-`Summary.RequestResults` or `ConnectionResult.Requests`. Result memory therefore
-depends on the total connections processed, including identities already
-finalized by `connection_close`. Request concurrency additionally depends on
-HTTP mode and target latency.
+until the run summary is consumed. It contains `node`, `connection_id`,
+`outcome`, and aggregate `requests_sent`, `responses_received`, `send_errors`,
+`validation_failed`, and `skipped` counters. `RequestResult` remains an API type
+for bounded request-detail output, but normal replay does not populate
+`Summary.RequestResults` or `ConnectionResult.Requests`.
+
+Result memory therefore depends on the total connections processed, including
+identities already finalized by `connection_close`, rather than the total
+request count. Request concurrency additionally depends on HTTP mode and target
+latency.
 
 Distributed replay note:
 
@@ -423,9 +453,16 @@ Metric catalog with the default `replay` namespace:
 * `replay_cpu_gauge`
 * `replay_mem_gauge`
 
+`replay_threads_gauge` reports active virtual users. It increments when a replay
+worker starts and decrements when that worker finishes.
+
 Engine-specific integrations MAY configure a different Prometheus namespace and common label set. Label conventions SHOULD include configurable common dimensions plus metric-specific labels such as `label`, `status`, and `le`.
 
-For `replay_status_counter`, the `status` label MAY contain either a numeric HTTP status code or a synthetic transport status such as `timeout`, `connection_refused`, `connection_reset`, `tls`, `network`, or `send_error` when no HTTP response was received.
+For `replay_status_counter`, the `status` label MAY contain either a numeric
+HTTP status code or a synthetic transport status such as `timeout`,
+`connection_refused`, `connection_reset`, `tls`, `network`, or `send_error`.
+A request that fails before receiving an HTTP response MUST increment the
+counter with its synthetic transport status.
 
 Engines SHOULD support a `metrics.path_templates` list to prevent dynamic path
 segments from creating unbounded metric-label cardinality. A segment enclosed
@@ -434,6 +471,23 @@ are literal. Matching MUST use the path without its query string, require the
 same segment count, and compare literal segments exactly. The first matching
 template MUST become the metric-specific `label`; when no template matches, the
 path without its query string MUST remain the label.
+
+Every path template MUST be an absolute path with at most 64 nonempty segments
+and no trailing slash, dot segment, query, or fragment. A wildcard MUST occupy
+an entire segment and use a name of at most 64 bytes matching
+`[A-Za-z_][A-Za-z0-9_]*`. Literal segments MUST use RFC 3986 path characters,
+with non-ASCII bytes percent-encoded. Duplicate templates are invalid. A
+configuration MUST contain at most 256 templates, at most 2 KiB per template,
+and at most 64 KiB across all templates.
+
+Each `metrics.common_labels` entry contains `name`, a literal fallback `value`,
+and an optional environment variable name in `env`. When that variable is
+unset or empty, the literal value remains in use.
+
+`metrics.graceful_termination_period` defaults to `5s`. After replay stops, the
+metrics endpoint MUST remain scrapeable for the configured period and then
+gracefully drain in-flight scrapes. Failure to bind the configured metrics
+listener MUST fail startup.
 
 ### 6.5 Runtime Configuration (YAML)
 
@@ -455,6 +509,23 @@ Configuration precedence (recommended):
 2. YAML file
 3. Environment variables
 4. CLI flags (highest precedence)
+
+Replay recognizes these environment overrides:
+
+* `REPLAY_DRY_RUN`
+* `REPLAY_VERBOSE`
+* `REPLAY_OVERRIDE_URL`
+* `REPLAY_DISALLOW_RECORDED_TARGETS`
+* `REPLAY_PARTIAL_SUCCESS_EXIT_ZERO`
+* `METRICS_ENABLED`
+* `METRICS_NAMESPACE`
+* `METRICS_LISTEN_ADDRESS`
+* `METRICS_PATH`
+* `METRICS_MAX_LABELS`
+* `METRICS_GRACEFUL_TERMINATION_PERIOD`
+
+Configured common-label environment references follow the resolution rules in
+Section 6.4.
 
 Example:
 
@@ -490,11 +561,14 @@ replay:
     shard_count: 1
   checkpoint:
     file: "./checkpoint.json"
+    sync_interval: 1s
 metrics:
   enabled: true
   namespace: "replay"
   listen_address: "0.0.0.0:9102"
   path: "/metrics"
+  max_labels: 20
+  graceful_termination_period: 5s
   path_templates:
     - "/users/{id}"
     - "/users/{id}/orders"
@@ -512,6 +586,9 @@ metrics:
 
 Each `validation.status`, `validation.headers`, and `validation.body` field
 directly enables that check; there is no aggregate validation toggle.
+
+When idempotency safeguards are enabled, configured mutation methods are
+recorded as `skipped` unless an allow header is present.
 
 POST and mutation requests may cause side effects if replayed against production systems.
 
