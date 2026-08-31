@@ -49,74 +49,6 @@ func loadConfig(path string) (replayconfig.Config, error) {
 }
 ```
 
-## Development
-
-The development environment is an Ubuntu VM managed by
-[Lima](https://lima-vm.io/). The bundled configuration uses Apple's
-Virtualization framework and an ARM64 image, so it requires an Apple silicon
-Mac, Lima 1.0 or newer, and `make` on the host.
-
-### Start the VM and connect
-
-From the repository root on the macOS host, run:
-
-```bash
-make devbox-ssh
-```
-
-This creates or starts the Lima instance named `replay`, mounts the current
-checkout read-write at `/workspace/replay`, installs the Go version declared in
-`go.mod` through GVM, and opens a shell in that directory. The initial start
-downloads and provisions the VM, so it takes longer than subsequent starts.
-
-Run project `make` targets and Go commands from this VM shell, not from the
-macOS host:
-
-```bash
-# VM: /workspace/replay
-make build
-make test
-```
-
-Editing files and running repository commands such as `git` may still be done
-on the host because the checkout is shared with the VM. Exit the shell with
-`exit`; the VM continues running.
-
-### Tests and checks
-
-Run these commands inside the VM:
-
-| Command | Purpose |
-| --- | --- |
-| `make staticcheck` | Run Staticcheck across all Go packages. |
-| `make test` | Run Staticcheck, then all Go tests with the test cache disabled. |
-| `go test ./internal/parser -count=1` | Run one package while developing. |
-| `make e2e` | Build Replay and exercise the bundled fixtures against a local test server. |
-| `make alltests` | Run `make test` and `make e2e`; this is the CI check. |
-| `make build` | Build `bin/replay` for the VM's OS and architecture. |
-| `make tidy` | Update `go.mod` and `go.sum` after dependency changes. |
-
-### VM lifecycle
-
-Run lifecycle commands from the macOS host:
-
-| Command | Purpose |
-| --- | --- |
-| `make devbox` | Create or start the VM without opening a shell. |
-| `make devbox-ssh` | Create or start the VM and open a shell in `/workspace/replay`. |
-| `make devbox-stop` | Stop the VM without deleting it. |
-| `make devbox-recreate` | Delete and reprovision the VM. Host checkout files remain; guest-local data is removed. |
-
-The current checkout is mounted by default. To mount a different checkout,
-pass its absolute path while recreating the VM:
-
-```bash
-make DEVBOX_PROJECT_DIR=/absolute/path/to/replay devbox-recreate
-```
-
-Recreate the VM after changing `lima.yaml` or `DEVBOX_PROJECT_DIR`; an existing
-instance retains the configuration and mount selected when it was created.
-
 ## Recording traffic
 
 For replay fidelity, prepare canonical replay events from paired Envoy
@@ -485,3 +417,84 @@ records produced by `combine` are globally ordered by `DownstreamStart`
 observation order, not response-completion order. Direct completion logs retain
 their append order, which may be response-completion order. Replay never
 reorders either family by `timestamp`, `stream_id`, or `sequence`.
+
+## Development
+
+Replay can be developed directly on Linux with `make` and the Go version
+declared in [`go.mod`](go.mod). Lima also supports Linux, but it is not required
+for native Linux development.
+
+### Linux host
+
+Install Go and `make`, then run project targets from the repository root:
+
+```bash
+make build
+make test
+```
+
+### Apple silicon macOS devbox
+
+The repository also provides an Ubuntu VM managed by
+[Lima](https://lima-vm.io/) for development on Apple silicon macOS. The bundled
+configuration selects Apple's Virtualization framework and an ARM64 image, so
+this devbox requires Lima 1.0 or newer and `make` on the macOS host.
+
+From the repository root, run:
+
+```bash
+make devbox-ssh
+```
+
+This creates or starts the Lima instance named `replay`, mounts the current
+checkout read-write at `/workspace/replay`, installs the Go version declared in
+`go.mod` through GVM, and opens a shell in that directory. The initial start
+downloads and provisions the VM, so it takes longer than subsequent starts.
+
+Run project `make` targets and Go commands from this VM shell, not directly from
+the macOS host:
+
+```bash
+# VM: /workspace/replay
+make build
+make test
+```
+
+Editing files and running repository commands such as `git` may still be done
+on the host because the checkout is shared with the VM. Exit the shell with
+`exit`; the VM continues running.
+
+### Tests and checks
+
+Run these commands directly on Linux or inside the VM on macOS:
+
+| Command | Purpose |
+| --- | --- |
+| `make staticcheck` | Run Staticcheck across all Go packages. |
+| `make test` | Run Staticcheck, then all Go tests with the test cache disabled. |
+| `go test ./internal/parser -count=1` | Run one package while developing. |
+| `make e2e` | Build Replay and exercise the bundled fixtures against a local test server. |
+| `make alltests` | Run `make test` and `make e2e`; this is the CI check. |
+| `make build` | Build `bin/replay` for the current OS and architecture. |
+| `make tidy` | Update `go.mod` and `go.sum` after dependency changes. |
+
+### VM lifecycle
+
+Run lifecycle commands from the macOS host that owns the VM:
+
+| Command | Purpose |
+| --- | --- |
+| `make devbox` | Create or start the VM without opening a shell. |
+| `make devbox-ssh` | Create or start the VM and open a shell in `/workspace/replay`. |
+| `make devbox-stop` | Stop the VM without deleting it. |
+| `make devbox-recreate` | Delete and reprovision the VM. Host checkout files remain; guest-local data is removed. |
+
+The current checkout is mounted by default. To mount a different checkout,
+pass its absolute path while recreating the VM:
+
+```bash
+make DEVBOX_PROJECT_DIR=/absolute/path/to/replay devbox-recreate
+```
+
+Recreate the VM after changing `lima.yaml` or `DEVBOX_PROJECT_DIR`; an existing
+instance retains the configuration and mount selected when it was created.
