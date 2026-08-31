@@ -267,7 +267,7 @@ Two supported modes:
 1. Serialized mode, which sends requests one at a time in observed connection order.
 2. Multiplexed mode, which sends HTTP/2 requests concurrently on the shared per-connection client and joins in-flight requests at EOF.
 
-Multiplexed mode uses stream-aware checkpointing so a later completed request cannot advance the checkpoint past an earlier in-flight request.
+Checkpoint advancement in multiplexed mode follows Section 4.2.
 
 Replay consumes HTTP/2 requests in input append order and does not reorder them
 by `timestamp`, `stream_id`, or `sequence`. `replay combine` establishes
@@ -294,7 +294,6 @@ Recommended implementation pattern:
 
 * Use a dispatcher to read NDJSON and route events to shard-specific queues/files by `node` + `connection_id`.
 * Preserve append order within each shard output.
-* Persist replay checkpoints per shard to support restart without duplicate sends.
 * Apply capacity controls per replay engine (see Section 6.2).
 
 ### 4.2 Checkpoint Persistence
@@ -459,7 +458,11 @@ worker starts and decrements when that worker finishes.
 
 Engine-specific integrations MAY configure a different Prometheus namespace and common label set. Label conventions SHOULD include configurable common dimensions plus metric-specific labels such as `label`, `status`, and `le`.
 
-For `replay_status_counter`, the `status` label MAY contain either a numeric HTTP status code or a synthetic transport status such as `timeout`, `connection_refused`, `connection_reset`, `tls`, `network`, or `send_error` when no HTTP response was received.
+For `replay_status_counter`, the `status` label MAY contain either a numeric
+HTTP status code or a synthetic transport status such as `timeout`,
+`connection_refused`, `connection_reset`, `tls`, `network`, or `send_error`.
+A request that fails before receiving an HTTP response MUST increment the
+counter with its synthetic transport status.
 
 Engines SHOULD support a `metrics.path_templates` list to prevent dynamic path
 segments from creating unbounded metric-label cardinality. A segment enclosed
@@ -521,8 +524,8 @@ Replay recognizes these environment overrides:
 * `METRICS_MAX_LABELS`
 * `METRICS_GRACEFUL_TERMINATION_PERIOD`
 
-Environment variables referenced by `metrics.common_labels[].env` override
-their corresponding literal label values.
+Configured common-label environment references follow the resolution rules in
+Section 6.4.
 
 Example:
 
@@ -584,13 +587,8 @@ metrics:
 Each `validation.status`, `validation.headers`, and `validation.body` field
 directly enables that check; there is no aggregate validation toggle.
 
-When an enabled response check does not match a canonical request's captured
-expectation, replay records `validation_failed` and the run becomes
-`partial_success`. A transport failure before any response records `send_error`,
-keeps the run at `partial_success`, and increments `replay_status_counter` with
-a synthetic transport status. When idempotency safeguards are enabled,
-configured mutation methods are recorded as `skipped` unless an allow header is
-present.
+When idempotency safeguards are enabled, configured mutation methods are
+recorded as `skipped` unless an allow header is present.
 
 POST and mutation requests may cause side effects if replayed against production systems.
 
