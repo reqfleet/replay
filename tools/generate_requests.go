@@ -203,17 +203,6 @@ func emitGeneratedDownstreamEnds(reqs, conns int, now time.Time, options generat
 	})
 }
 
-func generatedEvents(reqs, conns int, now time.Time, options generatedRequestOptions) []model.Event {
-	events := []model.Event{}
-	if err := emitGeneratedEvents(reqs, conns, now, options, func(event model.Event) error {
-		events = append(events, event)
-		return nil
-	}); err != nil {
-		panic(fmt.Sprintf("unexpected error generating events: %v", err))
-	}
-	return events
-}
-
 func main() {
 	var (
 		baseURL       = flag.String("base", "http://localhost:8080", "Base URL to generate requests for")

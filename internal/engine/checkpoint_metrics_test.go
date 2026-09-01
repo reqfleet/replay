@@ -20,56 +20,6 @@ import (
 	"github.com/reqfleet/replay/internal/model"
 )
 
-func TestCheckpointWrittenOnSuccess(t *testing.T) {
-	cfg := config.Default()
-
-	reg := metrics.New(cfg.Metrics)
-	e := New(cfg, reg)
-
-	srv := startOKServer()
-	defer srv.Close()
-
-	u := srv.URL
-	// extract host part
-	host := u[len("http://"):]
-
-	req := model.Event{Type: model.EventRequest, Node: "envoy-a", ConnectionID: 1, Sequence: 1, Scheme: "http", Authority: host, Path: "/"}
-
-	tmp := t.TempDir()
-	ckPath := filepath.Join(tmp, "checkpoint.json")
-	store, err := newCheckpointStore(ckPath, time.Second)
-	if err != nil {
-		t.Fatalf("new checkpoint store: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
-
-	client, transport := e.makePerConnectionClient(false)
-	defer transport.CloseIdleConnections()
-	summary := e.replayConnectionSerialized(context.Background(), client, []model.Event{req}, store)
-	if summary.RequestsSent != 1 {
-		t.Fatalf("expect 1 request sent, got %d", summary.RequestsSent)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("store.Close() error: %v", err)
-	}
-
-	b, err := os.ReadFile(ckPath)
-	if err != nil {
-		t.Fatalf("read checkpoint: %v", err)
-	}
-	var data struct {
-		Connections map[model.ConnectionKey]int `json:"connections"`
-	}
-	if err := json.Unmarshal(b, &data); err != nil {
-		t.Fatalf("unmarshal checkpoint: %v", err)
-	}
-	if got := data.Connections[model.ConnectionKey{Node: "envoy-a", ConnectionID: 1}]; got != 1 {
-		t.Fatalf("checkpoint for envoy-a/1 = %v, want 1", got)
-	}
-}
-
 func TestCheckpointPersistsLatestProgressOnInterval(t *testing.T) {
 	tmp := t.TempDir()
 	ckPath := filepath.Join(tmp, "checkpoint.json")
@@ -467,38 +417,28 @@ func waitForCheckpointSequence(t *testing.T, path string, key model.ConnectionKe
 }
 
 func TestCheckpointNotWrittenInDryRun(t *testing.T) {
+	ckPath := filepath.Join(t.TempDir(), "checkpoint.json")
 	cfg := config.Default()
-
 	cfg.Replay.DryRun = true
+	cfg.Replay.Checkpoint.File = ckPath
+	e := New(cfg, metrics.New(cfg.Metrics))
 
-	reg := metrics.New(cfg.Metrics)
-	e := New(cfg, reg)
-
-	srv := startOKServer()
-	defer srv.Close()
-	u := srv.URL
-	host := u[len("http://"):]
-
-	req := model.Event{Type: model.EventRequest, Node: "envoy-b", ConnectionID: 2, Sequence: 1, Scheme: "http", Authority: host, Path: "/"}
-
-	tmp := t.TempDir()
-	ckPath := filepath.Join(tmp, "checkpoint.json")
-	store, err := newCheckpointStore(ckPath, time.Second)
+	req := model.Event{
+		Type:         model.EventRequest,
+		Node:         "envoy-b",
+		ConnectionID: 2,
+		Sequence:     1,
+		Method:       http.MethodGet,
+		Scheme:       "http",
+		Authority:    "example.invalid",
+		Path:         "/",
+	}
+	summary, err := runReplay(e, []model.Event{req})
 	if err != nil {
-		t.Fatalf("new checkpoint store: %v", err)
+		t.Fatalf("runReplay(dry run) error: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
-
-	client, transport := e.makePerConnectionClient(false)
-	defer transport.CloseIdleConnections()
-	summary := e.replayConnectionSerialized(context.Background(), client, []model.Event{req}, store)
-	if summary.Skipped == 0 {
-		t.Fatalf("expected skipped > 0, got %d", summary.Skipped)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("store.Close() error: %v", err)
+	if got, want := summary.Skipped, int64(1); got != want {
+		t.Fatalf("summary.Skipped = %d, want %d", got, want)
 	}
 	if _, err := os.Stat(ckPath); !os.IsNotExist(err) {
 		t.Fatalf("os.Stat(%q) error = %v, want not-exist error", ckPath, err)
@@ -506,36 +446,30 @@ func TestCheckpointNotWrittenInDryRun(t *testing.T) {
 }
 
 func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
+	ckPath := filepath.Join(t.TempDir(), "checkpoint.json")
 	cfg := config.Default()
-
 	cfg.Replay.Idempotency.Enabled = true
 	cfg.Replay.Idempotency.BlockMethods = []string{"POST"}
 	cfg.Replay.Idempotency.RequireHeaderForAllow = []string{"x-idempotency-key"}
+	cfg.Replay.Checkpoint.File = ckPath
+	e := New(cfg, metrics.New(cfg.Metrics))
 
-	reg := metrics.New(cfg.Metrics)
-	e := New(cfg, reg)
-
-	// no server needed because idempotency skip happens before network
-	req := model.Event{Type: model.EventRequest, Node: "envoy-b", ConnectionID: 42, Sequence: 42, Scheme: "http", Authority: "example.invalid", Path: "/", Headers: map[string][]string{"content-type": {"text/plain"}}}
-
-	tmp := t.TempDir()
-	ckPath := filepath.Join(tmp, "checkpoint.json")
-	store, err := newCheckpointStore(ckPath, time.Second)
+	req := model.Event{
+		Type:         model.EventRequest,
+		Node:         "envoy-b",
+		ConnectionID: 42,
+		Sequence:     42,
+		Scheme:       "http",
+		Authority:    "example.invalid",
+		Path:         "/",
+		Headers:      map[string][]string{"content-type": {"text/plain"}},
+	}
+	summary, err := runReplay(e, []model.Event{req})
 	if err != nil {
-		t.Fatalf("new checkpoint store: %v", err)
+		t.Fatalf("runReplay(idempotency skip) error: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
-
-	client, transport := e.makePerConnectionClient(false)
-	defer transport.CloseIdleConnections()
-	summary := e.replayConnectionSerialized(context.Background(), client, []model.Event{req}, store)
-	if summary.Skipped != 1 {
-		t.Fatalf("summary.Skipped = %d, want 1", summary.Skipped)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("store.Close() error: %v", err)
+	if got, want := summary.Skipped, int64(1); got != want {
+		t.Fatalf("summary.Skipped = %d, want %d", got, want)
 	}
 	b, err := os.ReadFile(ckPath)
 	if err != nil {

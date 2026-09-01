@@ -100,17 +100,24 @@ func TestGeneratedRequestSerializesZeroResponseCode(t *testing.T) {
 	}
 }
 
-func TestGeneratedEventsInterleaveConnectionsByRequestStep(t *testing.T) {
+func TestEmitGeneratedEventsInterleavesConnectionsByRequestStep(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
-	events := generatedEvents(2, 2, now, generatedRequestOptions{
+	events := make([]model.Event, 0, 4)
+	err := emitGeneratedEvents(2, 2, now, generatedRequestOptions{
 		authority:   "example.com",
 		scheme:      "http",
 		port:        "80",
 		requestPath: "/base",
 		status:      200,
+	}, func(event model.Event) error {
+		events = append(events, event)
+		return nil
 	})
+	if err != nil {
+		t.Fatalf("emitGeneratedEvents(2, 2) error: %v", err)
+	}
 	if got, want := len(events), 4; got != want {
-		t.Fatalf("len(generatedEvents(2, 2)) = %d, want %d", got, want)
+		t.Fatalf("len(events) = %d, want %d", got, want)
 	}
 	wantConnections := []int{1, 2, 1, 2}
 	wantIDs := []string{
@@ -122,11 +129,11 @@ func TestGeneratedEventsInterleaveConnectionsByRequestStep(t *testing.T) {
 	wantPaths := []string{"/base", "/base", "/base/2", "/base/2"}
 	for i, event := range events {
 		if event.ConnectionID != wantConnections[i] || event.RequestID != wantIDs[i] || event.Path != wantPaths[i] {
-			t.Errorf("generatedEvents()[%d] identity = connection %d request_id %q path %q, want connection %d request_id %q path %q",
+			t.Errorf("events[%d] identity = connection %d request_id %q path %q, want connection %d request_id %q path %q",
 				i, event.ConnectionID, event.RequestID, event.Path, wantConnections[i], wantIDs[i], wantPaths[i])
 		}
 		if event.Type != model.EventRequest || event.ResponseCode == nil || *event.ResponseCode != 200 {
-			t.Errorf("generatedEvents()[%d] canonical response metadata = type %q response_code %v, want request/200", i, event.Type, event.ResponseCode)
+			t.Errorf("events[%d] canonical response metadata = type %q response_code %v, want request/200", i, event.Type, event.ResponseCode)
 		}
 	}
 }
