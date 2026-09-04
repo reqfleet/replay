@@ -24,42 +24,6 @@ Simply put, Replay reproduces traffic from Envoy logs.
   `type`
 - Optional: `config.yaml` (timeouts, retry, target override, and metrics settings)
 
-## Go library
-
-The `validation` package validates and summarizes Replay streams without
-exposing Replay's internal event model. Summarization also validates the input,
-so callers that only need totals can omit the separate validation pass.
-
-The `config` package exposes the runtime configuration schema, defaults,
-parsing, loading, environment overrides, and validation for embedding
-applications.
-
-```go
-package main
-
-import (
-	"bytes"
-
-	replayconfig "github.com/reqfleet/replay/config"
-	"github.com/reqfleet/replay/validation"
-)
-
-func inspect(data []byte, compressed bool) (validation.Summary, error) {
-	format := validation.FormatNDJSON
-	if compressed {
-		format = validation.FormatZstd
-	}
-
-	if err := validation.ValidateStream(bytes.NewReader(data), format); err != nil {
-		return validation.Summary{}, err
-	}
-	return validation.SummarizeStream(bytes.NewReader(data), format)
-}
-
-func loadConfig(path string) (replayconfig.Config, error) {
-	return replayconfig.Load(path)
-}
-```
 
 ## Recording traffic
 
@@ -282,3 +246,56 @@ make DEVBOX_PROJECT_DIR=/absolute/path/to/replay devbox-recreate
 
 Recreate the VM after changing `lima.yaml` or `DEVBOX_PROJECT_DIR`; an existing
 instance retains the configuration and mount selected when it was created.
+
+## Go library
+
+The `validation` package validates and summarizes Replay streams without
+exposing Replay's internal event model. Summarization also validates the input,
+so callers that only need totals can omit the separate validation pass.
+
+`ValidateStream`, `SummarizeStream`, and `SummarizeStreamWithSharding` accept
+either of these record families:
+
+- **Canonical replay events**: `request` and `connection_close` records,
+  normally produced by running `replay combine` on a paired Envoy capture.
+- **Direct End-only Envoy access logs**: flat records whose `type` is
+  `DownstreamEnd` or omitted. This form is intended only for quick verification
+  because records may be ordered by response completion rather than request
+  start.
+
+A stream must use one family throughout. Raw paired Envoy logs containing
+`DownstreamStart` and `DownstreamEnd` observations are not valid validation
+streams; process them with `replay combine` first. The `format` argument selects
+only the byte encoding—plain NDJSON (`FormatNDJSON`) or zstd-compressed NDJSON
+(`FormatZstd`)—not the record family.
+
+The `config` package exposes the runtime configuration schema, defaults,
+parsing, loading, environment overrides, and validation for embedding
+applications.
+
+```go
+package main
+
+import (
+	"bytes"
+
+	replayconfig "github.com/reqfleet/replay/config"
+	"github.com/reqfleet/replay/validation"
+)
+
+func inspect(data []byte, compressed bool) (validation.Summary, error) {
+	format := validation.FormatNDJSON
+	if compressed {
+		format = validation.FormatZstd
+	}
+
+	if err := validation.ValidateStream(bytes.NewReader(data), format); err != nil {
+		return validation.Summary{}, err
+	}
+	return validation.SummarizeStream(bytes.NewReader(data), format)
+}
+
+func loadConfig(path string) (replayconfig.Config, error) {
+	return replayconfig.Load(path)
+}
+```
