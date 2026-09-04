@@ -20,10 +20,6 @@ func combineUsage(flagSet *flag.FlagSet, output io.Writer) {
 	flagSet.PrintDefaults()
 }
 
-func runCombine(args []string, stdout, stderr io.Writer) int {
-	return runCombineContext(context.Background(), args, stdout, stderr)
-}
-
 func runCombineContext(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("combine", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)

@@ -31,7 +31,7 @@ func mixedCapture() string {
 
 func TestRunCombineHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if got, want := runCombine([]string{"-help"}, &stdout, &stderr), 0; got != want {
+	if got, want := runCombineContext(context.Background(), []string{"-help"}, &stdout, &stderr), 0; got != want {
 		t.Errorf("runCombine(-help) = %d, want %d", got, want)
 	}
 	if !strings.Contains(stdout.String(), "usage: replay combine") {
@@ -54,7 +54,7 @@ func TestRunCombineRejectsInvalidArguments(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			if got, want := runCombine(test.args, &stdout, &stderr), 2; got != want {
+			if got, want := runCombineContext(context.Background(), test.args, &stdout, &stderr), 2; got != want {
 				t.Errorf("runCombine(%v) = %d, want %d", test.args, got, want)
 			}
 			if stdout.Len() != 0 {
@@ -73,7 +73,7 @@ func TestRunCombineRejectsSameInputAndOutput(t *testing.T) {
 		t.Fatalf("os.WriteFile(%q) error: %v", path, err)
 	}
 	var stdout, stderr bytes.Buffer
-	if got, want := runCombine([]string{"-log", path, "-out", path}, &stdout, &stderr), 2; got != want {
+	if got, want := runCombineContext(context.Background(), []string{"-log", path, "-out", path}, &stdout, &stderr), 2; got != want {
 		t.Errorf("runCombine(same path) = %d, want %d", got, want)
 	}
 	if !strings.Contains(stderr.String(), "input and output paths are identical") {
@@ -96,7 +96,7 @@ func TestRunCombineInstallsCanonicalOutputAtomically(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if got, want := runCombine([]string{"-log", inputPath, "-out", outputPath}, &stdout, &stderr), 0; got != want {
+	if got, want := runCombineContext(context.Background(), []string{"-log", inputPath, "-out", outputPath}, &stdout, &stderr), 0; got != want {
 		t.Fatalf("runCombine(success) = %d, want %d; stderr=%q", got, want, stderr.String())
 	}
 	wantSummary := "combine complete starts=2 ends=2 records=2 connections_closed=1\n"
@@ -142,7 +142,7 @@ func TestRunCombineWarnsWhenDiscardingUnmatchedObservations(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if got, want := runCombine([]string{"-log", inputPath, "-out", outputPath}, &stdout, &stderr), 0; got != want {
+	if got, want := runCombineContext(context.Background(), []string{"-log", inputPath, "-out", outputPath}, &stdout, &stderr), 0; got != want {
 		t.Fatalf("runCombine(unmatched observations) = %d, want %d; stderr=%q", got, want, stderr.String())
 	}
 	wantStdout := "combine complete starts=1 ends=1 records=0 connections_closed=0\n"
@@ -168,7 +168,7 @@ func TestRunCombineSupportsLongOutputBasename(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	args := []string{"-log", inputPath, "-out", outputPath}
-	if got, want := runCombine(args, &stdout, &stderr), 0; got != want {
+	if got, want := runCombineContext(context.Background(), args, &stdout, &stderr), 0; got != want {
 		t.Fatalf("runCombine(long output basename) = %d, want %d; stderr=%q", got, want, stderr.String())
 	}
 	if got := string(mustReadFile(t, outputPath)); !strings.Contains(got, `"type":"request"`) {
@@ -383,7 +383,7 @@ func TestRunCombineErrorPreservesExistingOutput(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			if got, want := runCombine([]string{"-log", inputPath, "-out", outputPath}, &stdout, &stderr), 2; got != want {
+			if got, want := runCombineContext(context.Background(), []string{"-log", inputPath, "-out", outputPath}, &stdout, &stderr), 2; got != want {
 				t.Errorf("runCombine(%s) = %d, want %d", test.name, got, want)
 			}
 			if got, want := string(mustReadFile(t, outputPath)), "existing output\n"; got != want {
@@ -427,7 +427,7 @@ func TestRunCombineRejectsCanonicalRecordOverParserLimit(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if got, want := runCombine([]string{"-log", inputPath, "-out", outputPath}, &stdout, &stderr), 2; got != want {
+	if got, want := runCombineContext(context.Background(), []string{"-log", inputPath, "-out", outputPath}, &stdout, &stderr), 2; got != want {
 		t.Errorf("runCombine(oversized canonical record) = %d, want %d", got, want)
 	}
 	if stdout.Len() != 0 {
@@ -451,7 +451,7 @@ func TestRunCombineZstdInput(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	args := []string{"-log", inputPath, "-out", outputPath, "-zstd"}
-	if got, want := runCombine(args, &stdout, &stderr), 0; got != want {
+	if got, want := runCombineContext(context.Background(), args, &stdout, &stderr), 0; got != want {
 		t.Fatalf("runCombine(zstd input) = %d, want %d; stderr=%q", got, want, stderr.String())
 	}
 	if !strings.Contains(string(mustReadFile(t, outputPath)), `"request_id":"request-a"`) {
@@ -476,7 +476,7 @@ func TestRunCombineReportsOutputCreationAndInstallErrors(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			if got, want := runCombine([]string{"-log", inputPath, "-out", test.outputPath}, &stdout, &stderr), 2; got != want {
+			if got, want := runCombineContext(context.Background(), []string{"-log", inputPath, "-out", test.outputPath}, &stdout, &stderr), 2; got != want {
 				t.Errorf("runCombine(%s error) = %d, want %d", test.name, got, want)
 			}
 			if !strings.Contains(stderr.String(), test.want) {
@@ -494,7 +494,7 @@ func TestCombinedCaptureReplaysExactlyOneRequestPerPair(t *testing.T) {
 		t.Fatalf("os.WriteFile(%q) error: %v", inputPath, err)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := runCombine([]string{"-log", inputPath, "-out", outputPath}, &stdout, &stderr); code != 0 {
+	if code := runCombineContext(context.Background(), []string{"-log", inputPath, "-out", outputPath}, &stdout, &stderr); code != 0 {
 		t.Fatalf("runCombine() = %d, want 0; stderr=%q", code, stderr.String())
 	}
 	output := string(mustReadFile(t, outputPath))
@@ -558,7 +558,7 @@ func TestJoinCleanupErrorPreservesCauses(t *testing.T) {
 
 func TestRunCombineParseErrorIsSingleLine(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := runCombine([]string{"-unknown"}, &stdout, &stderr)
+	code := runCombineContext(context.Background(), []string{"-unknown"}, &stdout, &stderr)
 	if code != 2 || strings.Count(stderr.String(), "\n") != 1 {
 		t.Errorf("runCombine(-unknown) = code %d stderr %q, want code 2 and one error line", code, stderr.String())
 	}
