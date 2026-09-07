@@ -37,6 +37,7 @@ func writeJSONLine(f *os.File, v any) error {
 }
 
 type generatedRequestOptions struct {
+	method       string
 	authority    string
 	scheme       string
 	port         string
@@ -106,7 +107,7 @@ func generatedRequestEvent(connID, requestOrdinal int, ts time.Time, options gen
 		RequestID:    fmt.Sprintf("connection-%d-request-%d", connID, requestOrdinal),
 		ConnectionID: connID,
 		Timestamp:    ts.Format(time.RFC3339Nano),
-		Method:       "GET",
+		Method:       options.method,
 		Scheme:       options.scheme,
 		Authority:    options.authority,
 		Path:         options.requestPath,
@@ -207,6 +208,7 @@ func main() {
 	var (
 		baseURL       = flag.String("base", "http://localhost:8080", "Base URL to generate requests for")
 		requestPath   = flag.String("subpath", "api/v1/resource", "Subpath for generated requests")
+		method        = flag.String("method", "GET", "HTTP method for generated requests")
 		reqs          = flag.Int("reqs", 5, "Number of requests per connection")
 		conns         = flag.Int("conns", 1, "Number of simulated connections")
 		out           = flag.String("out", "requests.ndjson", "Output file path")
@@ -258,6 +260,7 @@ func main() {
 	defer file.Close()
 
 	options := generatedRequestOptions{
+		method:       *method,
 		authority:    authority,
 		scheme:       scheme,
 		port:         port,
