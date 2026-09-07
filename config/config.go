@@ -175,7 +175,7 @@ func Default() Config {
 				Status: true,
 			},
 			Pacing: PacingConfig{
-				Enabled:       false,
+				Enabled:       true,
 				MaxSleepDelta: 30 * time.Second,
 			},
 			Idempotency: IdempotencyConfig{

@@ -1,8 +1,8 @@
 # Replay
 
 Replay reconstructs HTTP traffic from Envoy access logs so capacity tests can
-use representative production request mixes and connection behavior. When
-pacing is enabled, Replay also reproduces recorded per-connection timing.
+use representative production request mixes and connection behavior. By
+default, Replay also reproduces recorded per-connection timing.
 
 ## Motivation and Design Goal
 
@@ -34,7 +34,7 @@ recorded connection-close signals are used when available. HTTP/1.1 requests
 remain sequential, while HTTP/2 traffic follows the configured serialized or
 multiplexed mode.
 
-When pacing is enabled, Replay also uses the recorded time gaps between
+Pacing is enabled by default: Replay uses the recorded time gaps between
 requests on each connection. Pacing is subject to the configured maximum delay
 and time already spent sending the preceding request.
 
@@ -204,6 +204,10 @@ for the metric catalog and exact label, path-template, and endpoint behavior.
 retry, validation, pacing, sharding, checkpoints, and metrics. Configuration
 precedence is CLI flags, environment variables, YAML, then built-in defaults.
 
+Pacing is enabled by default, with `replay.pacing.max_sleep_delta: 30s` capping
+each recorded per-connection gap. Set `replay.pacing.enabled: false` in YAML
+to replay without waiting for recorded timing.
+
 Notable safety controls:
 
 * `--dry-run` / `REPLAY_DRY_RUN`: parse input without sending requests.
@@ -216,8 +220,8 @@ for the complete configuration contract and supported environment overrides.
 
 ## Operator checklist
 
-* Run with `--dry-run` first to verify the input without sending requests. When
-  pacing is enabled, dry-run also exercises the configured timing.
+* Run with `--dry-run` first to verify the input without sending requests.
+  Dry-run also exercises recorded timing unless pacing is explicitly disabled.
 * Before a live run, set `--override-url` and use
   `--disallow-recorded-targets` to prevent fallback to destinations stored in
   the capture.

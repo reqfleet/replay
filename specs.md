@@ -499,7 +499,7 @@ Minimum configurable domains:
 * HTTP/2 replay mode: serialized or multiplexed.
 * Retry policy: max retries, retryable error classes/statuses, backoff strategy.
 * Validation: status, header, body, and ignored-header controls.
-* Pacing: optional timestamp-delta replay with a maximum sleep cap.
+* Pacing: timestamp-delta replay enabled by default, with a maximum sleep cap of `30s`; set `replay.pacing.enabled: false` to disable recorded-timing waits.
 * Metrics server: listen address/port, endpoint enable toggle (default enabled), path (default `/metrics`).
 * Capacity control: `max_virtual_users_per_engine`.
 
@@ -550,7 +550,7 @@ replay:
     body: false
     ignore_headers: [x-request-id, date]
   pacing:
-    enabled: false
+    enabled: true
     max_sleep_delta: 30s
   idempotency:
     enabled: true
