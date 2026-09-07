@@ -45,6 +45,7 @@ func TestParseGeneratedHeaderRejectsMalformedValue(t *testing.T) {
 
 func TestGeneratedRequestIncludesCanonicalIdentityAndResponse(t *testing.T) {
 	request := generatedRequestEvent(7, 3, time.Unix(100, 0).UTC(), generatedRequestOptions{
+		method:      "POST",
 		authority:   "example.com",
 		scheme:      "http",
 		port:        "80",
@@ -82,6 +83,7 @@ func TestGeneratedRequestIncludesCanonicalIdentityAndResponse(t *testing.T) {
 
 func TestGeneratedRequestSerializesZeroResponseCode(t *testing.T) {
 	request := generatedRequestEvent(1, 1, time.Unix(100, 0).UTC(), generatedRequestOptions{
+		method:    "GET",
 		authority: "example.com",
 		scheme:    "http",
 		port:      "80",
@@ -104,6 +106,7 @@ func TestEmitGeneratedEventsInterleavesConnectionsByRequestStep(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	events := make([]model.Event, 0, 4)
 	err := emitGeneratedEvents(2, 2, now, generatedRequestOptions{
+		method:      "GET",
 		authority:   "example.com",
 		scheme:      "http",
 		port:        "80",
@@ -142,6 +145,7 @@ func TestGeneratedDownstreamEndsAreDirectReplayInput(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	var observations []generatedObservation
 	err := emitGeneratedDownstreamEnds(2, 2, now, generatedRequestOptions{
+		method:      "POST",
 		authority:   "example.com",
 		scheme:      "http",
 		port:        "80",
@@ -198,6 +202,9 @@ func TestGeneratedDownstreamEndsAreDirectReplayInput(t *testing.T) {
 	}
 	wantSequences := []int{1, 1, 2, 2}
 	for i, event := range events {
+		if event.Method != "POST" {
+			t.Errorf("parsed DownstreamEnd events[%d].Method = %q, want POST", i, event.Method)
+		}
 		if event.Type != model.EventRequest ||
 			event.RequestID != wantIDs[i] ||
 			event.Sequence != wantSequences[i] {
@@ -211,6 +218,7 @@ func TestGeneratedObservationsReverseCompletionAndCombineInStartOrder(t *testing
 	now := time.Unix(100, 0).UTC()
 	var observations []generatedObservation
 	err := emitGeneratedObservations(2, 1, now, generatedRequestOptions{
+		method:      "PATCH",
 		authority:   "example.com",
 		scheme:      "https",
 		port:        "443",
@@ -286,6 +294,11 @@ func TestGeneratedObservationsReverseCompletionAndCombineInStartOrder(t *testing
 	}
 	if got, want := len(events), 3; got != want {
 		t.Fatalf("len(canonical events) = %d, want %d", got, want)
+	}
+	for i, event := range events[:2] {
+		if event.Method != "PATCH" {
+			t.Errorf("combined events[%d].Method = %q, want PATCH", i, event.Method)
+		}
 	}
 	if events[0].RequestID != "connection-1-request-1" ||
 		events[1].RequestID != "connection-1-request-2" ||

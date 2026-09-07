@@ -295,6 +295,20 @@ Run these commands directly on Linux or inside the VM on macOS:
 | `make build` | Build `bin/replay` for the current OS and architecture. |
 | `make tidy` | Update `go.mod` and `go.sum` after dependency changes. |
 
+### Generating request fixtures
+
+Run the generator on Linux or inside the VM on macOS:
+
+```bash
+go run ./tools/generate_requests.go -method POST \
+  -header 'Content-Type: application/json' \
+  -body '{"message":"hello"}' -out requests.ndjson
+```
+
+`-method` defaults to `GET` and applies to canonical events, `-downstream-end`,
+and `-observations` output. Supplying `-body` does not change the method; choose
+`POST`, `PUT`, or another method explicitly when appropriate.
+
 ### VM lifecycle
 
 Run lifecycle commands from the macOS host that owns the VM:
