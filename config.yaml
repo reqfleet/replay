@@ -18,7 +18,7 @@ replay:
     body: false
     ignore_headers: [x-request-id, date]
   pacing:
-    enabled: false
+    enabled: true
     max_sleep_delta: 30s
   idempotency:
     enabled: true
