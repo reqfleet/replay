@@ -1,8 +1,10 @@
-# Replay Engine (MVP)
+# Replay
 
-Go-based HTTP replay engine that consumes NDJSON traffic logs and exposes Prometheus metrics on `/metrics`.
+Replay reconstructs HTTP traffic from Envoy access logs so capacity tests can
+use representative production request mixes and connection behavior. When
+pacing is enabled, Replay also reproduces recorded per-connection timing.
 
-## Motivation and Goal
+## Motivation and Design Goal
 
 Most load tests use synthetic traffic. Tools such as JMeter and Locust can
 generate large volumes of traffic, but synthetic workloads often lack a
@@ -12,35 +14,119 @@ Production traffic patterns are visible in proxy and sidecar logs. Replay uses
 those logs to reproduce real traffic. Envoy is one of the industry's most
 widely used proxies, so it is Replay's initial capture source.
 
-Simply put, Replay reproduces traffic from Envoy logs.
+Simply put, Replay reproduces traffic from Envoy access logs.
 
-## Inputs
+### Replay fidelity
 
-- Recommended replay input: canonical `request`/`connection_close` NDJSON such
-  as `canonical.ndjson`
-- Recommended capture preparation: paired `DownstreamStart`/`DownstreamEnd`
-  observations in `requests.log`, processed by `replay combine`
-- Quick verification only: End-only NDJSON with explicit `DownstreamEnd` or no
-  `type`
-- Optional: `config.yaml` (timeouts, retry, target override, and metrics settings)
+Replay is designed to reproduce the shape of production traffic as closely as
+the recorded information allows.
 
+Packet-level capture and replay generally requires packet captures such as
+PCAP, together with tooling that can reproduce them. Collecting and handling
+that data can be intrusive in production. Replay instead uses Envoy access
+logs, which are already available in many deployments and provide enough HTTP
+and connection information for high-fidelity replay. Configuring Envoy usually does not require admin (root) permission. Hence we try to find the balance between operation easness and true fidelity.
+
+With paired `DownstreamStart` and `DownstreamEnd` logs, Replay preserves the
+observed request order within each downstream connection. Requests that shared
+the same client-to-Envoy connection remain grouped together during replay, and
+recorded connection-close signals are used when available. HTTP/1.1 requests
+remain sequential, while HTTP/2 traffic follows the configured serialized or
+multiplexed mode.
+
+When pacing is enabled, Replay also uses the recorded time gaps between
+requests on each connection. Pacing is subject to the configured maximum delay
+and time already spent sending the preceding request.
+
+Replay's event model supports request bodies for every HTTP method. When an
+event is sent, Replay decodes its valid base64 `body` field and attaches the
+payload to the outbound request. This representation supports both text and
+binary payloads. For body-carrying requests such as `POST` and `PUT`, fidelity
+therefore depends on the recorder including the original body. If log down the request/response body has security and other concerns, users can also attach artificial body data using scripts by following the specification.
+
+For environments where capture size matters, Replay can also use
+`DownstreamEnd` logs on their own. This reduces the amount of recorded data,
+with the tradeoff that Replay sees response-completion order rather than the
+original request-start order and cannot determine exactly when a connection
+closed.
+
+Replay fidelity ultimately depends on what the capture contains and how Replay
+is configured. Target overrides, header rewrites, method safeguards, and
+retries may intentionally change the resulting traffic. Replay focuses on HTTP
+behavior rather than reproducing raw network packets, header ordering, TLS
+handshakes, or exact server responses.
+
+See the [replay semantics](specs.md#4-replay-semantics) and
+[non-goals](specs.md#5-non-goals) for the detailed contract.
+
+## Sample usage
+
+Running replay will be looking like this:
+
+```bash
+go run ./cmd/replay -log ./log.ndjson
+```
+
+A more advanced usage that can protect the replay from targeting the production domain.
+
+```bash
+go run ./cmd/replay \
+  -log ./canonical.ndjson \
+  --override-url http://staging.example \
+  --disallow-recorded-targets
+```
 
 ## Recording traffic
 
-For replay fidelity, prepare canonical replay events from paired Envoy
-access-log observations with `replay combine`. Replay also accepts End-only
-completion logs directly for quick verification. The complete recording and
-input contracts are defined in
-[`specs.md`](specs.md#3-recording-and-replay-input).
+Before we talk about traffic capture in detail, let's firstly explain the basic conceps of different access logs types in Envoy. We start from explaining the definition of downstream.
+
+### Downstream
+
+Envoy commonly runs as a reverse proxy. Downstream clients send requests to
+Envoy, which forwards them to configured upstream servers:
+
+```text
+clients (downstream) -> Envoy -> (upstream) servers
+```
+
+Here, *downstream* describes the traffic between the client and Envoy.
+
+### `DownstreamStart` access log
+
+`DownstreamStart` is emitted for each HTTP request after Envoy has evaluated
+the request headers and before it runs the HTTP filter chain. It records the
+start of a request lifecycle.
+
+### `DownstreamEnd` access log
+
+`DownstreamEnd` is emitted after the response completes or the stream
+terminates. It can contain the response code, duration, response flags, and
+other response metadata when those fields are included in the configured log
+format.
+
+### Combine `DownstreamStart` and `DownstreamEnd`
+
+By combining the two types of logs, we are able to capture the full lifecycle of the requests and be able to replay the requests with high fidelity.
 
 ### Basic capture with the Envoy example
 
 [`example/envoy-standalone-proxy-full-headers.yaml`](example/envoy-standalone-proxy-full-headers.yaml)
-deploys one Envoy reverse proxy and records paired `DownstreamStart` and
-`DownstreamEnd` observations.
+deploys an Envoy reverse proxy that records paired `DownstreamStart` and
+`DownstreamEnd` observations. It requires a plain HTTP upstream reachable from
+the Envoy pod. The example expects that upstream at `testhttp:8080`.
 
-1. Copy the manifest and change the `test_cluster` endpoint from
-   `testhttp:8080` to the application service being recorded.
+The example uses Kubernetes for orchestration, but Replay itself does not
+require Kubernetes. It records selected request headers and response
+status/flags/duration. Replay supports request and response bodies, but this
+example does not capture them or response headers. Body-dependent requests such
+as `POST` and `PUT` need a recorder that populates the base64 `body` field;
+otherwise, requests allowed by the method safeguards are sent without their
+original payload. Capturing bodies can increase log volume, may require request
+buffering, and can place sensitive application data in the capture. This
+example therefore supports response-status validation only.
+
+1. Copy the manifest and change `socket_address.address` and `port_value` under
+   `test_cluster` from `testhttp` and `8080` to the HTTP server being recorded.
 2. Apply the manifest and wait for the proxy:
 
    ```bash
@@ -72,65 +158,26 @@ deploys one Envoy reverse proxy and records paired `DownstreamStart` and
    go run ./cmd/replay -log ./canonical.ndjson -dry-run
    ```
 
-7. Replay the prepared capture:
+7. Replay the prepared capture against an explicitly selected target:
 
    ```bash
-   go run ./cmd/replay -log ./canonical.ndjson -config ./config.yaml
+   go run ./cmd/replay \
+     -log ./canonical.ndjson \
+     -config ./config.yaml \
+     --override-url http://staging.example \
+     --disallow-recorded-targets
    ```
 
-For a quick parser and engine check when only End records were captured, run:
+If reducing capture volume is more important than request-start ordering,
+Replay can consume raw `DownstreamEnd` NDJSON without combining it with Start
+observations. Direct End input preserves End append order and cannot reconstruct
+safe connection-close placement, so connections remain active until EOF. End
+records may appear in response-completion order: request A can arrive before B
+but finish after B, producing replay order B, A instead of A, B.
 
-```bash
-go run ./cmd/replay -log ./downstream-end.ndjson -dry-run
-```
+## Replay outcome and metrics
 
-Generate deterministic End-only data for local verification with:
-
-```bash
-go run ./tools/generate_requests.go \
-  -base http://localhost:8080 \
-  -downstream-end \
-  -out ./downstream-end.ndjson
-```
-
-Direct completion input may use response-completion order. Use combined logs
-when replay order matters. The example captures request headers and response
-status, but not bodies or response headers, so it supports status validation
-only.
-
-Capture files can contain credentials, cookies, and personal data. Restrict
-their storage and access, and redact fields before sharing them. Configuration
-that drops sensitive headers during replay does not remove them from the
-recorded file.
-
-## Run
-
-Recommended fidelity path:
-
-```bash
-go run ./cmd/replay -log ./canonical.ndjson -config ./config.yaml
-```
-
-End-only quick verification path:
-
-```bash
-go run ./cmd/replay -log ./downstream-end.ndjson -dry-run
-```
-
-**Request order is not guaranteed for direct End logs; use combined logs to
-preserve replay fidelity.** If `-config` is omitted, safe defaults are used.
-
-## Metrics
-
-Metrics are exposed at `http://0.0.0.0:9102/metrics` by default. The endpoint,
-namespace, common labels, label-cardinality limits, path templates, and graceful
-termination period are configurable under `metrics` in
-[`config.yaml`](config.yaml).
-
-See the [metrics specification](specs.md#64-metrics-emission-and-scrape-endpoint)
-for the metric catalog and exact label, path-template, and endpoint behavior.
-
-## Outcome and exit status
+### Outcome and exit status
 
 Replay reports `success`, `partial_success`, or `failed`. `partial_success`
 returns exit code `0` by default; set
@@ -139,7 +186,19 @@ returns exit code `0` by default; set
 See the [outcome specification](specs.md#63-replay-outcome-model) for request,
 connection, and run outcome definitions.
 
-## Configuration
+### Metrics
+
+By default, Replay listens for Prometheus scrapes on `0.0.0.0:9102` at
+`/metrics`. Scrape it locally at `http://localhost:9102/metrics`, or use the
+host or container address reachable by your monitoring system. Metrics can be
+disabled, and the bind address, path, namespace, common labels,
+label-cardinality limits, path templates, and graceful termination period are
+configurable under `metrics` in [`config.yaml`](config.yaml).
+
+See the [metrics specification](specs.md#64-metrics-emission-and-scrape-endpoint)
+for the metric catalog and exact label, path-template, and endpoint behavior.
+
+## Replay Configuration
 
 [`config.yaml`](config.yaml) contains a ready-to-use example for replay safety,
 retry, validation, pacing, sharding, checkpoints, and metrics. Configuration
@@ -157,12 +216,18 @@ for the complete configuration contract and supported environment overrides.
 
 ## Operator checklist
 
-* Run with `--dry-run` first to verify parsing and pacing without sending
-  requests.
-* For non-production targets, use `--override-url` and consider
-  `--disallow-recorded-targets`.
-* Verify the configured metrics endpoint before and during a run.
-* Set `replay.checkpoint.file` for resumable runs. See
+* Run with `--dry-run` first to verify the input without sending requests. When
+  pacing is enabled, dry-run also exercises the configured timing.
+* Before a live run, set `--override-url` and use
+  `--disallow-recorded-targets` to prevent fallback to destinations stored in
+  the capture.
+* The supplied `config.yaml` blocks `POST`, `PUT`, `PATCH`, and `DELETE` unless
+  the effective request contains `idempotency-key` or `x-idempotency-key`.
+  Adjust `replay.idempotency` for the target's side-effect policy.
+* The supplied `config.yaml` enables resumable replay with
+  `replay.checkpoint.file: "./checkpoint.json"`. Reusing that file skips
+  sequences already recorded as complete; remove it or choose a new path for
+  an independent run. See
   [checkpoint persistence](specs.md#42-checkpoint-persistence) for durability
   and sharding behavior.
 
@@ -258,10 +323,10 @@ either of these record families:
 
 - **Canonical replay events**: `request` and `connection_close` records,
   normally produced by running `replay combine` on a paired Envoy capture.
-- **Direct End-only Envoy access logs**: flat records whose `type` is
-  `DownstreamEnd` or omitted. This form is intended only for quick verification
-  because records may be ordered by response completion rather than request
-  start.
+- **Direct End-only Envoy access logs**: a lower-volume capture of flat records
+  whose `type` is `DownstreamEnd` or omitted. Records remain in End append
+  order, which may be response-completion order rather than request-start
+  order.
 
 A stream must use one family throughout. Raw paired Envoy logs containing
 `DownstreamStart` and `DownstreamEnd` observations are not valid validation
