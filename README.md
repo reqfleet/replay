@@ -364,3 +364,92 @@ func loadConfig(path string) (replayconfig.Config, error) {
 	return replayconfig.Load(path)
 }
 ```
+
+### Add request bodies to combined logs
+
+Combined logs are canonical NDJSON, so you can edit them with Go's standard
+`encoding/json` package without importing Replay's internal event model. This
+example replaces the body of every `POST`, `PUT`, and `PATCH` request with dummy
+JSON. It preserves event order, connection-close records, and other fields.
+Adapt the method/path selection and payload to your application.
+
+Save this as `add-bodies.go`:
+
+```go
+package main
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"io"
+	"log"
+	"os"
+	"strings"
+)
+
+func main() {
+	decoder := json.NewDecoder(os.Stdin)
+	decoder.UseNumber() // Preserve integer IDs without float64 rounding.
+	encoder := json.NewEncoder(os.Stdout)
+
+	payload := []byte(`{"message":"dummy replay body"}`)
+	body := map[string]any{
+		"encoding":   "base64",
+		"content":    base64.StdEncoding.EncodeToString(payload),
+		"size_bytes": len(payload), // Decoded byte count, not base64 length.
+	}
+
+	for {
+		var event map[string]any
+		if err := decoder.Decode(&event); err == io.EOF {
+			break
+		} else if err != nil {
+			log.Fatal(err)
+		}
+
+		if event["type"] == "request" {
+			switch event["method"] {
+			case "POST", "PUT", "PATCH":
+				event["body"] = body
+				headers, ok := event["headers"].(map[string]any)
+				if !ok {
+					headers = make(map[string]any)
+				}
+				// Discard metadata for the old body; Replay computes its length.
+				for name := range headers {
+					switch strings.ToLower(name) {
+					case "content-length", "content-encoding", "content-type":
+						delete(headers, name)
+					}
+				}
+				headers["content-type"] = []string{"application/json"}
+				event["headers"] = headers
+			}
+		}
+
+		if err := encoder.Encode(event); err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+```
+
+Run it on the **uncompressed output of `replay combine`**, writing to a new
+file so the original capture is not truncated:
+
+```bash
+go run add-bodies.go < canonical.ndjson > with-bodies.ndjson
+go run ./cmd/replay -log ./with-bodies.ndjson -dry-run
+go run ./cmd/replay \
+  -log ./with-bodies.ndjson \
+  -config ./config.yaml \
+  --override-url http://staging.example \
+  --disallow-recorded-targets
+```
+
+Replay decodes each `body.content` from base64 and sends those bytes as the
+request body. The supplied `config.yaml` still requires an idempotency key for
+these methods; use keys honored by your target or deliberately adjust
+`replay.idempotency` for a safe test environment. Dummy bodies do not reproduce
+the original payloads and may change responses, so review any configured
+response validation.
