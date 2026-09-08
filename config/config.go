@@ -71,8 +71,7 @@ type ValidationConfig struct {
 }
 
 type PacingConfig struct {
-	Enabled       bool          `yaml:"enabled"`
-	MaxSleepDelta time.Duration `yaml:"max_sleep_delta"`
+	Enabled bool `yaml:"enabled"`
 }
 
 type IdempotencyConfig struct {
@@ -102,6 +101,7 @@ type CheckpointConfig struct {
 
 type MetricsConfig struct {
 	Enabled                   bool          `yaml:"enabled"`
+	ScheduleLatenessEnabled   bool          `yaml:"schedule_lateness_enabled"`
 	Namespace                 string        `yaml:"namespace"`
 	ListenAddress             string        `yaml:"listen_address"`
 	Path                      string        `yaml:"path"`
@@ -175,8 +175,7 @@ func Default() Config {
 				Status: true,
 			},
 			Pacing: PacingConfig{
-				Enabled:       true,
-				MaxSleepDelta: 30 * time.Second,
+				Enabled: true,
 			},
 			Idempotency: IdempotencyConfig{
 				Enabled:               true,
@@ -273,9 +272,6 @@ func (c Config) Validate() error {
 	case "serialized", "multiplexed":
 	default:
 		return errors.New("replay.http2.mode must be one of: serialized, multiplexed")
-	}
-	if c.Replay.Pacing.MaxSleepDelta < 0 {
-		return errors.New("replay.pacing.max_sleep_delta must be >= 0")
 	}
 	// Load overlays YAML onto Default, so an omitted interval remains one second.
 	if c.Replay.Checkpoint.SyncInterval <= 0 {

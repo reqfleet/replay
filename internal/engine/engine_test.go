@@ -44,7 +44,7 @@ func runReplay(eng *Engine, events []model.Event) (Summary, error) {
 	var err error
 	done := make(chan struct{})
 	go func() {
-		summary, err = eng.ReplayStream(ctx, ch)
+		summary, err = eng.ReplayStream(ctx, ch, nil)
 		close(done)
 	}()
 	for _, e := range events {
@@ -242,7 +242,7 @@ func TestExecuteRequestRetainsResponseHeadersOnlyForHeaderValidation(t *testing.
 			requestEvent := model.Event{Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/"}
 
 			exec, err := eng.executeRequest(
-				context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil),
+				context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{},
 			)
 			if err != nil {
 				t.Fatalf("executeRequest(status=%t, headers=%t) error: %v", tt.statusValidation, tt.headerValidation, err)
@@ -306,7 +306,7 @@ func TestExecuteRequestDoesNotReadAfterResponseEOF(t *testing.T) {
 			requestEvent := model.Event{Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/"}
 
 			exec, err := eng.executeRequest(
-				context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil),
+				context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{},
 			)
 			if err != nil {
 				t.Fatalf("executeRequest(body size %d) error: %v", len(tt.body), err)
@@ -355,7 +355,7 @@ func TestExecuteRequestIncludesDrainedBodyInEgressBytesOnReadError(t *testing.T)
 	requestEvent := model.Event{Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/"}
 
 	exec, err := eng.executeRequest(
-		context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil),
+		context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{},
 	)
 	if !errors.Is(err, bodyErr) {
 		t.Fatalf("executeRequest(truncated body with read error) error = %v, want %v", err, bodyErr)
@@ -387,6 +387,7 @@ func TestExecuteRequestIncludesResponseHeadersInEgressBytes(t *testing.T) {
 		client,
 		requestEvent,
 		eng.effectiveRequestHeaders(requestEvent.Headers),
+		time.Time{},
 	)
 	if err != nil {
 		t.Fatalf("executeRequest(raw response) error: %v", err)
@@ -415,6 +416,7 @@ func TestExecuteRequestIncludesPartialBodyInEgressBytesOnReadError(t *testing.T)
 		client,
 		requestEvent,
 		eng.effectiveRequestHeaders(requestEvent.Headers),
+		time.Time{},
 	)
 	if err == nil {
 		t.Fatal("executeRequest(partial body response) error = nil, want read error")
@@ -611,7 +613,7 @@ func TestSendRequestReturnsAttemptedExecutionWhenRetryBackoffCanceled(t *testing
 		Scheme:    "http",
 		Authority: "example.test",
 		Path:      "/"}
-	exec, err := eng.sendRequest(ctx, client, requestEvent, eng.effectiveRequestHeaders(requestEvent.Headers))
+	exec, err := eng.sendRequest(ctx, client, requestEvent, eng.effectiveRequestHeaders(requestEvent.Headers), time.Time{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("sendRequest(canceled retry backoff) error = %v, want %v", err, context.Canceled)
 	}
@@ -1168,7 +1170,7 @@ func TestResponseValidationComparesOversizedBodiesExactly(t *testing.T) {
 			requestEvent := model.Event{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}
 
 			exec, err := eng.executeRequest(
-				context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil),
+				context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{},
 			)
 			if err != nil {
 				t.Fatalf("executeRequest(body size %d) error: %v", len(actualBody), err)
@@ -1507,7 +1509,7 @@ func TestRouteEventsSkipsNonShardEventsBeforeLifecycleTracking(t *testing.T) {
 	close(events)
 
 	workerChs := []chan model.Event{make(chan model.Event, 1), make(chan model.Event, 1)}
-	if err := eng.routeEvents(context.Background(), events, workerChs); err != nil {
+	if err := eng.routeEvents(context.Background(), events, workerChs, &replayTimeline{}); err != nil {
 		t.Fatalf("routeEvents(non-shard request without open) error = %v, want nil", err)
 	}
 	if got := len(workerChs[0]) + len(workerChs[1]); got != 0 {
@@ -1527,7 +1529,7 @@ func TestRouteEventsSendsCloseToOwningWorker(t *testing.T) {
 	close(events)
 
 	workerChs := []chan model.Event{make(chan model.Event, 3), make(chan model.Event, 3)}
-	if err := eng.routeEvents(context.Background(), events, workerChs); err != nil {
+	if err := eng.routeEvents(context.Background(), events, workerChs, &replayTimeline{}); err != nil {
 		t.Fatalf("routeEvents() error = %v", err)
 	}
 
@@ -1965,7 +1967,6 @@ func TestReplayHTTP2PacingUsesConnectionOrderWithUniqueStreamIDs(t *testing.T) {
 	cfg.Replay.TLS.InsecureSkipVerify = true
 	cfg.Replay.Idempotency.Enabled = false
 	cfg.Replay.Pacing.Enabled = true
-	cfg.Replay.Pacing.MaxSleepDelta = 200 * time.Millisecond
 
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	events := []model.Event{
@@ -1997,10 +1998,10 @@ func TestPacingAccountsForElapsedRequestTime(t *testing.T) {
 	base := time.Date(2026, 2, 27, 3, 10, 21, 0, time.UTC)
 	cfg := config.Default()
 	cfg.Replay.Pacing.Enabled = true
-	cfg.Replay.Pacing.MaxSleepDelta = time.Second
 
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
+	cs.pacing.timeline = &replayTimeline{captureOrigin: base, replayStart: time.Now()}
 	if err := eng.paceRequest(context.Background(), cs, model.Event{Timestamp: base.Format(time.RFC3339Nano)}); err != nil {
 		t.Fatalf("paceRequest(first request) error: %v", err)
 	}
@@ -2019,12 +2020,12 @@ func TestPacingClockDoesNotRewindForNonIncreasingTimestamps(t *testing.T) {
 	base := time.Date(2026, 2, 27, 3, 10, 21, 0, time.UTC)
 	cfg := config.Default()
 	cfg.Replay.Pacing.Enabled = true
-	cfg.Replay.Pacing.MaxSleepDelta = 500 * time.Millisecond
 
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
 
 	start := time.Now()
+	cs.pacing.timeline = &replayTimeline{captureOrigin: base, replayStart: start}
 	for _, ts := range []time.Time{
 		base,
 		base.Add(100 * time.Millisecond),
@@ -2052,11 +2053,10 @@ func TestPacingSleepDoesNotLogByDefault(t *testing.T) {
 	base := time.Date(2026, 2, 27, 3, 10, 21, 0, time.UTC)
 	cfg := config.Default()
 	cfg.Replay.Pacing.Enabled = true
-	cfg.Replay.Pacing.MaxSleepDelta = time.Millisecond
 
 	eng := New(cfg, metrics.New(cfg.Metrics))
-	var pacing pacingClock
-	for _, ts := range []time.Time{base, base.Add(100 * time.Millisecond)} {
+	pacing := pacingClock{timeline: &replayTimeline{captureOrigin: base, replayStart: time.Now()}}
+	for _, ts := range []time.Time{base, base.Add(time.Millisecond)} {
 		if err := eng.paceTimestamp(context.Background(), &pacing, ts.Format(time.RFC3339Nano)); err != nil {
 			t.Fatalf("paceTimestamp(%s) error: %v", ts.Format(time.RFC3339Nano), err)
 		}
@@ -2601,6 +2601,7 @@ func TestSpecialAuthorityHeaderRewrite(t *testing.T) {
 			client,
 			requestEvent,
 			eng.effectiveRequestHeaders(requestEvent.Headers),
+			time.Time{},
 		); err != nil {
 			t.Fatalf("executeRequest() error: %v", err)
 		}
@@ -2764,7 +2765,7 @@ func TestReplayRejectsInvalidOverride(t *testing.T) {
 	events := make(chan model.Event)
 	close(events)
 
-	summary, err := eng.ReplayStream(context.Background(), events)
+	summary, err := eng.ReplayStream(context.Background(), events, nil)
 	if err == nil {
 		t.Fatal("ReplayStream() error = nil, want invalid target override error")
 	}
@@ -2777,6 +2778,7 @@ func TestReplayStreamDrainsEventsOnInitializationError(t *testing.T) {
 	tests := []struct {
 		name      string
 		configure func(*testing.T, *config.Config)
+		schedule  *ReplaySchedule
 	}{
 		{
 			name: "invalid_override",
@@ -2795,23 +2797,29 @@ func TestReplayStreamDrainsEventsOnInitializationError(t *testing.T) {
 				cfg.Replay.Checkpoint.File = checkpointPath
 			},
 		},
+		{
+			name:     "incomplete_schedule",
+			schedule: &ReplaySchedule{CaptureOrigin: time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC)},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.Default()
-			tt.configure(t, &cfg)
+			if tt.configure != nil {
+				tt.configure(t, &cfg)
+			}
 			eng := New(cfg, metrics.New(cfg.Metrics))
 
 			events := make(chan model.Event)
 			senderDone := make(chan struct{})
 			go func() {
-
+				events <- model.Event{Type: model.EventRequest}
 				close(events)
 				close(senderDone)
 			}()
 
-			summary, err := eng.ReplayStream(context.Background(), events)
+			summary, err := eng.ReplayStream(context.Background(), events, tt.schedule)
 			if err == nil {
 				t.Fatal("ReplayStream() error = nil, want initialization error")
 			}
@@ -2872,7 +2880,7 @@ func TestReplayStreamCancelsInFlightRequestOnRouteError(t *testing.T) {
 	events := make(chan model.Event)
 	resultCh := make(chan replayResult, 1)
 	go func() {
-		summary, err := eng.ReplayStream(context.Background(), events)
+		summary, err := eng.ReplayStream(context.Background(), events, nil)
 		resultCh <- replayResult{summary: summary, err: err}
 	}()
 

@@ -67,6 +67,104 @@ func TestRegistryUsesConfiguredNamespaceAndCommonLabels(t *testing.T) {
 	}
 }
 
+func TestRecordScheduleLateness(t *testing.T) {
+	cfg := config.Default().Metrics
+	cfg.ScheduleLatenessEnabled = true
+	cfg.Namespace = "custom"
+	cfg.CommonLabels = []config.MetricLabel{
+		{Name: "tenant_id", Value: "tenant-1"},
+		{Name: "worker_id", Value: "worker-2"},
+	}
+	r := New(cfg)
+	for _, lateness := range []time.Duration{250 * time.Millisecond, -time.Second, 0} {
+		r.RecordScheduleLateness(cfg.CommonLabelValues(), "/users", lateness)
+	}
+
+	families, err := r.r.Gather()
+	if err != nil {
+		t.Fatalf("Gather() after RecordScheduleLateness() error = %v, want nil", err)
+	}
+	for _, family := range families {
+		if family.GetName() != "custom_schedule_lateness_seconds" {
+			continue
+		}
+		if got := len(family.GetMetric()); got != 1 {
+			t.Fatalf("schedule lateness series count = %d, want 1", got)
+		}
+		metric := family.GetMetric()[0]
+		wantLabels := map[string]string{
+			"tenant_id": "tenant-1",
+			"worker_id": "worker-2",
+			"label":     "/users",
+		}
+		if got := len(metric.GetLabel()); got != len(wantLabels) {
+			t.Errorf("schedule lateness label count = %d, want %d", got, len(wantLabels))
+		}
+		for _, label := range metric.GetLabel() {
+			want, ok := wantLabels[label.GetName()]
+			if !ok || label.GetValue() != want {
+				t.Errorf("schedule lateness label %q = %q, want %q (expected label: %t)", label.GetName(), label.GetValue(), want, ok)
+			}
+		}
+		histogram := metric.GetHistogram()
+		if got := histogram.GetSampleCount(); got != 3 {
+			t.Errorf("RecordScheduleLateness(250ms, -1s, 0) sample count = %d, want 3", got)
+		}
+		if got := histogram.GetSampleSum(); got != 0.25 {
+			t.Errorf("RecordScheduleLateness(250ms, -1s, 0) sum in seconds = %g, want 0.25", got)
+		}
+		for _, bucket := range histogram.GetBucket() {
+			want := uint64(3)
+			if bucket.GetUpperBound() < 0.25 {
+				want = 2
+			}
+			if got := bucket.GetCumulativeCount(); got != want {
+				t.Errorf("RecordScheduleLateness(250ms, -1s, 0) bucket <= %g seconds count = %d, want %d", bucket.GetUpperBound(), got, want)
+			}
+		}
+		return
+	}
+	t.Fatal("Gather() after RecordScheduleLateness() did not expose custom_schedule_lateness_seconds")
+}
+
+func TestScheduleLatenessOptIn(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{name: "default_off"},
+		{name: "explicit_off", yaml: "metrics:\n  schedule_lateness_enabled: false\n"},
+		{name: "enabled", yaml: "metrics:\n  schedule_lateness_enabled: true\n", want: true},
+		{name: "metrics_disabled", yaml: "metrics:\n  enabled: false\n  schedule_lateness_enabled: true\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := config.Parse([]byte(tt.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := New(cfg.Metrics)
+			r.RecordScheduleLateness(cfg.Metrics.CommonLabelValues(), "/users", time.Second)
+			families, err := r.r.Gather()
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, family := range families {
+				if family.GetName() == "replay_schedule_lateness_seconds" {
+					found = true
+					if got := family.GetMetric()[0].GetHistogram(); got.GetSampleCount() != 1 || got.GetSampleSum() != 1 {
+						t.Errorf("lateness count/sum = %d/%g, want 1/1 seconds", got.GetSampleCount(), got.GetSampleSum())
+					}
+				}
+			}
+			if found != tt.want {
+				t.Errorf("lateness metric exposed = %t, want %t", found, tt.want)
+			}
+		})
+	}
+}
+
 func TestStartRuntimeCollectionStopIsIdempotent(t *testing.T) {
 	cfg := config.Default().Metrics
 	r := New(cfg)

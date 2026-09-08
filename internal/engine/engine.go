@@ -145,17 +145,42 @@ func drainEvents(events <-chan model.Event) {
 	}()
 }
 
+// ReplaySchedule maps recorded timestamps onto a caller-supplied wall-clock start.
+// Both fields must be nonzero. Share the same pair across replay invocations to
+// align their intended deadlines, including when their inputs are pre-sharded.
+type ReplaySchedule struct {
+	CaptureOrigin time.Time
+	ReplayStart   time.Time
+}
+
 // ReplayStream processes events from the provided channel as they arrive.
 // Events are routed to per-worker channels by connection assignment, providing
 // bounded backpressure without buffering entire connections in memory.
 // Each worker maintains per-connection state and replays HTTP/1.1 requests
 // synchronously as they arrive. HTTP/2 multiplexed requests are dispatched
 // concurrently on the shared per-connection client and joined at close/EOF.
-func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (Summary, error) {
+// A nil schedule selects the origin and start from input arrival. A supplied
+// schedule is copied at entry and its start is anchored to the local monotonic
+// clock. It does not enable pacing when replay.pacing.enabled is false.
+func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event, schedule *ReplaySchedule) (Summary, error) {
 	if e.targetOverrideErr != nil {
 		drainEvents(events)
 		return Summary{Outcome: RunFailed}, fmt.Errorf("validate target override: %w", e.targetOverrideErr)
 	}
+	var timeline replayTimeline
+	if schedule != nil {
+		if schedule.CaptureOrigin.IsZero() || schedule.ReplayStart.IsZero() {
+			drainEvents(events)
+			return Summary{Outcome: RunFailed}, errors.New("replay schedule requires capture origin and replay start")
+		}
+		now := time.Now()
+		timeline = replayTimeline{
+			captureOrigin: schedule.CaptureOrigin,
+			replayStart:   now.Add(schedule.ReplayStart.Round(0).Sub(now)),
+			initialized:   true,
+		}
+	}
+
 	checkpoints, err := newCheckpointStore(
 		checkpointPath(
 			e.cfg.Replay.Checkpoint.File,
@@ -189,11 +214,11 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 	for i := range workerChs {
 		activationDelay := workerActivationDelay(i, vus, e.cfg.Replay.RampupDuration)
 		wg.Go(func() {
-			results <- e.runEventWorker(replayCtx, workerChs[i], activationDelay, checkpoints)
+			results <- e.runEventWorker(replayCtx, workerChs[i], activationDelay, checkpoints, &timeline)
 		})
 	}
 
-	routeErr := e.routeEvents(replayCtx, events, workerChs)
+	routeErr := e.routeEvents(replayCtx, events, workerChs, &timeline)
 
 	if routeErr != nil {
 		cancelReplay()
@@ -227,7 +252,18 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event) (S
 
 const eventChannelDepth = 256
 
+// replayTimeline is initialized from the supplied schedule before workers start,
+// or by the router before sending the first valid request. Channel delivery
+// publishes the automatic timeline; it is immutable thereafter. Each timeline
+// belongs to one ReplayStream invocation, not to the reusable Engine.
+type replayTimeline struct {
+	captureOrigin time.Time
+	replayStart   time.Time
+	initialized   bool
+}
+
 type pacingClock struct {
+	timeline          *replayTimeline
 	previousTimestamp time.Time
 	nextRequestAt     time.Time
 	initialized       bool
@@ -279,11 +315,20 @@ func (e *Engine) detectHTTP2ForConn(cs *connState, firstRequest model.Event) {
 // Connections are assigned to workers round-robin on first appearance,
 // ensuring even distribution. All events for a connection go to the same
 // worker, preserving per-connection ordering.
-func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, workerChs []chan model.Event) error {
+func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, workerChs []chan model.Event, timeline *replayTimeline) error {
 	connWorker := make(map[model.ConnectionKey]int)
 	vus := len(workerChs)
 	nextWorker := 0
 	for ev := range events {
+		// Select the origin from input order, including requests owned by other
+		// shards. Do not let worker activation or connection assignment rebase it.
+		if e.cfg.Replay.Pacing.Enabled && !timeline.initialized && ev.Type == model.EventRequest {
+			if timestamp, ok := model.ParseTimestamp(ev.Timestamp); ok {
+				timeline.captureOrigin = timestamp
+				timeline.replayStart = time.Now()
+				timeline.initialized = true
+			}
+		}
 
 		connKey := model.ConnectionKey{Node: ev.Node, ConnectionID: ev.ConnectionID}
 		if !sharding.ConnectionBelongsToShard(connKey, e.cfg.Replay.Sharding.ShardIndex, e.cfg.Replay.Sharding.ShardCount) {
@@ -321,7 +366,7 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 // For HTTP/1.1, requests are processed synchronously as they arrive. For HTTP/2
 // multiplexed mode, requests are sent concurrently on the same per-connection
 // client and finalized when connection_close or EOF is observed.
-func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, activationDelay time.Duration, checkpoints *checkpointStore) Summary {
+func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, activationDelay time.Duration, checkpoints *checkpointStore, timeline *replayTimeline) Summary {
 	if err := waitForWorkerActivation(ctx, activationDelay); err != nil {
 		return Summary{}
 	}
@@ -346,12 +391,14 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 			if cs == nil {
 				cs = e.newConnState(connKey)
 				conns[connKey] = cs
+				cs.pacing.timeline = timeline
 			}
 
 		case model.EventRequest:
 			if cs == nil {
 				cs = e.newConnState(connKey)
 				conns[connKey] = cs
+				cs.pacing.timeline = timeline
 			}
 			if !cs.detected {
 				e.detectHTTP2ForConn(cs, ev)
@@ -461,7 +508,7 @@ func (e *Engine) processRequest(ctx context.Context, cs *connState, requestEvent
 		return abort
 	}
 
-	exec, err := e.sendRequest(ctx, cs.client, requestEvent, effectiveHeaders)
+	exec, err := e.sendRequest(ctx, cs.client, requestEvent, effectiveHeaders, cs.pacing.nextRequestAt)
 	if err != nil {
 		e.finishRequestError(cs, requestEvent, err, exec)
 		return true
@@ -496,9 +543,12 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 	if handled {
 		return
 	}
+	// The worker advances pacing before each dispatch. Capture this request's
+	// deadline before another HTTP/2 stream changes the connection clock.
+	deadline := cs.pacing.nextRequestAt
 
 	cs.h2WG.Go(func() {
-		exec, err := e.sendRequest(ctx, cs.client, requestEvent, effectiveHeaders)
+		exec, err := e.sendRequest(ctx, cs.client, requestEvent, effectiveHeaders, deadline)
 		if err != nil {
 			cs.h2Mu.Lock()
 			e.finishRequestError(cs, requestEvent, err, exec)
@@ -741,23 +791,17 @@ func (e *Engine) makePerConnectionClient(http2 bool) (*http.Client, *http.Transp
 }
 
 func (e *Engine) paceTimestamp(ctx context.Context, clock *pacingClock, currentRaw string) error {
+	if !e.cfg.Replay.Pacing.Enabled {
+		return nil
+	}
 	current, ok := model.ParseTimestamp(currentRaw)
 	if !ok || (clock.initialized && !current.After(clock.previousTimestamp)) {
 		return nil
 	}
 
-	if !clock.initialized || !e.cfg.Replay.Pacing.Enabled {
-		clock.previousTimestamp = current
-		clock.nextRequestAt = time.Now()
-		clock.initialized = true
-		return nil
-	}
-
-	delta := current.Sub(clock.previousTimestamp)
-	if max := e.cfg.Replay.Pacing.MaxSleepDelta; max > 0 && delta > max {
-		delta = max
-	}
-	nextRequestAt := clock.nextRequestAt.Add(delta)
+	// The absolute anchor survives late admission, ramp-up, and slow earlier
+	// responses. Neither initial offsets nor later gaps are capped.
+	nextRequestAt := clock.timeline.replayStart.Add(current.Sub(clock.timeline.captureOrigin))
 	if delay := time.Until(nextRequestAt); delay > 0 {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
@@ -770,6 +814,7 @@ func (e *Engine) paceTimestamp(ctx context.Context, clock *pacingClock, currentR
 
 	clock.previousTimestamp = current
 	clock.nextRequestAt = nextRequestAt
+	clock.initialized = true
 	return nil
 }
 
@@ -850,7 +895,7 @@ func (e *Engine) effectiveRequestHeaders(recorded map[string][]string) http.Head
 	return headers
 }
 
-func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEvent model.Event, effectiveHeaders http.Header) (requestExecution, error) {
+func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEvent model.Event, effectiveHeaders http.Header, deadline time.Time) (requestExecution, error) {
 	maxAttempts := e.cfg.Replay.Retry.MaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 1
@@ -859,7 +904,9 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 	var lastExec requestExecution
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		exec, err := e.executeRequest(ctx, client, requestEvent, effectiveHeaders)
+		exec, err := e.executeRequest(ctx, client, requestEvent, effectiveHeaders, deadline)
+		// Retries are additional attempts, not additional recorded requests.
+		deadline = time.Time{}
 		if err != nil {
 			lastErr = err
 			if exec.attempted {
@@ -909,7 +956,7 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 	return lastExec, nil
 }
 
-func (e *Engine) executeRequest(ctx context.Context, client *http.Client, requestEvent model.Event, effectiveHeaders http.Header) (requestExecution, error) {
+func (e *Engine) executeRequest(ctx context.Context, client *http.Client, requestEvent model.Event, effectiveHeaders http.Header, deadline time.Time) (requestExecution, error) {
 	requestURL, err := e.buildRequestURL(requestEvent)
 	if err != nil {
 		return requestExecution{}, err
@@ -937,6 +984,9 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	}
 
 	start := time.Now()
+	if e.cfg.Metrics.Enabled && e.metrics != nil && e.metrics.ScheduleLatenessHistogram != nil && !deadline.IsZero() {
+		e.metrics.RecordScheduleLateness(e.metricLabelValues, e.metricLabelForRequest(requestEvent), start.Sub(deadline))
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		if resp != nil && resp.Body != nil {
