@@ -13,12 +13,14 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/textproto"
 	"net/url"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -43,6 +45,7 @@ const (
 	RequestSendError        RequestOutcome = "send_error"
 	RequestResponseReceived RequestOutcome = "response_received"
 	RequestValidationFailed RequestOutcome = "validation_failed"
+	RequestProtocolFailed   RequestOutcome = "protocol_failed"
 	RequestSkipped          RequestOutcome = "skipped"
 )
 
@@ -62,6 +65,9 @@ type RequestResult struct {
 	Error            string         `json:"error,omitempty"`
 	LatencyMS        float64        `json:"latency_ms,omitempty"`
 	ValidationFailed bool           `json:"validation_failed,omitempty"`
+	ExpectedProtocol string         `json:"expected_protocol,omitempty"`
+	ObservedProtocol string         `json:"observed_protocol,omitempty"`
+	Destination      string         `json:"destination,omitempty"`
 	Skipped          bool           `json:"skipped,omitempty"`
 }
 
@@ -73,6 +79,7 @@ type ConnectionResult struct {
 	ResponsesReceived int64             `json:"responses_received,omitempty"`
 	SendErrors        int64             `json:"send_errors,omitempty"`
 	ValidationFailed  int64             `json:"validation_failed,omitempty"`
+	ProtocolFailed    int64             `json:"protocol_failed,omitempty"`
 	Skipped           int64             `json:"skipped,omitempty"`
 	Requests          []RequestResult   `json:"requests,omitempty"`
 }
@@ -82,6 +89,7 @@ type Summary struct {
 	ResponsesReceived  int64
 	SendErrors         int64
 	ValidationFailed   int64
+	ProtocolFailed     int64
 	Skipped            int64
 	ConnectionsDone    int64
 	ConnectionsAborted int64
@@ -277,6 +285,7 @@ type connState struct {
 	http2       bool
 	multiplexed bool
 	detected    bool
+	protocol    string
 
 	// Per-connection event processing state
 	pacing            pacingClock
@@ -284,6 +293,8 @@ type connState struct {
 	responsesReceived int64
 	sendErrors        int64
 	validationFailed  int64
+	protocolFailed    int64
+	protocolResults   []RequestResult
 	skipped           int64
 	aborted           bool
 
@@ -304,10 +315,8 @@ func (e *Engine) newConnState(connKey model.ConnectionKey) *connState {
 
 func (e *Engine) detectHTTP2ForConn(cs *connState, firstRequest model.Event) {
 	cs.detected = true
-	version := firstRequest.Protocol
-	if strings.Contains(version, "HTTP/2") || strings.Contains(version, "http/2") {
-		cs.http2 = true
-	}
+	cs.protocol = firstRequest.Protocol
+	cs.http2 = cs.protocol == model.ProtocolHTTP2
 	cs.multiplexed = strings.EqualFold(e.cfg.Replay.HTTP2.Mode, "multiplexed") && cs.http2
 }
 
@@ -400,6 +409,32 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 				conns[connKey] = cs
 				cs.pacing.timeline = timeline
 			}
+			cs.h2Mu.Lock()
+			if cs.protocolFailed > 0 {
+				cs.h2Mu.Unlock()
+				continue
+			}
+			protocol, protocolErr := model.NormalizeProtocol(ev.Protocol)
+			if protocolErr != nil || (cs.detected && protocol != cs.protocol) {
+				expected := cs.protocol
+				if expected == "" {
+					expected = "HTTP/1.1 or HTTP/2.0"
+				}
+				destination, urlErr := e.buildRequestURL(ev)
+				if urlErr != nil {
+					destination = ev.Authority
+				} else if parsed, err := url.Parse(destination); err == nil {
+					destination = parsed.Redacted()
+				}
+				cs.detected = true
+				e.finishRequestError(cs, ev, &protocolFidelityError{
+					expected: expected, observed: ev.Protocol, destination: destination, err: protocolErr,
+				}, requestExecution{})
+				cs.h2Mu.Unlock()
+				continue
+			}
+			ev.Protocol = protocol
+			cs.h2Mu.Unlock()
 			if !cs.detected {
 				e.detectHTTP2ForConn(cs, ev)
 				if cs.multiplexed {
@@ -434,7 +469,7 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 		}
 	}
 
-	// EOF: finalize remaining connections
+	// EOF or cancellation: join admitted streams and collect each connection once.
 	for _, cs := range conns {
 		e.finalizeConn(cs, &result)
 	}
@@ -467,6 +502,7 @@ func (e *Engine) collectConnResults(cs *connState, result *Summary) {
 	result.ResponsesReceived += cs.responsesReceived
 	result.SendErrors += cs.sendErrors
 	result.ValidationFailed += cs.validationFailed
+	result.ProtocolFailed += cs.protocolFailed
 	result.Skipped += cs.skipped
 	if cs.aborted {
 		result.ConnectionsAborted++
@@ -481,6 +517,8 @@ func (e *Engine) collectConnResults(cs *connState, result *Summary) {
 		ResponsesReceived: cs.responsesReceived,
 		SendErrors:        cs.sendErrors,
 		ValidationFailed:  cs.validationFailed,
+		ProtocolFailed:    cs.protocolFailed,
+		Requests:          cs.protocolResults,
 		Skipped:           cs.skipped,
 	}
 	result.ConnectionResults = append(result.ConnectionResults, connResult)
@@ -533,6 +571,11 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 	}
 
 	cs.h2Mu.Lock()
+	// An in-flight stream may have aborted the connection while pacing waited.
+	if cs.aborted {
+		cs.h2Mu.Unlock()
+		return
+	}
 	reqKey, effectiveHeaders, handled, commitSequence := e.prepareConcurrentRequest(cs, requestEvent, checkpoints)
 	cs.h2Mu.Unlock()
 	if commitSequence > 0 {
@@ -664,6 +707,26 @@ func (cs *connState) completeCheckpointSequence(sequence int) int {
 }
 
 func (e *Engine) finishRequestError(cs *connState, requestEvent model.Event, err error, exec requestExecution) bool {
+	var protocolErr *protocolFidelityError
+	if errors.As(err, &protocolErr) {
+		cs.protocolFailed++
+		cs.protocolResults = append(cs.protocolResults, RequestResult{
+			Node: requestEvent.Node, ConnectionID: requestEvent.ConnectionID,
+			Sequence: requestEvent.Sequence, Outcome: RequestProtocolFailed,
+			Error: err.Error(), ExpectedProtocol: protocolErr.expected,
+			ObservedProtocol: protocolErr.observed, Destination: protocolErr.destination,
+		})
+		if !exec.attempted {
+			e.recordStatusMetric(requestEvent, "protocol_failed")
+		}
+		slog.Error("HTTP protocol fidelity failed",
+			"node", requestEvent.Node, "conn", requestEvent.ConnectionID, "seq", requestEvent.Sequence,
+			"expected_protocol", protocolErr.expected, "observed_protocol", protocolErr.observed,
+			"destination", protocolErr.destination, "error", err,
+		)
+		cs.aborted = true
+		return true
+	}
 	cs.sendErrors++
 	if !exec.attempted {
 		e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
@@ -747,6 +810,7 @@ func (e *Engine) aggregateResults(results <-chan Summary) Summary {
 		final.ResponsesReceived += s.ResponsesReceived
 		final.SendErrors += s.SendErrors
 		final.ValidationFailed += s.ValidationFailed
+		final.ProtocolFailed += s.ProtocolFailed
 		final.Skipped += s.Skipped
 		final.ConnectionsDone += s.ConnectionsDone
 		final.ConnectionsAborted += s.ConnectionsAborted
@@ -761,6 +825,9 @@ func (e *Engine) aggregateResults(results <-chan Summary) Summary {
 		final.Outcome = RunPartialSuccess
 	}
 	if final.RequestsSent == 0 && final.Skipped == 0 && final.SendErrors == 0 {
+		final.Outcome = RunFailed
+	}
+	if final.ProtocolFailed > 0 {
 		final.Outcome = RunFailed
 	}
 	return final
@@ -780,16 +847,41 @@ func (e *malformedRedirectError) Unwrap() error {
 	return e.err
 }
 
-// redirectCheckingTransport leaves client behavior intact but recognizes bad
-// redirect locations before http.Client turns their parse errors into strings.
+// redirectCheckingTransport verifies every response's wire protocol and recognizes
+// bad redirect locations before http.Client turns their parse errors into strings.
 type redirectCheckingTransport struct {
-	*http.Transport
+	http.RoundTripper
+	expectedProtocol string
 }
 
 func (t *redirectCheckingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	resp, err := t.Transport.RoundTrip(req)
+	var conn *atomic.Pointer[h2cProtocolConn]
+	if t.expectedProtocol == model.ProtocolHTTP2 && req.URL.Scheme == "http" {
+		conn = new(atomic.Pointer[h2cProtocolConn])
+		ctx := context.WithValue(req.Context(), h2cProtocolTraceKey{}, true)
+		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) {
+				observed, _ := info.Conn.(*h2cProtocolConn)
+				conn.Store(observed)
+			},
+		})
+		req = req.WithContext(ctx)
+	}
+	resp, err := t.RoundTripper.RoundTrip(req)
 	if err != nil {
-		return resp, err
+		if conn != nil {
+			if observed := conn.Load(); observed != nil {
+				if rejection := observed.rejection.Load(); rejection != nil {
+					err = rejection
+				}
+			}
+		}
+		return resp, classifyProtocolError(err, t.expectedProtocol, req.URL.Redacted())
+	}
+	if err := verifyResponseProtocol(resp, t.expectedProtocol, req.URL); err != nil {
+		// A mismatched response must not be validated, retried, or checkpointed.
+		_ = resp.Body.Close()
+		return nil, err
 	}
 	switch resp.StatusCode {
 	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
@@ -812,25 +904,53 @@ func (e *Engine) makePerConnectionClient(http2 bool) (*http.Client, *http.Transp
 		MinVersion:         tls.VersionTLS12,
 		InsecureSkipVerify: e.cfg.Replay.TLS.InsecureSkipVerify,
 	}
-	if http2 {
-		tlsConfig.NextProtos = []string{"h2", "http/1.1"}
-	}
+	protocols := new(http.Protocols)
 	tr := &http.Transport{
 		DialContext:         dialer.DialContext,
+		Protocols:           protocols,
 		TLSClientConfig:     tlsConfig,
 		IdleConnTimeout:     e.cfg.Replay.Timeout.IdleConnection,
 		MaxIdleConns:        2,
 		MaxIdleConnsPerHost: 1,
 		MaxConnsPerHost:     1,
 	}
+	expected := model.ProtocolHTTP11
 	if http2 {
-		tr.ForceAttemptHTTP2 = true
+		expected = model.ProtocolHTTP2
+		protocols.SetHTTP2(true)
+		protocols.SetUnencryptedHTTP2(true)
+		tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			conn, err := dialer.DialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			if ctx.Value(h2cProtocolTraceKey{}) != nil {
+				return &h2cProtocolConn{Conn: conn}, nil
+			}
+			return conn, nil
+		}
+		tlsConfig.NextProtos = []string{"h2"}
+		tlsConfig.VerifyConnection = func(state tls.ConnectionState) error {
+			if state.NegotiatedProtocol != "h2" {
+				observed := state.NegotiatedProtocol
+				if observed == "" {
+					observed = "no ALPN"
+				}
+				return &protocolFidelityError{expected: model.ProtocolHTTP2, observed: observed}
+			}
+			// Transport initializes its protocol handlers before dialing. Do
+			// not send HTTP/1 if native HTTP/2 support has been disabled.
+			if tr.TLSNextProto["h2"] == nil {
+				return &protocolFidelityError{expected: model.ProtocolHTTP2, observed: "HTTP/2 unavailable"}
+			}
+			return nil
+		}
 	} else {
-		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+		protocols.SetHTTP1(true)
 	}
 	client := &http.Client{
 		Timeout:   e.cfg.Replay.Timeout.Request,
-		Transport: &redirectCheckingTransport{Transport: tr},
+		Transport: &redirectCheckingTransport{RoundTripper: tr, expectedProtocol: expected},
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -1111,6 +1231,10 @@ func (e *Engine) shouldRetryStatus(statusCode int) bool {
 }
 
 func (e *Engine) shouldRetryError(err error) bool {
+	var protocolErr *protocolFidelityError
+	if errors.As(err, &protocolErr) {
+		return false
+	}
 	if len(e.cfg.Replay.Retry.RetryOnErrors) == 0 {
 		return false
 	}
@@ -1137,6 +1261,10 @@ func retryErrorCategory(err error) string {
 func transportErrorCategory(err error) string {
 	if err == nil {
 		return ""
+	}
+	var protocolErr *protocolFidelityError
+	if errors.As(err, &protocolErr) {
+		return "protocol_failed"
 	}
 	var locationErr *malformedRedirectError
 	if errors.As(err, &locationErr) {

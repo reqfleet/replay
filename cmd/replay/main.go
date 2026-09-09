@@ -258,6 +258,7 @@ func run() int {
 		"sent", summary.RequestsSent,
 		"responses", summary.ResponsesReceived,
 		"send_errors", summary.SendErrors,
+		"protocol_failed", summary.ProtocolFailed,
 		"validation_failed", summary.ValidationFailed,
 		"skipped", summary.Skipped,
 		"conn_done", summary.ConnectionsDone,

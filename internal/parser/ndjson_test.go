@@ -47,6 +47,38 @@ func TestParseCanonicalRequest(t *testing.T) {
 	}
 }
 
+func TestParseNormalizesSupportedProtocols(t *testing.T) {
+	for _, protocol := range []struct{ input, want string }{
+		{input: " http/1.1 ", want: "HTTP/1.1"},
+		{input: " hTtP/2 ", want: "HTTP/2.0"},
+		{input: "HTTP/2.0", want: "HTTP/2.0"},
+	} {
+		t.Run(protocol.input, func(t *testing.T) {
+			input := `{"type":"request","request_id":"a","connection_id":1,"timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"` + protocol.input + `","response_code":200}` + "\n"
+			events := parseEvents(t, strings.NewReader(input))
+			if len(events) != 1 || events[0].Protocol != protocol.want {
+				t.Errorf("ParseStream(protocol=%q) = %+v, want one %s request", protocol.input, events, protocol.want)
+			}
+		})
+	}
+}
+
+func TestParseRejectsUnsupportedProtocolsBeforeDelivery(t *testing.T) {
+	for _, protocol := range []string{"HTTP/1.0", "HTTP/1.1-invalid", "HTTP/2.1", "HTTP/3", " "} {
+		t.Run(protocol, func(t *testing.T) {
+			input := `{"type":"request","request_id":"a","connection_id":1,"timestamp":"2026-02-27T03:10:22Z","method":"GET","authority":"example.com","path":"/","protocol":"` + protocol + `","response_code":200}` + "\n"
+			delivered := false
+			err := ParseStream(strings.NewReader(input), func(model.Event) error {
+				delivered = true
+				return nil
+			})
+			if err == nil || delivered {
+				t.Errorf("ParseStream(protocol=%q) error=%v delivered=%t, want rejection before delivery", protocol, err, delivered)
+			}
+		})
+	}
+}
+
 func TestParseDownstreamEnd(t *testing.T) {
 	input := strings.NewReader(
 		`{"type":"DownstreamEnd","node":"envoy-a","connection_id":7,"request_id":"request-a","unknown_envoy_field":{"value":1},` +

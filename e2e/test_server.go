@@ -56,8 +56,13 @@ func main() {
 		writeOK(w)
 	})
 
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	server := &http.Server{Addr: "localhost:6000", Protocols: protocols}
+
 	fmt.Println("Test server listening on localhost:6000")
-	if err := http.ListenAndServe("localhost:6000", nil); err != nil {
+	if err := server.ListenAndServe(); err != nil {
 		slog.Error("Server failed", "error", err)
 		os.Exit(1)
 	}

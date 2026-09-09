@@ -44,6 +44,54 @@ Each worker retains logical connection state and an HTTP transport until an
 explicit `connection_close` or EOF. HTTP/1.1 requests execute synchronously per
 connection. Multiplexed HTTP/2 requests share the connection client, execute
 concurrently, and are joined before connection finalization.
+Serialized HTTP/2 instead sends one request at a time, intentionally changing
+recorded concurrency while preserving HTTP/2 on the wire.
+
+## Strict Protocol Fidelity
+
+Replay has no protocol-override or best-effort fallback mode. It trims outer
+whitespace and compares protocol names case-insensitively: `HTTP/1.1` remains
+HTTP/1.1, and `HTTP/2` or `HTTP/2.0` becomes HTTP/2.0. Missing, unsupported, or
+conflicting protocol metadata within one `(node, connection_id)` is rejected,
+including in dry-run; input is streamed, so earlier requests are not rolled
+back when a later conflict is found.
+
+HTTP/1.1 replay cannot upgrade to HTTP/2. HTTP/2 over TLS advertises only `h2`
+through ALPN and requires the server to negotiate it. Certificate verification
+remains enabled unless `replay.tls.insecure_skip_verify` is explicitly set;
+that option does not relax protocol enforcement. Cleartext HTTP/2 uses h2c
+prior knowledge, never an HTTP/1 upgrade or fallback. An incompatible HTTP/1
+server may expose the HTTP/2 connection preface (`PRI * HTTP/2.0`) to its handler;
+this is not a replayed application request or HTTP/1 fallback.
+
+Each recorded connection uses a standard Go `http.Transport`, configured for
+HTTP/1.1 only or HTTP/2 over TLS and cleartext only. Standard Go transport
+pooling, retry, and connection-lifecycle behavior remains unchanged.
+
+Every response must match the recorded protocol before it can count as a
+usable response or undergo optional response validation. Protocol failures are
+non-retryable and reported separately as `protocol_failed`, with connection and
+request identity, expected protocol, observed protocol when available, and
+destination diagnostics. Failed request details are retained in
+`ConnectionResult.Requests`. Any protocol failure makes the run `failed` and
+the CLI exit nonzero, regardless of response validation or
+`partial_success_exit_zero`. Ordinary network failures remain send errors.
+
+For h2c, an HTTP/1 response to the connection preface is a protocol failure even
+when it arrives before the first request stream is admitted. Replay retains
+that wire evidence on the individual socket; an early EOF without protocol
+evidence remains an ordinary network failure and follows configured retries.
+
+Both TLS and cleartext HTTP/2 require HTTP/2 support in Replay's Go transport.
+Disabling it with `GODEBUG=http2client=0` or the `nethttpomithttp2` build tag
+produces a non-retryable protocol failure before any application request is
+sent, not a partial-success network error.
+
+Target overrides change the destination scheme and authority, not the recorded
+protocol. The capture describes client-to-Envoy downstream traffic; Envoy's
+upstream protocol may differ. Sending a downstream HTTP/2 capture directly to
+an HTTP/1-only upstream application therefore fails, even if Envoy originally
+bridged those protocols successfully.
 
 ## Preparing Envoy Logs
 

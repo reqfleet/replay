@@ -204,6 +204,38 @@ func TestCombineStreamOmitsHTTP11StreamID(t *testing.T) {
 	}
 }
 
+func TestCombineStreamNormalizesProtocolBeforePairing(t *testing.T) {
+	start := fixture(downstreamStart, 1, "request-a", "/")
+	start.Protocol = " http/2 "
+	end := fixture(downstreamEnd, 1, "request-a", "/")
+	end.Protocol = "HTTP/2.0"
+	_, output := combineCapture(t, observationsNDJSON(t, start, end))
+	var events []model.Event
+	if err := parser.ParseStream(strings.NewReader(output), func(event model.Event) error {
+		events = append(events, event)
+		return nil
+	}); err != nil {
+		t.Fatalf("ParseStream(combined equivalent protocols) error: %v", err)
+	}
+	if len(events) != 1 || events[0].Protocol != "HTTP/2.0" {
+		t.Errorf("combined equivalent protocols = %+v, want one HTTP/2.0 request", events)
+	}
+}
+
+func TestCombineStreamRejectsUnsupportedProtocol(t *testing.T) {
+	start := fixture(downstreamStart, 1, "request-a", "/")
+	start.Protocol = "HTTP/1.1-invalid"
+	end := fixture(downstreamEnd, 1, "request-a", "/")
+	end.Protocol = start.Protocol
+	var output bytes.Buffer
+	if _, err := CombineStream(strings.NewReader(observationsNDJSON(t, start, end)), &output); err == nil {
+		t.Fatal("CombineStream(unsupported protocol) error = nil, want rejection")
+	}
+	if output.Len() != 0 {
+		t.Errorf("CombineStream(unsupported protocol) output = %q, want no replayable requests", output.String())
+	}
+}
+
 func TestCombineStreamAcceptsEndBeforeStart(t *testing.T) {
 	end := fixture(downstreamEnd, 1, "request-a", "/a")
 	start := fixture(downstreamStart, 1, "request-a", "/a")

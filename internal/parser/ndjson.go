@@ -424,8 +424,12 @@ func ParseStreamWithOptions(r io.Reader, options StreamOptions, handler func(mod
 		}
 
 		if event.Type == model.EventRequest {
-			isHTTP11 := len(event.Protocol) >= 8 && strings.EqualFold(event.Protocol[:8], "HTTP/1.1")
-			if isHTTP11 {
+			protocol, err := model.NormalizeProtocol(event.Protocol)
+			if err != nil {
+				return fmt.Errorf("line %d: %w", line, err)
+			}
+			event.Protocol = protocol
+			if protocol == model.ProtocolHTTP11 {
 				switch recordFamily {
 				case streamInputCanonical:
 					if len(raw.StreamID) != 0 {

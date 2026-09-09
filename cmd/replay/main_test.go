@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -175,6 +176,126 @@ func TestRunReplayFromFileAcceptsDownstreamEndForQuickVerification(t *testing.T)
 	}
 	if got, want := summary.ConnectionsDone, int64(1); got != want {
 		t.Errorf("runReplayFromFile(%q) completed connections = %d, want %d", logPath, got, want)
+	}
+}
+
+func TestRunReplayFromFileProtocolFailureWithoutValidation(t *testing.T) {
+	var applicationRequests atomic.Int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// An HTTP/1 server may expose the HTTP/2 preface as PRI *.
+		if r.Method == http.MethodGet && r.URL.Path == "/protocol" {
+			applicationRequests.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	cfg := config.Default()
+	cfg.Target.OverrideURL = srv.URL
+	cfg.Replay.Pacing.Enabled = false
+	cfg.Replay.Validation.Status = false
+	cfg.Replay.Validation.Headers = false
+	cfg.Replay.Validation.Body = false
+	cfg.Replay.Timeout.Request = time.Second
+	cfg.Replay.PartialSuccessExitZero = true
+
+	logPath := filepath.Join(t.TempDir(), "requests.ndjson")
+	content := `{"type":"request","request_id":"request-1-1","connection_id":1,"timestamp":"2026-08-03T01:11:06.531Z","method":"GET","scheme":"https","authority":"recorded.example","path":"/protocol","protocol":"HTTP/2","stream_id":1,"response_code":200}` + "\n"
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("os.WriteFile(%q) error: %v", logPath, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	summary, err := runReplayFromFile(ctx, cfg, metrics.New(cfg.Metrics), logPath, "")
+	if err != nil {
+		t.Fatalf("runReplayFromFile(HTTP/2 capture, HTTP/1 target) error: %v", err)
+	}
+	if got, want := summary.Outcome, engine.RunFailed; got != want {
+		t.Errorf("summary.Outcome = %s, want %s", got, want)
+	}
+	if got, want := summary.ProtocolFailed, int64(1); got != want {
+		t.Errorf("summary.ProtocolFailed = %d, want %d", got, want)
+	}
+	if got := summary.ValidationFailed; got != 0 {
+		t.Errorf("summary.ValidationFailed = %d, want 0 with validation disabled", got)
+	}
+	if got := summary.ResponsesReceived; got != 0 {
+		t.Errorf("summary.ResponsesReceived = %d, want 0 usable HTTP/2 responses", got)
+	}
+	if got, want := exitCodeForSummary(summary, cfg), 1; got != want {
+		t.Errorf("exitCodeForSummary(protocol failure, validation disabled) = %d, want %d", got, want)
+	}
+	if got := applicationRequests.Load(); got != 0 {
+		t.Errorf("HTTP/1 application requests = %d, want 0 (no fallback)", got)
+	}
+}
+
+func TestRunReplayFromFileDisabledHTTP2WithoutValidation(t *testing.T) {
+	godebug := "http2client=0"
+	if current := os.Getenv("GODEBUG"); current != "" {
+		godebug = current + "," + godebug
+	}
+	t.Setenv("GODEBUG", godebug)
+
+	for _, scheme := range []string{"http", "https"} {
+		t.Run(scheme, func(t *testing.T) {
+			var applicationRequests atomic.Int64
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				applicationRequests.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}))
+			srv.Config.Protocols = new(http.Protocols)
+			srv.Config.Protocols.SetHTTP1(true)
+			srv.Config.Protocols.SetHTTP2(true)
+			srv.Config.Protocols.SetUnencryptedHTTP2(true)
+			if scheme == "https" {
+				srv.EnableHTTP2 = true
+				srv.StartTLS()
+			} else {
+				srv.Start()
+			}
+			t.Cleanup(srv.Close)
+
+			cfg := config.Default()
+			cfg.Target.OverrideURL = srv.URL
+			cfg.Replay.TLS.InsecureSkipVerify = true
+			cfg.Replay.Pacing.Enabled = false
+			cfg.Replay.Validation.Status = false
+			cfg.Replay.Validation.Headers = false
+			cfg.Replay.Validation.Body = false
+			cfg.Replay.PartialSuccessExitZero = true
+			cfg.Replay.Timeout.Request = time.Second
+
+			logPath := filepath.Join(t.TempDir(), "requests.ndjson")
+			content := `{"type":"request","request_id":"request-1","connection_id":1,"timestamp":"2026-09-09T00:00:00Z","method":"GET","authority":"recorded.example","path":"/protocol","protocol":"HTTP/2","stream_id":1,"response_code":200}` + "\n"
+			if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+				t.Fatalf("os.WriteFile(%q) error: %v", logPath, err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			summary, err := runReplayFromFile(ctx, cfg, metrics.New(cfg.Metrics), logPath, "")
+			if err != nil {
+				t.Fatalf("runReplayFromFile(HTTP/2 capture, HTTP/2 disabled) error: %v", err)
+			}
+			if got, want := summary.Outcome, engine.RunFailed; got != want {
+				t.Errorf("summary.Outcome = %s, want %s", got, want)
+			}
+			if got, want := summary.ProtocolFailed, int64(1); got != want {
+				t.Errorf("summary.ProtocolFailed = %d, want %d", got, want)
+			}
+			if got := summary.SendErrors; got != 0 {
+				t.Errorf("summary.SendErrors = %d, want 0 ordinary network failures", got)
+			}
+			if got := exitCodeForSummary(summary, cfg); got != 1 {
+				t.Errorf("exitCodeForSummary(HTTP/2 disabled) = %d, want 1 despite partial-success exit zero", got)
+			}
+			if got := applicationRequests.Load(); got != 0 {
+				t.Errorf("target application requests = %d, want 0 (no HTTP/1 fallback)", got)
+			}
+		})
 	}
 }
 
