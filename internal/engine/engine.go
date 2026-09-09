@@ -405,9 +405,7 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 				if cs.multiplexed {
 					cs.checkpointWatermark = checkpoints.lastProcessed(connKey)
 				}
-				client, transport := e.makePerConnectionClient(cs.http2)
-				cs.client = client
-				cs.transport = transport
+				cs.client, cs.transport = e.makePerConnectionClient(cs.http2)
 			}
 
 			if cs.multiplexed {
@@ -510,8 +508,12 @@ func (e *Engine) processRequest(ctx context.Context, cs *connState, requestEvent
 
 	exec, err := e.sendRequest(ctx, cs.client, requestEvent, effectiveHeaders, cs.pacing.nextRequestAt)
 	if err != nil {
-		e.finishRequestError(cs, requestEvent, err, exec)
-		return true
+		abort = e.finishRequestError(cs, requestEvent, err, exec)
+		if !abort && checkpoints.markProcessed(reqKey, requestEvent.Sequence) != nil {
+			cs.aborted = true
+			return true
+		}
+		return abort
 	}
 
 	abort = e.finishRequestSuccess(cs, requestEvent, exec, checkpoints.markProcessed(reqKey, requestEvent.Sequence))
@@ -549,15 +551,13 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 
 	cs.h2WG.Go(func() {
 		exec, err := e.sendRequest(ctx, cs.client, requestEvent, effectiveHeaders, deadline)
-		if err != nil {
-			cs.h2Mu.Lock()
-			e.finishRequestError(cs, requestEvent, err, exec)
-			cs.h2Mu.Unlock()
-			return
-		}
-
 		cs.h2Mu.Lock()
-		abort := e.finishRequestSuccess(cs, requestEvent, exec, nil)
+		var abort bool
+		if err != nil {
+			abort = e.finishRequestError(cs, requestEvent, err, exec)
+		} else {
+			abort = e.finishRequestSuccess(cs, requestEvent, exec, nil)
+		}
 		commitSequence := 0
 		if !abort {
 			commitSequence = cs.completeCheckpointSequence(requestEvent.Sequence)
@@ -663,12 +663,17 @@ func (cs *connState) completeCheckpointSequence(sequence int) int {
 	return cs.checkpointWatermark
 }
 
-func (e *Engine) finishRequestError(cs *connState, requestEvent model.Event, err error, exec requestExecution) {
+func (e *Engine) finishRequestError(cs *connState, requestEvent model.Event, err error, exec requestExecution) bool {
 	cs.sendErrors++
-	cs.aborted = true
 	if !exec.attempted {
 		e.recordStatusMetric(requestEvent, metricStatusForSendError(err))
 	}
+	var locationErr *malformedRedirectError
+	if errors.As(err, &locationErr) {
+		return false
+	}
+	cs.aborted = true
+	return true
 }
 
 func (e *Engine) finishRequestSuccess(cs *connState, requestEvent model.Event, exec requestExecution, checkpointErr error) bool {
@@ -749,7 +754,7 @@ func (e *Engine) aggregateResults(results <-chan Summary) Summary {
 			final.ConnectionResults = append(final.ConnectionResults, s.ConnectionResults...)
 		}
 	}
-	if final.ConnectionsAborted > 0 {
+	if final.ConnectionsAborted > 0 || final.SendErrors > 0 {
 		final.Outcome = RunPartialSuccess
 	}
 	if final.ValidationFailed > 0 && final.Outcome == RunSuccess {
@@ -759,6 +764,46 @@ func (e *Engine) aggregateResults(results <-chan Summary) Summary {
 		final.Outcome = RunFailed
 	}
 	return final
+}
+
+// malformedRedirectError distinguishes a bad response header from failures to
+// reach the target, even after http.Client wraps it in a url.Error.
+type malformedRedirectError struct {
+	err error
+}
+
+func (e *malformedRedirectError) Error() string {
+	return fmt.Sprintf("malformed redirect location: %v", e.err)
+}
+
+func (e *malformedRedirectError) Unwrap() error {
+	return e.err
+}
+
+// redirectCheckingTransport leaves client behavior intact but recognizes bad
+// redirect locations before http.Client turns their parse errors into strings.
+type redirectCheckingTransport struct {
+	*http.Transport
+}
+
+func (t *redirectCheckingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.Transport.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+	switch resp.StatusCode {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		if location := resp.Header.Get("Location"); location != "" {
+			if _, err := req.URL.Parse(location); err != nil {
+				// Discard this response without replacing the parse failure
+				// with a body-close error or waiting to drain its body.
+				_ = resp.Body.Close()
+				return nil, &malformedRedirectError{err: err}
+			}
+		}
+	}
+	return resp, nil
 }
 
 func (e *Engine) makePerConnectionClient(http2 bool) (*http.Client, *http.Transport) {
@@ -785,7 +830,10 @@ func (e *Engine) makePerConnectionClient(http2 bool) (*http.Client, *http.Transp
 	}
 	client := &http.Client{
 		Timeout:   e.cfg.Replay.Timeout.Request,
-		Transport: tr,
+		Transport: &redirectCheckingTransport{Transport: tr},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 	return client, tr
 }
@@ -1067,7 +1115,7 @@ func (e *Engine) shouldRetryError(err error) bool {
 		return false
 	}
 	category := retryErrorCategory(err)
-	if category == "" {
+	if category == "" || category == "malformed_redirect" {
 		return false
 	}
 	for _, configured := range e.cfg.Replay.Retry.RetryOnErrors {
@@ -1089,6 +1137,10 @@ func retryErrorCategory(err error) string {
 func transportErrorCategory(err error) string {
 	if err == nil {
 		return ""
+	}
+	var locationErr *malformedRedirectError
+	if errors.As(err, &locationErr) {
+		return "malformed_redirect"
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return "timeout"

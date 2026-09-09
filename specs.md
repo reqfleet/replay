@@ -255,6 +255,31 @@ Canonical connections without DC and all direct-completion connections remain
 active until EOF. Direct completion input cannot place a DC-derived close
 safely because it lacks request-start order.
 
+Replay MUST NOT automatically follow HTTP redirects (`301`, `302`, `303`,
+`307`, or `308`), whether `Location` is relative or absolute. For redirects
+with a syntactically valid `Location` URL reference, the original status,
+headers, and body MUST remain available to configured response validation;
+latency, status, and response-byte metrics MUST describe that response rather
+than a redirect chain. Receiving such a redirect alone MUST NOT be treated
+as a transport error or abort the connection. A follow-up request MUST be
+sent only when its own captured request event is scheduled. Automatic
+redirect following is not a configurable mode.
+
+For redirect responses with a malformed `Location` URL reference, replay MUST
+record a non-retryable request failure with synthetic status
+`malformed_redirect`, discard and close that response, and continue with the
+next scheduled request on the recorded connection. The response is not
+available for validation or successful-response metrics. Such a failure MUST
+NOT abort the recorded connection or clear an abort caused by another request;
+it counts as a send error and makes the run `partial_success`. Reusing the
+same underlying TCP connection is not guaranteed after discarding the response.
+
+Replay retains `http.Client` timeouts, authentication, and error wrapping.
+A wrapper around the standard transport identifies malformed redirect
+locations using a typed error, not Go's error-message wording. Other transport
+failures retain the existing retry and connection-abort behavior. Malformed
+`Location` values on non-redirect responses are not interpreted.
+
 ### HTTP/1.1
 
 * Sequential replay per connection
@@ -312,6 +337,10 @@ monotonic completed-sequence watermark for each `node` + `connection_id` and
 skips input at or below a loaded watermark. Multiplexed HTTP/2 MUST advance the
 watermark only after every earlier admitted sequence reaches a terminal,
 checkpointable state.
+
+A malformed-redirect request failure is terminal and checkpointable even
+though its response cannot be validated; resuming MUST NOT resend it once
+its sequence is included in the persisted watermark.
 
 Dirty progress MUST be persisted at `replay.checkpoint.sync_interval`, which
 defaults to `1s`, and flushed during orderly shutdown. An abrupt process or host
@@ -488,7 +517,7 @@ Replay execution MUST produce deterministic run outcomes at three levels: reques
 Request outcome classes:
 
 * `sent`: request was emitted to target.
-* `send_error`: request failed before receiving an HTTP response (for example connect timeout, TLS error, network reset).
+* `send_error`: request failed before receiving a usable HTTP response (for example connect timeout, TLS error, network reset, or malformed redirect location).
 * `response_received`: response was received from target.
 * `validation_failed`: response was received but did not match configured validation rules.
 * `skipped`: request was intentionally not sent (for example policy guard or dry-run filter).
@@ -500,7 +529,7 @@ Connection outcome classes:
 
 Run outcome classes:
 
-* `success`: no fatal engine errors and all non-skipped requests reached terminal outcomes.
+* `success`: no fatal engine errors or send/validation failures, and all non-skipped requests reached terminal outcomes.
 * `partial_success`: replay completed with non-fatal send/validation failures.
 * `failed`: replay stopped early due to fatal conditions (for example invalid input, backend unavailable, policy violation).
 
@@ -562,10 +591,10 @@ add observations.
 Engine-specific integrations MAY configure a different Prometheus namespace and common label set. Label conventions SHOULD include configurable common dimensions plus metric-specific labels such as `label`, `status`, and `le`.
 
 For `replay_status_counter`, the `status` label MAY contain either a numeric
-HTTP status code or a synthetic transport status such as `timeout`,
-`connection_refused`, `connection_reset`, `tls`, `network`, or `send_error`.
-A request that fails before receiving an HTTP response MUST increment the
-counter with its synthetic transport status.
+HTTP status code or a synthetic error status such as `timeout`,
+`connection_refused`, `connection_reset`, `tls`, `network`, `send_error`, or
+`malformed_redirect`. A request that fails before receiving a usable HTTP
+response MUST increment the counter with its synthetic error status.
 
 Engines SHOULD support a `metrics.path_templates` list to prevent dynamic path
 segments from creating unbounded metric-label cardinality. A segment enclosed

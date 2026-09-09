@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -225,25 +226,21 @@ func TestExecuteRequestRetainsResponseHeadersOnlyForHeaderValidation(t *testing.
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			responseHeaders := http.Header{"X-Test": {"one", "two"}}
-			client := &http.Client{
-				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     responseHeaders,
-						Body:       io.NopCloser(strings.NewReader("ok")),
-						Request:    req,
-					}, nil
-				}),
-			}
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     responseHeaders,
+					Body:       io.NopCloser(strings.NewReader("ok")),
+					Request:    req,
+				}, nil
+			})}
 			cfg := config.Default()
 			cfg.Replay.Validation.Status = tt.statusValidation
 			cfg.Replay.Validation.Headers = tt.headerValidation
 			eng := New(cfg, metrics.New(cfg.Metrics))
 			requestEvent := model.Event{Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/"}
 
-			exec, err := eng.executeRequest(
-				context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{},
-			)
+			exec, err := eng.executeRequest(context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{})
 			if err != nil {
 				t.Fatalf("executeRequest(status=%t, headers=%t) error: %v", tt.statusValidation, tt.headerValidation, err)
 			}
@@ -290,24 +287,20 @@ func TestExecuteRequestDoesNotReadAfterResponseEOF(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			trackedBody := &readAfterEOFTrackingBody{reader: bytes.NewReader(tt.body)}
-			client := &http.Client{
-				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Header:     make(http.Header),
-						Body:       trackedBody,
-						Request:    req,
-					}, nil
-				}),
-			}
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       trackedBody,
+					Request:    req,
+				}, nil
+			})}
 			cfg := config.Default()
 			cfg.Replay.Validation.Body = true
 			eng := New(cfg, metrics.New(cfg.Metrics))
 			requestEvent := model.Event{Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/"}
 
-			exec, err := eng.executeRequest(
-				context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{},
-			)
+			exec, err := eng.executeRequest(context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{})
 			if err != nil {
 				t.Fatalf("executeRequest(body size %d) error: %v", len(tt.body), err)
 			}
@@ -336,27 +329,23 @@ func TestExecuteRequestDoesNotReadAfterResponseEOF(t *testing.T) {
 func TestExecuteRequestIncludesDrainedBodyInEgressBytesOnReadError(t *testing.T) {
 	bodyErr := errors.New("body read failed")
 	responseBody := bytes.Repeat([]byte("x"), maxBodyRead+32*1024)
-	client := &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body: io.NopCloser(io.MultiReader(
-					bytes.NewReader(responseBody),
-					iotest.ErrReader(bodyErr),
-				)),
-				Request: req,
-			}, nil
-		}),
-	}
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(io.MultiReader(
+				bytes.NewReader(responseBody),
+				iotest.ErrReader(bodyErr),
+			)),
+			Request: req,
+		}, nil
+	})}
 	cfg := config.Default()
 	cfg.Replay.Validation.Body = true
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	requestEvent := model.Event{Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/"}
 
-	exec, err := eng.executeRequest(
-		context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{},
-	)
+	exec, err := eng.executeRequest(context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{})
 	if !errors.Is(err, bodyErr) {
 		t.Fatalf("executeRequest(truncated body with read error) error = %v, want %v", err, bodyErr)
 	}
@@ -382,13 +371,9 @@ func TestExecuteRequestIncludesResponseHeadersInEgressBytes(t *testing.T) {
 		Scheme:    "http",
 		Authority: authority,
 		Path:      "/"}
-	exec, err := eng.executeRequest(
-		context.Background(),
-		client,
-		requestEvent,
+	exec, err := eng.executeRequest(context.Background(), client, requestEvent,
 		eng.effectiveRequestHeaders(requestEvent.Headers),
-		time.Time{},
-	)
+		time.Time{})
 	if err != nil {
 		t.Fatalf("executeRequest(raw response) error: %v", err)
 	}
@@ -411,13 +396,9 @@ func TestExecuteRequestIncludesPartialBodyInEgressBytesOnReadError(t *testing.T)
 		Scheme:    "http",
 		Authority: authority,
 		Path:      "/"}
-	exec, err := eng.executeRequest(
-		context.Background(),
-		client,
-		requestEvent,
+	exec, err := eng.executeRequest(context.Background(), client, requestEvent,
 		eng.effectiveRequestHeaders(requestEvent.Headers),
-		time.Time{},
-	)
+		time.Time{})
 	if err == nil {
 		t.Fatal("executeRequest(partial body response) error = nil, want read error")
 	}
@@ -597,17 +578,15 @@ func TestSendRequestReturnsAttemptedExecutionWhenRetryBackoffCanceled(t *testing
 
 	reg := metrics.New(cfg.Metrics)
 	eng := New(cfg, reg)
-	client := &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			cancel()
-			return &http.Response{
-				StatusCode: http.StatusServiceUnavailable,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader("retry")),
-				Request:    req,
-			}, nil
-		}),
-	}
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		cancel()
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("retry")),
+			Request:    req,
+		}, nil
+	})}
 
 	requestEvent := model.Event{Method: http.MethodGet,
 		Scheme:    "http",
@@ -776,6 +755,446 @@ func TestCanonicalRequestValidatesInlineResponseStatus(t *testing.T) {
 	}
 	if got, want := summary.Outcome, RunPartialSuccess; got != want {
 		t.Fatalf("summary.Outcome = %s, want %s", got, want)
+	}
+}
+
+func TestReplayDoesNotFollowRedirects(t *testing.T) {
+	for _, status := range []int{301, 302, 303, 307, 308} {
+		for _, locationKind := range []string{"relative", "absolute"} {
+			for _, capturedRequests := range []int{1, 2} {
+				name := strconv.Itoa(status) + "_" + locationKind + "_events_" + strconv.Itoa(capturedRequests)
+				t.Run(name, func(t *testing.T) {
+					const redirectBody = "original redirect response"
+					var oldRequests, newRequests atomic.Int64
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						switch r.URL.Path {
+						case "/old":
+							oldRequests.Add(1)
+							location := "/new"
+							if locationKind == "absolute" {
+								location = "http://" + r.Host + location
+							}
+							w.Header().Set("Location", location)
+							w.WriteHeader(status)
+							if _, err := io.WriteString(w, redirectBody); err != nil {
+								t.Errorf("write redirect response: %v", err)
+							}
+						case "/new":
+							newRequests.Add(1)
+							if _, err := io.WriteString(w, "destination response"); err != nil {
+								t.Errorf("write destination response: %v", err)
+							}
+						default:
+							t.Errorf("unexpected target request: %s %s", r.Method, r.URL.Path)
+							w.WriteHeader(http.StatusNotFound)
+						}
+					}))
+					t.Cleanup(srv.Close)
+					target, err := url.Parse(srv.URL)
+					if err != nil {
+						t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+					}
+					location := "/new"
+					if locationKind == "absolute" {
+						location = srv.URL + location
+					}
+
+					cfg := config.Default()
+					cfg.Replay.Retry.MaxAttempts = 1
+					cfg.Replay.Validation.Status = true
+					cfg.Replay.Validation.Headers = true
+					cfg.Replay.Validation.Body = true
+					reg := metrics.New(cfg.Metrics)
+					eng := New(cfg, reg)
+					events := []model.Event{
+						{Type: model.EventConnectionOpen, ConnectionID: 1},
+						{
+							Type: model.EventRequest, ConnectionID: 1, Sequence: 1,
+							Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/old",
+							ResponseCode:    intPointer(status),
+							ResponseHeaders: map[string][]string{"location": {location}},
+							ResponseBody: &model.Body{
+								Encoding: "base64",
+								Content:  base64.StdEncoding.EncodeToString([]byte(redirectBody)),
+							},
+						},
+					}
+					if capturedRequests == 2 {
+						events = append(events, model.Event{
+							Type: model.EventRequest, ConnectionID: 1, Sequence: 2,
+							Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/new",
+							ResponseCode: intPointer(http.StatusOK),
+						})
+					}
+					events = append(events, model.Event{Type: model.EventConnectionClose, ConnectionID: 1})
+					summary, err := runReplay(eng, events)
+					if err != nil {
+						t.Fatalf("ReplayStream(redirect) error: %v", err)
+					}
+					if got := oldRequests.Load(); got != 1 {
+						t.Errorf("target requests to /old = %d, want 1", got)
+					}
+					if got, want := newRequests.Load(), int64(capturedRequests-1); got != want {
+						t.Errorf("target requests to /new = %d, want %d", got, want)
+					}
+					if got, want := summary.ResponsesReceived, int64(capturedRequests); got != want {
+						t.Errorf("ReplayStream(redirect).ResponsesReceived = %d, want %d", got, want)
+					}
+					if got := summary.ValidationFailed; got != 0 {
+						t.Errorf("ReplayStream(redirect).ValidationFailed = %d, want 0", got)
+					}
+					if got := summary.SendErrors; got != 0 {
+						t.Errorf("ReplayStream(redirect).SendErrors = %d, want 0", got)
+					}
+					if got := summary.ConnectionsAborted; got != 0 {
+						t.Errorf("ReplayStream(redirect).ConnectionsAborted = %d, want 0", got)
+					}
+					if got := summary.Outcome; got != RunSuccess {
+						t.Errorf("ReplayStream(redirect).Outcome = %q, want %q", got, RunSuccess)
+					}
+					statusCounter := reg.StatusCounter.WithLabelValues(append(cfg.Metrics.CommonLabelValues(), "/old", strconv.Itoa(status))...)
+					if got := testutil.ToFloat64(statusCounter); got != 1 {
+						t.Errorf("redirect status %d metric for /old = %v, want 1", status, got)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestReplayContinuesAfterMalformedRedirect(t *testing.T) {
+	for _, mode := range []string{"http1", "serialized", "multiplexed"} {
+		t.Run(mode, func(t *testing.T) {
+			var oldRequests, newRequests atomic.Int64
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/old" {
+					oldRequests.Add(1)
+					w.Header().Set("Location", "/next%zz")
+					w.WriteHeader(http.StatusFound)
+					return
+				}
+				newRequests.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}))
+			srv.EnableHTTP2 = mode != "http1"
+			srv.StartTLS()
+			t.Cleanup(srv.Close)
+			target, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+			}
+			cfg := config.Default()
+			protocol := "HTTP/1.1"
+			if mode != "http1" {
+				protocol = "HTTP/2"
+				cfg.Replay.HTTP2.Mode = mode
+			}
+			cfg.Replay.TLS.InsecureSkipVerify = true
+			cfg.Replay.Retry.MaxAttempts = 2
+			cfg.Replay.Retry.Backoff = "none"
+			cfg.Replay.Retry.RetryOnErrors = []string{"network"}
+			cfg.Replay.Validation.Status = true
+			cfg.Replay.Checkpoint.File = filepath.Join(t.TempDir(), "checkpoint.json")
+			cfg.Replay.Checkpoint.SyncInterval = time.Millisecond
+			reg := metrics.New(cfg.Metrics)
+			events := []model.Event{
+				{
+					Type: model.EventRequest, ConnectionID: 1, StreamID: 1, Sequence: 1,
+					Protocol: protocol, Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/old",
+					ResponseCode: intPointer(http.StatusFound),
+				},
+				{
+					Type: model.EventRequest, ConnectionID: 1, StreamID: 3, Sequence: 2,
+					Protocol: protocol, Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/new",
+				},
+				{
+					Type: model.EventRequest, ConnectionID: 1, StreamID: 5, Sequence: 3,
+					Protocol: protocol, Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/old",
+				},
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			input := make(chan model.Event, len(events))
+			resultCh := make(chan replayResult, 1)
+			input <- events[0]
+			go func() {
+				summary, err := New(cfg, reg).ReplayStream(ctx, input, nil)
+				resultCh <- replayResult{summary: summary, err: err}
+			}()
+			// Admit the next request only after the first failure has been handled,
+			// including in multiplexed mode.
+			key := model.ConnectionKey{ConnectionID: 1}
+			waitForCheckpointSequence(t, cfg.Replay.Checkpoint.File, key, 1, time.Second)
+			for _, event := range events[1:] {
+				input <- event
+			}
+			close(input)
+			result := <-resultCh
+			if result.err != nil {
+				t.Fatalf("ReplayStream(malformed redirect) error: %v", result.err)
+			}
+			summary := result.summary
+			if got := oldRequests.Load(); got != 2 {
+				t.Errorf("malformed redirect attempts = %d, want 2 without retries", got)
+			}
+			if got := newRequests.Load(); got != 1 {
+				t.Errorf("requests after malformed redirect failure = %d, want 1", got)
+			}
+			if summary.SendErrors != 2 || summary.ConnectionsAborted != 0 || summary.ResponsesReceived != 1 || summary.ValidationFailed != 0 {
+				t.Errorf("malformed redirect: send errors=%d aborted=%d responses=%d validation failures=%d, want 2, 0, 1, 0",
+					summary.SendErrors, summary.ConnectionsAborted, summary.ResponsesReceived, summary.ValidationFailed)
+			}
+			if summary.Outcome != RunPartialSuccess || summary.ConnectionsDone != 1 {
+				t.Errorf("malformed redirect: outcome=%q completed connections=%d, want %q and 1",
+					summary.Outcome, summary.ConnectionsDone, RunPartialSuccess)
+			}
+			counter := reg.StatusCounter.WithLabelValues(append(cfg.Metrics.CommonLabelValues(), "/old", "malformed_redirect")...)
+			if got := testutil.ToFloat64(counter); got != 2 {
+				t.Errorf("malformed redirect error metric = %v, want 2", got)
+			}
+			if got := readCheckpointSequence(t, cfg.Replay.Checkpoint.File, key); got != 3 {
+				t.Errorf("checkpoint after final malformed redirect = %d, want 3", got)
+			}
+			resumed, err := runReplay(New(cfg, metrics.New(cfg.Metrics)), events)
+			if err != nil {
+				t.Fatalf("ReplayStream(resume after malformed redirects) error: %v", err)
+			}
+			if resumed.Skipped != 3 || oldRequests.Load() != 2 || newRequests.Load() != 1 {
+				t.Errorf("resumed replay: skipped=%d old requests=%d new requests=%d, want 3, 2, 1",
+					resumed.Skipped, oldRequests.Load(), newRequests.Load())
+			}
+		})
+	}
+}
+
+func TestMalformedRedirectClosesStalledResponseBody(t *testing.T) {
+	bodyClosed := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "/next%zz")
+		w.Header().Set("Content-Length", "2")
+		w.WriteHeader(http.StatusFound)
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Errorf("flush malformed redirect headers: %v", err)
+			return
+		}
+		<-r.Context().Done()
+		close(bodyClosed)
+	}))
+	t.Cleanup(srv.Close)
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+	cfg := config.Default()
+	cfg.Replay.Timeout.Request = time.Second
+	eng := New(cfg, metrics.New(cfg.Metrics))
+	client, transport := eng.makePerConnectionClient(false)
+	t.Cleanup(transport.CloseIdleConnections)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	event := model.Event{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}
+	_, err = eng.executeRequest(ctx, client, event, eng.effectiveRequestHeaders(nil), time.Time{})
+	var locationErr *malformedRedirectError
+	if !errors.As(err, &locationErr) {
+		t.Fatalf("executeRequest(stalled malformed redirect) error = %v, want malformed redirect", err)
+	}
+	select {
+	case <-bodyClosed:
+	case <-time.After(time.Second):
+		t.Fatal("malformed redirect body was not closed before request timeout")
+	}
+}
+
+func TestExecuteRequestRedirectLocationBoundaries(t *testing.T) {
+	tests := []struct {
+		status   int
+		location string
+		wantErr  bool
+	}{
+		{status: http.StatusMovedPermanently, location: "/next%zz", wantErr: true},
+		{status: http.StatusFound, location: "/next%zz", wantErr: true},
+		{status: http.StatusSeeOther, location: "/next%zz", wantErr: true},
+		{status: http.StatusTemporaryRedirect, location: "/next%zz", wantErr: true},
+		{status: http.StatusPermanentRedirect, location: "/next%zz", wantErr: true},
+		{status: http.StatusOK, location: "/next%zz"},
+		{status: http.StatusNotModified, location: "/next%zz"},
+		{status: http.StatusFound},
+	}
+	for _, tt := range tests {
+		t.Run(strconv.Itoa(tt.status)+"_malformed_"+strconv.FormatBool(tt.wantErr), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", tt.location)
+				w.WriteHeader(tt.status)
+			}))
+			t.Cleanup(srv.Close)
+			target, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+			}
+			cfg := config.Default()
+			eng := New(cfg, metrics.New(cfg.Metrics))
+			client, transport := eng.makePerConnectionClient(false)
+			t.Cleanup(transport.CloseIdleConnections)
+			event := model.Event{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}
+			exec, err := eng.executeRequest(context.Background(), client, event, eng.effectiveRequestHeaders(nil), time.Time{})
+			if tt.wantErr {
+				var locationErr *malformedRedirectError
+				if !errors.As(err, &locationErr) {
+					t.Fatalf("executeRequest(status=%d, Location=%q) error = %v, want malformed redirect", tt.status, tt.location, err)
+				}
+				return
+			}
+			if err != nil || exec.statusCode != tt.status {
+				t.Errorf("executeRequest(status=%d, Location=%q) status=%d error=%v, want %d and nil",
+					tt.status, tt.location, exec.statusCode, err, tt.status)
+			}
+		})
+	}
+}
+
+func TestSendRequestRetriesEOFBeforeResponseHeaders(t *testing.T) {
+	var attempts atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				t.Errorf("hijack first request: %v", err)
+				return
+			}
+			if err := conn.Close(); err != nil {
+				t.Errorf("close first connection: %v", err)
+			}
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+	cfg := config.Default()
+	cfg.Replay.Retry.MaxAttempts = 2
+	cfg.Replay.Retry.Backoff = "none"
+	cfg.Replay.Retry.RetryOnErrors = []string{"network"}
+	reg := metrics.New(cfg.Metrics)
+	eng := New(cfg, reg)
+	client, transport := eng.makePerConnectionClient(false)
+	t.Cleanup(transport.CloseIdleConnections)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	event := model.Event{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}
+	exec, err := eng.sendRequest(ctx, client, event, eng.effectiveRequestHeaders(nil), time.Time{})
+	if err != nil {
+		t.Fatalf("sendRequest(EOF before response headers) error: %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("target attempts after EOF = %d, want 2", got)
+	}
+	if got := exec.statusCode; got != http.StatusOK {
+		t.Errorf("retry response status = %d, want %d", got, http.StatusOK)
+	}
+	counter := reg.StatusCounter.WithLabelValues(append(cfg.Metrics.CommonLabelValues(), "/", "network")...)
+	if got := testutil.ToFloat64(counter); got != 1 {
+		t.Errorf("EOF network error metric = %v, want 1", got)
+	}
+}
+
+func TestSendRequestTimeoutCoversResponseBodyAndRetries(t *testing.T) {
+	for _, validateBody := range []bool{false, true} {
+		t.Run(strconv.FormatBool(validateBody), func(t *testing.T) {
+			var attempts atomic.Int64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if attempts.Add(1) == 1 {
+					w.Header().Set("Content-Length", "2")
+					w.WriteHeader(http.StatusOK)
+					if err := http.NewResponseController(w).Flush(); err != nil {
+						t.Errorf("flush response headers: %v", err)
+						return
+					}
+					<-r.Context().Done()
+					return
+				}
+				if _, err := io.WriteString(w, "ok"); err != nil {
+					t.Errorf("write retry response: %v", err)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			target, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+			}
+			cfg := config.Default()
+			cfg.Replay.Timeout.Request = 50 * time.Millisecond
+			cfg.Replay.Retry.MaxAttempts = 2
+			cfg.Replay.Retry.Backoff = "none"
+			cfg.Replay.Retry.RetryOnErrors = []string{"timeout"}
+			cfg.Replay.Validation.Body = validateBody
+			reg := metrics.New(cfg.Metrics)
+			eng := New(cfg, reg)
+			client, transport := eng.makePerConnectionClient(false)
+			t.Cleanup(transport.CloseIdleConnections)
+			// Bound the test even if the per-attempt timeout stops working.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			event := model.Event{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}
+			exec, err := eng.sendRequest(ctx, client, event, eng.effectiveRequestHeaders(nil), time.Time{})
+			if err != nil {
+				t.Fatalf("sendRequest(stalled response body) error: %v", err)
+			}
+			if got := attempts.Load(); got != 2 {
+				t.Errorf("target attempts = %d, want 2", got)
+			}
+			if got := exec.statusCode; got != http.StatusOK {
+				t.Errorf("retry status = %d, want %d", got, http.StatusOK)
+			}
+			if got := exec.bodySize; got != int64(len("ok")) {
+				t.Errorf("retry response body bytes = %d, want %d", got, len("ok"))
+			}
+			counter := reg.StatusCounter.WithLabelValues(append(cfg.Metrics.CommonLabelValues(), "/", "timeout")...)
+			if got := testutil.ToFloat64(counter); got != 1 {
+				t.Errorf("response body timeout metric = %v, want 1", got)
+			}
+		})
+	}
+}
+
+func TestReplayPreservesURLCredentials(t *testing.T) {
+	for _, authorization := range []string{"", "Bearer captured-token"} {
+		t.Run(authorization, func(t *testing.T) {
+			observed := make(chan string, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				observed <- r.Header.Get("Authorization")
+				w.WriteHeader(http.StatusOK)
+			}))
+			t.Cleanup(srv.Close)
+			target, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+			}
+			target.User = url.UserPassword("user", "password")
+			cfg := config.Default()
+			cfg.Target.OverrideURL = target.String()
+			cfg.Replay.Retry.MaxAttempts = 1
+			event := model.Event{
+				Type: model.EventRequest, ConnectionID: 1, Sequence: 1, Method: http.MethodGet, Path: "/",
+				Headers: map[string][]string{"Authorization": {authorization}},
+			}
+			summary, err := runReplay(New(cfg, metrics.New(cfg.Metrics)), []model.Event{event})
+			if err != nil {
+				t.Fatalf("ReplayStream(URL credentials) error: %v", err)
+			}
+			if summary.ResponsesReceived != 1 {
+				t.Fatalf("ReplayStream(URL credentials).ResponsesReceived = %d, want 1", summary.ResponsesReceived)
+			}
+			want := authorization
+			if want == "" {
+				want = "Basic " + base64.StdEncoding.EncodeToString([]byte("user:password"))
+			}
+			if got := <-observed; got != want {
+				t.Errorf("target Authorization = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -1169,9 +1588,7 @@ func TestResponseValidationComparesOversizedBodiesExactly(t *testing.T) {
 			t.Cleanup(transport.CloseIdleConnections)
 			requestEvent := model.Event{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}
 
-			exec, err := eng.executeRequest(
-				context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{},
-			)
+			exec, err := eng.executeRequest(context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{})
 			if err != nil {
 				t.Fatalf("executeRequest(body size %d) error: %v", len(actualBody), err)
 			}
@@ -2596,13 +3013,9 @@ func TestSpecialAuthorityHeaderRewrite(t *testing.T) {
 		defer transport.CloseIdleConnections()
 		requestEvent := model.Event{Protocol: "HTTP/2", Method: http.MethodGet,
 			Scheme: target.Scheme, Authority: target.Host, Path: "/"}
-		if _, err := eng.executeRequest(
-			context.Background(),
-			client,
-			requestEvent,
+		if _, err := eng.executeRequest(context.Background(), client, requestEvent,
 			eng.effectiveRequestHeaders(requestEvent.Headers),
-			time.Time{},
-		); err != nil {
+			time.Time{}); err != nil {
 			t.Fatalf("executeRequest() error: %v", err)
 		}
 		got := <-observed
