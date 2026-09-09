@@ -92,7 +92,7 @@ func TestReplayUsesConfiguredCheckpointSyncInterval(t *testing.T) {
 	events := make(chan model.Event)
 	resultCh := make(chan streamResult, 1)
 	go func() {
-		summary, replayErr := eng.ReplayStream(context.Background(), events)
+		summary, replayErr := eng.ReplayStream(context.Background(), events, nil)
 		resultCh <- streamResult{summary: summary, err: replayErr}
 	}()
 	var closeEventsOnce sync.Once

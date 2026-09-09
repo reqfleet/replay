@@ -19,7 +19,6 @@ replay:
     ignore_headers: [x-request-id, date]
   pacing:
     enabled: true
-    max_sleep_delta: 30s
   idempotency:
     enabled: true
     block_methods: [POST, PUT, PATCH, DELETE]
@@ -33,6 +32,7 @@ replay:
 
 metrics:
   enabled: true
+  schedule_lateness_enabled: false
   namespace: "replay"
   listen_address: "0.0.0.0:9102"
   path: "/metrics"

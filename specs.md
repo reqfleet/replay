@@ -244,7 +244,7 @@ Replay engine MUST:
 4. Open one replay connection state on the first request for each `node` + `connection_id`.
 5. Replay requests in observed connection order for HTTP/1.1 and serialized HTTP/2.
 6. In multiplexed HTTP/2 mode, dispatch request sends concurrently as request events arrive.
-7. When pacing is enabled, schedule increasing timestamp deltas against a per-connection replay deadline.
+7. When pacing is enabled, schedule requests on a shared recorded timeline (Section 4.3), with pacing state per connection even when a worker owns multiple connections.
 8. Time elapsed while replaying a request MUST consume the corresponding timestamp delta; synchronous request latency MUST NOT be followed by another sleep for the full recorded delta.
 9. When pacing timestamps move backward or stay equal, keep the existing pacing clock and do not sleep.
 10. On `connection_close`, wait for in-flight HTTP/2 work, close transport resources, and finalize the connection.
@@ -296,6 +296,15 @@ Recommended implementation pattern:
 * Preserve append order within each shard output.
 * Apply capacity controls per replay engine (see Section 6.2).
 
+By default, engines reading the same complete input select the same capture
+origin before shard filtering, but independently select their replay starts.
+Pre-sharded files may additionally select different origins. The engine API
+accepts a common origin/start pair (Section 4.3), but does not distribute
+schedules, ensure engine readiness, or synchronize host clocks. The CLI uses
+automatic timing and MUST NOT claim cross-shard burst fidelity. Coordinated
+callers need the same origin/start pair across engines, comparable capture
+timestamps, sufficiently synchronized host clocks, and engines ready in time.
+
 ### 4.2 Checkpoint Persistence
 
 Setting `replay.checkpoint.file` enables resumable replay. The engine records a
@@ -313,6 +322,78 @@ when observed.
 When `shard_count` is greater than one, each shard MUST use an isolated
 checkpoint. Replay derives the path by appending
 `.shard-<shard_index>-of-<shard_count>` to the configured file.
+
+Checkpoint skipping happens after pacing. A resumed invocation uses its supplied
+schedule or, by default, selects a fresh replay start and the origin of its input,
+including skipped requests. It MUST NOT rebase each connection on its first
+non-skipped request. With automatic timing, replaying the full file therefore
+waits through the skipped prefix. Checkpoint data does not persist timing state
+or provide a fast-forward clock.
+
+### 4.3 Recorded Timing
+
+`replay.pacing.enabled` defaults to `true` and is configured in YAML.
+Disabling pacing MUST disable recorded-timing waits; it does not disable
+ramp-up, retry backoff, or protocol ordering. Dry-run MUST exercise pacing
+without sending requests.
+
+`Engine.ReplayStream(ctx, events, schedule)` accepts an optional per-invocation
+`*ReplaySchedule`:
+
+```go
+type ReplaySchedule struct {
+    CaptureOrigin time.Time
+    ReplayStart   time.Time
+}
+```
+
+A nil schedule selects automatic timing. A supplied schedule MUST contain both
+nonzero timestamps; an incomplete schedule MUST fail initialization. The engine
+MUST copy the supplied pair at invocation entry and anchor its wall-clock
+`ReplayStart` to the local monotonic clock once. Later wall-clock adjustments,
+input arrival, and worker activation MUST NOT rebase that schedule. Past starts
+are accepted: overdue requests proceed without extra timing waits. Supplying a
+schedule MUST NOT override `replay.pacing.enabled: false`.
+
+The CLI passes a nil schedule; there are no YAML or CLI schedule controls.
+
+When pacing is enabled:
+
+1. Without a supplied schedule, the capture origin MUST be the first valid
+   request timestamp in input append order, selected before shard filtering or
+   checkpoint/idempotency skipping. It is not necessarily the minimum timestamp;
+   selecting it requires neither a pre-pass nor buffering the full input.
+2. Without a supplied schedule, the replay start MUST be selected when the router
+   observes that request. With a supplied schedule, both timestamps MUST come
+   from that schedule, even if the input begins later than its capture origin.
+   The timeline belongs to one invocation and is shared by all its workers;
+   reusing an engine MUST NOT retain a previous invocation's timing state.
+3. Each connection's first intended deadline MUST be
+   `replay_start + (connection_first_timestamp - capture_origin)`, even when
+   its worker processes that request late. For subsequent increasing timestamps,
+   the deadline MUST be `replay_start + (recorded_timestamp - capture_origin)`.
+4. Neither initial offsets nor subsequent gaps are capped, because
+   connection-local capping can destroy cross-connection alignment.
+5. A deadline at or before the current time is overdue and MUST NOT add a wait.
+   Later equal/backward timestamps MUST retain the per-connection high-water
+   timestamp and deadline without sleeping or reordering requests.
+6. Worker ramp-up MUST NOT shift the shared timeline. Late requests proceed
+   without an additional wait and MUST NOT rebase later deadlines. Operators
+   SHOULD disable ramp-up when preserving burst timing.
+7. Timing waits, including initial offsets, MUST be cancellable.
+
+For A recorded at `[0s, 10s]` and B at `[9s, 10s]`, pacing MUST intend
+A=`[0s, 10s]`, B=`[9s, 10s]`. Enough VUs reduce worker contention; the shared
+clock preserves recorded offsets. These are separate requirements for faithful replay.
+
+Intended deadlines are not guarantees of actual transmission time. A worker
+sleeping or sending for one connection can block other connections assigned to
+it; a full worker channel can block routing to other workers. HTTP/1.1 MUST
+remain sequential, so slow responses can delay later requests. Input delivery,
+HTTP/2 stream admission, transport behavior, target latency, and generator
+capacity also affect achieved burst fidelity. Send-attempt lateness can be
+measured using the optional histogram defined in Section 6.4; pacing does
+not add a global timestamp sorter or change connection ownership.
 
 ---
 
@@ -447,6 +528,9 @@ Metric catalog with the default `replay` namespace:
 * `replay_latency_label_milliseconds_bucket`
 * `replay_latency_label_milliseconds_sum`
 * `replay_latency_label_milliseconds_count`
+* `replay_schedule_lateness_seconds_bucket`
+* `replay_schedule_lateness_seconds_sum`
+* `replay_schedule_lateness_seconds_count`
 * `replay_status_counter`
 * `replay_egress_bytes_counter`
 * `replay_threads_gauge`
@@ -455,6 +539,25 @@ Metric catalog with the default `replay` namespace:
 
 `replay_threads_gauge` reports active virtual users. It increments when a replay
 worker starts and decrements when that worker finishes.
+
+Schedule-lateness collection is opt-in through the YAML setting
+`metrics.schedule_lateness_enabled`, which defaults to `false`. The registry
+MUST NOT construct or register the histogram unless both `metrics.enabled` and
+`metrics.schedule_lateness_enabled` are true. Recording lateness through a
+registry without the collector is a no-op. The engine MUST skip
+lateness-specific label work when the collector is absent. This switch MUST NOT
+change pacing or request execution behavior.
+
+`replay_schedule_lateness_seconds` is a histogram of
+`max(0, first_client_send_attempt - intended_deadline)` in seconds, with common
+labels plus the bounded request-path `label`. With collection and pacing enabled
+and a valid pacing deadline, the engine MUST observe it once per recorded request reaching
+its first `http.Client.Do` call, including calls returning transport errors.
+The timestamp is taken at the client-call boundary, not at wire transmission
+or target receipt; transport queues, connection setup, and HTTP/2 admission can
+add further delay. Retries MUST NOT add observations. Pacing-disabled sends,
+dry-runs, policy/checkpoint skips, and failures before the client call MUST NOT
+add observations.
 
 Engine-specific integrations MAY configure a different Prometheus namespace and common label set. Label conventions SHOULD include configurable common dimensions plus metric-specific labels such as `label`, `status`, and `le`.
 
@@ -499,7 +602,7 @@ Minimum configurable domains:
 * HTTP/2 replay mode: serialized or multiplexed.
 * Retry policy: max retries, retryable error classes/statuses, backoff strategy.
 * Validation: status, header, body, and ignored-header controls.
-* Pacing: timestamp-delta replay enabled by default, with a maximum sleep cap of `30s`; set `replay.pacing.enabled: false` to disable recorded-timing waits.
+* Pacing: enabled by default for uncapped shared-origin timing. Set `replay.pacing.enabled: false` to disable recorded-timing waits. See Section 4.3.
 * Metrics server: listen address/port, endpoint enable toggle (default enabled), path (default `/metrics`).
 * Capacity control: `max_virtual_users_per_engine`.
 
@@ -551,7 +654,6 @@ replay:
     ignore_headers: [x-request-id, date]
   pacing:
     enabled: true
-    max_sleep_delta: 30s
   idempotency:
     enabled: true
     block_methods: [POST, PUT, PATCH, DELETE]
@@ -564,6 +666,7 @@ replay:
     sync_interval: 1s
 metrics:
   enabled: true
+  schedule_lateness_enabled: false
   namespace: "replay"
   listen_address: "0.0.0.0:9102"
   path: "/metrics"

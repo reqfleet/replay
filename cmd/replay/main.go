@@ -66,7 +66,7 @@ func runReplayFromFile(ctx context.Context, cfg config.Config, registry *metrics
 	var replayErr error
 	done := make(chan struct{})
 	go func() {
-		summary, replayErr = replayEngine.ReplayStream(ctx, eventsCh)
+		summary, replayErr = replayEngine.ReplayStream(ctx, eventsCh, nil)
 		close(done)
 	}()
 

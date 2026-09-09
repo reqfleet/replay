@@ -2,7 +2,8 @@
 
 Replay reconstructs HTTP traffic from Envoy access logs so capacity tests can
 use representative production request mixes and connection behavior. By
-default, Replay also reproduces recorded per-connection timing.
+default, Replay schedules requests on a shared recorded timeline within each
+replay process.
 
 ## Motivation and Design Goal
 
@@ -34,9 +35,9 @@ recorded connection-close signals are used when available. HTTP/1.1 requests
 remain sequential, while HTTP/2 traffic follows the configured serialized or
 multiplexed mode.
 
-Pacing is enabled by default: Replay uses the recorded time gaps between
-requests on each connection. Pacing is subject to the configured maximum delay
-and time already spent sending the preceding request.
+Pacing is enabled by default: Replay preserves recorded start
+offsets between connections and request gaps within each connection on one
+replay engine. Neither initial offsets nor subsequent gaps are capped.
 
 Replay's event model supports request bodies for every HTTP method. When an
 event is sent, Replay decodes its valid base64 `body` field and attaches the
@@ -204,9 +205,10 @@ for the metric catalog and exact label, path-template, and endpoint behavior.
 retry, validation, pacing, sharding, checkpoints, and metrics. Configuration
 precedence is CLI flags, environment variables, YAML, then built-in defaults.
 
-Pacing is enabled by default, with `replay.pacing.max_sleep_delta: 30s` capping
-each recorded per-connection gap. Set `replay.pacing.enabled: false` in YAML
-to replay without waiting for recorded timing.
+See the [recorded timing specification](specs.md#43-recorded-timing)
+for pacing semantics and limitations.
+
+### Safety controls
 
 Notable safety controls:
 

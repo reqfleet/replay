@@ -21,12 +21,13 @@ const (
 )
 
 type Registry struct {
-	LabelLatencyHistogram *prometheus.HistogramVec
-	StatusCounter         *prometheus.CounterVec
-	EgressCounter         *prometheus.CounterVec
-	ThreadsGauge          *prometheus.GaugeVec
-	CPU                   *prometheus.GaugeVec
-	Mem                   *prometheus.GaugeVec
+	LabelLatencyHistogram     *prometheus.HistogramVec
+	ScheduleLatenessHistogram *prometheus.HistogramVec
+	StatusCounter             *prometheus.CounterVec
+	EgressCounter             *prometheus.CounterVec
+	ThreadsGauge              *prometheus.GaugeVec
+	CPU                       *prometheus.GaugeVec
+	Mem                       *prometheus.GaugeVec
 
 	r *prometheus.Registry
 
@@ -82,6 +83,15 @@ func New(cfg config.MetricsConfig) *Registry {
 		out.CPU,
 		out.Mem,
 	)
+	if cfg.Enabled && cfg.ScheduleLatenessEnabled {
+		out.ScheduleLatenessHistogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: cfg.Namespace,
+			Name:      "schedule_lateness_seconds",
+			Help:      "Nonnegative lateness in seconds of the first HTTP client send attempt relative to the intended replay deadline; not wire-level timing",
+			Buckets:   prometheus.DefBuckets,
+		}, appendLabels(commonLabels, "label"))
+		r.MustRegister(out.ScheduleLatenessHistogram)
+	}
 	return out
 }
 
@@ -140,6 +150,18 @@ func (r *Registry) RecordRequest(commonLabelValues []string, label string, laten
 	r.LabelLatencyHistogram.WithLabelValues(appendLabelValues(commonLabelValues, label)...).Observe(latencyMS)
 	r.StatusCounter.WithLabelValues(appendLabelValues(commonLabelValues, label, status)...).Inc()
 	r.EgressCounter.WithLabelValues(appendLabelValues(commonLabelValues, label)...).Add(float64(egressBytes))
+}
+
+// RecordScheduleLateness records first HTTP client send attempt lateness, clamped to zero.
+// It does nothing when the optional histogram is disabled.
+func (r *Registry) RecordScheduleLateness(commonLabelValues []string, label string, lateness time.Duration) {
+	if r.ScheduleLatenessHistogram == nil {
+		return
+	}
+	if lateness < 0 {
+		lateness = 0
+	}
+	r.ScheduleLatenessHistogram.WithLabelValues(appendLabelValues(commonLabelValues, label)...).Observe(lateness.Seconds())
 }
 
 func (r *Registry) RecordStatus(commonLabelValues []string, label string, status string) {
