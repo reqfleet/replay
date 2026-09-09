@@ -786,6 +786,10 @@ func (e *Engine) makePerConnectionClient(http2 bool) (*http.Client, *http.Transp
 	client := &http.Client{
 		Timeout:   e.cfg.Replay.Timeout.Request,
 		Transport: tr,
+		// Redirect destinations are replayed only through their captured events.
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 	return client, tr
 }

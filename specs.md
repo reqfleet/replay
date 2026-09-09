@@ -255,6 +255,15 @@ Canonical connections without DC and all direct-completion connections remain
 active until EOF. Direct completion input cannot place a DC-derived close
 safely because it lacks request-start order.
 
+Replay MUST NOT automatically follow HTTP redirects (`301`, `302`, `303`,
+`307`, or `308`), whether `Location` is relative or absolute. The original
+redirect status, headers, and body MUST remain available to configured
+response validation; latency, status, and response-byte metrics MUST describe
+that response rather than a redirect chain. Receiving a redirect alone MUST
+NOT be treated as a transport error or abort the connection. A follow-up
+request MUST be sent only when its own captured request event is scheduled.
+Automatic redirect following is not a configurable mode.
+
 ### HTTP/1.1
 
 * Sequential replay per connection

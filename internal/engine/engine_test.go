@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -776,6 +777,107 @@ func TestCanonicalRequestValidatesInlineResponseStatus(t *testing.T) {
 	}
 	if got, want := summary.Outcome, RunPartialSuccess; got != want {
 		t.Fatalf("summary.Outcome = %s, want %s", got, want)
+	}
+}
+
+func TestReplayDoesNotFollowRedirects(t *testing.T) {
+	for _, status := range []int{301, 302, 303, 307, 308} {
+		for _, locationKind := range []string{"relative", "absolute"} {
+			for _, capturedRequests := range []int{1, 2} {
+				name := strconv.Itoa(status) + "_" + locationKind + "_events_" + strconv.Itoa(capturedRequests)
+				t.Run(name, func(t *testing.T) {
+					const redirectBody = "original redirect response"
+					var oldRequests, newRequests atomic.Int64
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						switch r.URL.Path {
+						case "/old":
+							oldRequests.Add(1)
+							location := "/new"
+							if locationKind == "absolute" {
+								location = "http://" + r.Host + location
+							}
+							w.Header().Set("Location", location)
+							w.WriteHeader(status)
+							if _, err := io.WriteString(w, redirectBody); err != nil {
+								t.Errorf("write redirect response: %v", err)
+							}
+						case "/new":
+							newRequests.Add(1)
+							if _, err := io.WriteString(w, "destination response"); err != nil {
+								t.Errorf("write destination response: %v", err)
+							}
+						default:
+							t.Errorf("unexpected target request: %s %s", r.Method, r.URL.Path)
+							w.WriteHeader(http.StatusNotFound)
+						}
+					}))
+					t.Cleanup(srv.Close)
+					target, err := url.Parse(srv.URL)
+					if err != nil {
+						t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+					}
+					location := "/new"
+					if locationKind == "absolute" {
+						location = srv.URL + location
+					}
+
+					cfg := config.Default()
+					cfg.Replay.Retry.MaxAttempts = 1
+					cfg.Replay.Validation.Status = true
+					cfg.Replay.Validation.Headers = true
+					cfg.Replay.Validation.Body = true
+					reg := metrics.New(cfg.Metrics)
+					eng := New(cfg, reg)
+					events := []model.Event{
+						{Type: model.EventConnectionOpen, ConnectionID: 1},
+						{
+							Type: model.EventRequest, ConnectionID: 1, Sequence: 1,
+							Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/old",
+							ResponseCode:    intPointer(status),
+							ResponseHeaders: map[string][]string{"location": {location}},
+							ResponseBody: &model.Body{
+								Encoding: "base64",
+								Content:  base64.StdEncoding.EncodeToString([]byte(redirectBody)),
+							},
+						},
+					}
+					if capturedRequests == 2 {
+						events = append(events, model.Event{
+							Type: model.EventRequest, ConnectionID: 1, Sequence: 2,
+							Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/new",
+							ResponseCode: intPointer(http.StatusOK),
+						})
+					}
+					events = append(events, model.Event{Type: model.EventConnectionClose, ConnectionID: 1})
+					summary, err := runReplay(eng, events)
+					if err != nil {
+						t.Fatalf("ReplayStream(redirect) error: %v", err)
+					}
+					if got := oldRequests.Load(); got != 1 {
+						t.Errorf("target requests to /old = %d, want 1", got)
+					}
+					if got, want := newRequests.Load(), int64(capturedRequests-1); got != want {
+						t.Errorf("target requests to /new = %d, want %d", got, want)
+					}
+					if got, want := summary.ResponsesReceived, int64(capturedRequests); got != want {
+						t.Errorf("ReplayStream(redirect).ResponsesReceived = %d, want %d", got, want)
+					}
+					if got := summary.ValidationFailed; got != 0 {
+						t.Errorf("ReplayStream(redirect).ValidationFailed = %d, want 0", got)
+					}
+					if got := summary.ConnectionsAborted; got != 0 {
+						t.Errorf("ReplayStream(redirect).ConnectionsAborted = %d, want 0", got)
+					}
+					if got := summary.Outcome; got != RunSuccess {
+						t.Errorf("ReplayStream(redirect).Outcome = %q, want %q", got, RunSuccess)
+					}
+					statusCounter := reg.StatusCounter.WithLabelValues(append(cfg.Metrics.CommonLabelValues(), "/old", strconv.Itoa(status))...)
+					if got := testutil.ToFloat64(statusCounter); got != 1 {
+						t.Errorf("redirect status %d metric for /old = %v, want 1", status, got)
+					}
+				})
+			}
+		}
 	}
 }
 
