@@ -339,13 +339,13 @@ func TestSharedPacingSequentialSendsAndLateness(t *testing.T) {
 		var sends []time.Duration
 		cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
 		cs.pacing.timeline = &replayTimeline{captureOrigin: start, replayStart: start}
-		cs.transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		cs.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			sends = append(sends, time.Since(start))
 			if len(sends) == 1 {
 				time.Sleep(12 * time.Second)
 			}
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
-		})
+		})}
 		for index, offset := range []time.Duration{0, 10 * time.Second} {
 			event := model.Event{ConnectionID: 1, Sequence: index + 1, Timestamp: start.Add(offset).Format(time.RFC3339Nano), Method: "GET", Scheme: "http", Authority: "example.test", Path: "/"}
 			if abort := eng.processRequest(context.Background(), cs, event, nil); abort {
@@ -376,9 +376,9 @@ func TestSharedPacingHTTP2CapturesEachDispatchDeadline(t *testing.T) {
 		start := time.Now()
 		cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
 		cs.pacing.timeline = &replayTimeline{captureOrigin: start, replayStart: start}
-		cs.transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		cs.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: http.NoBody, Request: req}, nil
-		})
+		})}
 		time.Sleep(12 * time.Second)
 		for index, offset := range []time.Duration{9 * time.Second, 10 * time.Second} {
 			eng.processRequestConcurrent(context.Background(), cs, model.Event{
@@ -431,14 +431,14 @@ func TestScheduleLatenessExcludesRetriesAndUnpacedSends(t *testing.T) {
 				cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
 				cs.pacing.timeline = &replayTimeline{captureOrigin: start, replayStart: start}
 				attempts := 0
-				cs.transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				cs.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 					attempts++
 					status := 200
 					if attempts == 1 {
 						status = 503
 					}
 					return &http.Response{StatusCode: status, Header: make(http.Header), Body: http.NoBody, Request: req}, nil
-				})
+				})}
 				time.Sleep(2 * time.Second)
 				if abort := eng.processRequest(context.Background(), cs, model.Event{
 					ConnectionID: 1, Sequence: 1, Timestamp: start.Format(time.RFC3339Nano),

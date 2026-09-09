@@ -226,23 +226,21 @@ func TestExecuteRequestRetainsResponseHeadersOnlyForHeaderValidation(t *testing.
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			responseHeaders := http.Header{"X-Test": {"one", "two"}}
-			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Header:     responseHeaders,
 					Body:       io.NopCloser(strings.NewReader("ok")),
 					Request:    req,
 				}, nil
-			})
+			})}
 			cfg := config.Default()
 			cfg.Replay.Validation.Status = tt.statusValidation
 			cfg.Replay.Validation.Headers = tt.headerValidation
 			eng := New(cfg, metrics.New(cfg.Metrics))
 			requestEvent := model.Event{Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/"}
 
-			exec, err := eng.executeRequest(
-				context.Background(), transport, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{},
-			)
+			exec, err := eng.executeRequest(context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{})
 			if err != nil {
 				t.Fatalf("executeRequest(status=%t, headers=%t) error: %v", tt.statusValidation, tt.headerValidation, err)
 			}
@@ -289,22 +287,20 @@ func TestExecuteRequestDoesNotReadAfterResponseEOF(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			trackedBody := &readAfterEOFTrackingBody{reader: bytes.NewReader(tt.body)}
-			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Header:     make(http.Header),
 					Body:       trackedBody,
 					Request:    req,
 				}, nil
-			})
+			})}
 			cfg := config.Default()
 			cfg.Replay.Validation.Body = true
 			eng := New(cfg, metrics.New(cfg.Metrics))
 			requestEvent := model.Event{Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/"}
 
-			exec, err := eng.executeRequest(
-				context.Background(), transport, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{},
-			)
+			exec, err := eng.executeRequest(context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{})
 			if err != nil {
 				t.Fatalf("executeRequest(body size %d) error: %v", len(tt.body), err)
 			}
@@ -333,7 +329,7 @@ func TestExecuteRequestDoesNotReadAfterResponseEOF(t *testing.T) {
 func TestExecuteRequestIncludesDrainedBodyInEgressBytesOnReadError(t *testing.T) {
 	bodyErr := errors.New("body read failed")
 	responseBody := bytes.Repeat([]byte("x"), maxBodyRead+32*1024)
-	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
@@ -343,15 +339,13 @@ func TestExecuteRequestIncludesDrainedBodyInEgressBytesOnReadError(t *testing.T)
 			)),
 			Request: req,
 		}, nil
-	})
+	})}
 	cfg := config.Default()
 	cfg.Replay.Validation.Body = true
 	eng := New(cfg, metrics.New(cfg.Metrics))
 	requestEvent := model.Event{Method: http.MethodGet, Scheme: "http", Authority: "example.test", Path: "/"}
 
-	exec, err := eng.executeRequest(
-		context.Background(), transport, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{},
-	)
+	exec, err := eng.executeRequest(context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{})
 	if !errors.Is(err, bodyErr) {
 		t.Fatalf("executeRequest(truncated body with read error) error = %v, want %v", err, bodyErr)
 	}
@@ -370,20 +364,16 @@ func TestExecuteRequestIncludesResponseHeadersInEgressBytes(t *testing.T) {
 	authority := startRawHTTPResponseServer(t, response)
 	cfg := config.Default()
 	eng := New(cfg, metrics.New(cfg.Metrics))
-	transport := eng.makePerConnectionTransport(false)
+	client, transport := eng.makePerConnectionClient(false)
 	defer transport.CloseIdleConnections()
 
 	requestEvent := model.Event{Method: http.MethodGet,
 		Scheme:    "http",
 		Authority: authority,
 		Path:      "/"}
-	exec, err := eng.executeRequest(
-		context.Background(),
-		transport,
-		requestEvent,
+	exec, err := eng.executeRequest(context.Background(), client, requestEvent,
 		eng.effectiveRequestHeaders(requestEvent.Headers),
-		time.Time{},
-	)
+		time.Time{})
 	if err != nil {
 		t.Fatalf("executeRequest(raw response) error: %v", err)
 	}
@@ -399,20 +389,16 @@ func TestExecuteRequestIncludesPartialBodyInEgressBytesOnReadError(t *testing.T)
 	authority := startRawHTTPResponseServer(t, response)
 	cfg := config.Default()
 	eng := New(cfg, metrics.New(cfg.Metrics))
-	transport := eng.makePerConnectionTransport(false)
+	client, transport := eng.makePerConnectionClient(false)
 	defer transport.CloseIdleConnections()
 
 	requestEvent := model.Event{Method: http.MethodGet,
 		Scheme:    "http",
 		Authority: authority,
 		Path:      "/"}
-	exec, err := eng.executeRequest(
-		context.Background(),
-		transport,
-		requestEvent,
+	exec, err := eng.executeRequest(context.Background(), client, requestEvent,
 		eng.effectiveRequestHeaders(requestEvent.Headers),
-		time.Time{},
-	)
+		time.Time{})
 	if err == nil {
 		t.Fatal("executeRequest(partial body response) error = nil, want read error")
 	}
@@ -592,7 +578,7 @@ func TestSendRequestReturnsAttemptedExecutionWhenRetryBackoffCanceled(t *testing
 
 	reg := metrics.New(cfg.Metrics)
 	eng := New(cfg, reg)
-	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		cancel()
 		return &http.Response{
 			StatusCode: http.StatusServiceUnavailable,
@@ -600,13 +586,13 @@ func TestSendRequestReturnsAttemptedExecutionWhenRetryBackoffCanceled(t *testing
 			Body:       io.NopCloser(strings.NewReader("retry")),
 			Request:    req,
 		}, nil
-	})
+	})}
 
 	requestEvent := model.Event{Method: http.MethodGet,
 		Scheme:    "http",
 		Authority: "example.test",
 		Path:      "/"}
-	exec, err := eng.sendRequest(ctx, transport, requestEvent, eng.effectiveRequestHeaders(requestEvent.Headers), time.Time{})
+	exec, err := eng.sendRequest(ctx, client, requestEvent, eng.effectiveRequestHeaders(requestEvent.Headers), time.Time{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("sendRequest(canceled retry backoff) error = %v, want %v", err, context.Canceled)
 	}
@@ -774,7 +760,7 @@ func TestCanonicalRequestValidatesInlineResponseStatus(t *testing.T) {
 
 func TestReplayDoesNotFollowRedirects(t *testing.T) {
 	for _, status := range []int{301, 302, 303, 307, 308} {
-		for _, locationKind := range []string{"relative", "absolute", "malformed"} {
+		for _, locationKind := range []string{"relative", "absolute"} {
 			for _, capturedRequests := range []int{1, 2} {
 				name := strconv.Itoa(status) + "_" + locationKind + "_events_" + strconv.Itoa(capturedRequests)
 				t.Run(name, func(t *testing.T) {
@@ -787,8 +773,6 @@ func TestReplayDoesNotFollowRedirects(t *testing.T) {
 							location := "/new"
 							if locationKind == "absolute" {
 								location = "http://" + r.Host + location
-							} else if locationKind == "malformed" {
-								location = "/next%zz"
 							}
 							w.Header().Set("Location", location)
 							w.WriteHeader(status)
@@ -813,8 +797,6 @@ func TestReplayDoesNotFollowRedirects(t *testing.T) {
 					location := "/new"
 					if locationKind == "absolute" {
 						location = srv.URL + location
-					} else if locationKind == "malformed" {
-						location = "/next%zz"
 					}
 
 					cfg := config.Default()
@@ -880,6 +862,108 @@ func TestReplayDoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
+func TestReplayMalformedRedirectUsesNetworkErrorPolicy(t *testing.T) {
+	var oldRequests, newRequests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/old" {
+			oldRequests.Add(1)
+			w.Header().Set("Location", "/next%zz")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		newRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+	cfg := config.Default()
+	cfg.Replay.Retry.MaxAttempts = 2
+	cfg.Replay.Retry.Backoff = "none"
+	cfg.Replay.Retry.RetryOnErrors = []string{"network"}
+	cfg.Replay.Validation.Status = true
+	reg := metrics.New(cfg.Metrics)
+	events := []model.Event{
+		{
+			Type: model.EventRequest, ConnectionID: 1, Sequence: 1,
+			Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/old",
+			ResponseCode: intPointer(http.StatusFound),
+		},
+		{
+			Type: model.EventRequest, ConnectionID: 1, Sequence: 2,
+			Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/new",
+		},
+	}
+	summary, err := runReplay(New(cfg, reg), events)
+	if err != nil {
+		t.Fatalf("ReplayStream(malformed redirect) error: %v", err)
+	}
+	if got := oldRequests.Load(); got != 2 {
+		t.Errorf("malformed redirect attempts = %d, want 2", got)
+	}
+	if got := newRequests.Load(); got != 0 {
+		t.Errorf("requests after malformed redirect failure = %d, want 0", got)
+	}
+	if summary.SendErrors != 1 || summary.ConnectionsAborted != 1 || summary.ResponsesReceived != 0 || summary.ValidationFailed != 0 {
+		t.Errorf("malformed redirect: send errors=%d aborted=%d responses=%d validation failures=%d, want 1, 1, 0, 0",
+			summary.SendErrors, summary.ConnectionsAborted, summary.ResponsesReceived, summary.ValidationFailed)
+	}
+	counter := reg.StatusCounter.WithLabelValues(append(cfg.Metrics.CommonLabelValues(), "/old", "network")...)
+	if got := testutil.ToFloat64(counter); got != 2 {
+		t.Errorf("malformed redirect network error metric = %v, want 2", got)
+	}
+}
+
+func TestSendRequestRetriesEOFBeforeResponseHeaders(t *testing.T) {
+	var attempts atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				t.Errorf("hijack first request: %v", err)
+				return
+			}
+			if err := conn.Close(); err != nil {
+				t.Errorf("close first connection: %v", err)
+			}
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	target, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error: %v", srv.URL, err)
+	}
+	cfg := config.Default()
+	cfg.Replay.Retry.MaxAttempts = 2
+	cfg.Replay.Retry.Backoff = "none"
+	cfg.Replay.Retry.RetryOnErrors = []string{"network"}
+	reg := metrics.New(cfg.Metrics)
+	eng := New(cfg, reg)
+	client, transport := eng.makePerConnectionClient(false)
+	t.Cleanup(transport.CloseIdleConnections)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	event := model.Event{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}
+	exec, err := eng.sendRequest(ctx, client, event, eng.effectiveRequestHeaders(nil), time.Time{})
+	if err != nil {
+		t.Fatalf("sendRequest(EOF before response headers) error: %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Errorf("target attempts after EOF = %d, want 2", got)
+	}
+	if got := exec.statusCode; got != http.StatusOK {
+		t.Errorf("retry response status = %d, want %d", got, http.StatusOK)
+	}
+	counter := reg.StatusCounter.WithLabelValues(append(cfg.Metrics.CommonLabelValues(), "/", "network")...)
+	if got := testutil.ToFloat64(counter); got != 1 {
+		t.Errorf("EOF network error metric = %v, want 1", got)
+	}
+}
+
 func TestSendRequestTimeoutCoversResponseBodyAndRetries(t *testing.T) {
 	for _, validateBody := range []bool{false, true} {
 		t.Run(strconv.FormatBool(validateBody), func(t *testing.T) {
@@ -912,13 +996,13 @@ func TestSendRequestTimeoutCoversResponseBodyAndRetries(t *testing.T) {
 			cfg.Replay.Validation.Body = validateBody
 			reg := metrics.New(cfg.Metrics)
 			eng := New(cfg, reg)
-			transport := eng.makePerConnectionTransport(false)
+			client, transport := eng.makePerConnectionClient(false)
 			t.Cleanup(transport.CloseIdleConnections)
 			// Bound the test even if the per-attempt timeout stops working.
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			event := model.Event{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}
-			exec, err := eng.sendRequest(ctx, transport, event, eng.effectiveRequestHeaders(nil), time.Time{})
+			exec, err := eng.sendRequest(ctx, client, event, eng.effectiveRequestHeaders(nil), time.Time{})
 			if err != nil {
 				t.Fatalf("sendRequest(stalled response body) error: %v", err)
 			}
@@ -1364,13 +1448,11 @@ func TestResponseValidationComparesOversizedBodiesExactly(t *testing.T) {
 
 			cfg.Replay.Validation.Body = true
 			eng := New(cfg, metrics.New(cfg.Metrics))
-			transport := eng.makePerConnectionTransport(false)
+			client, transport := eng.makePerConnectionClient(false)
 			t.Cleanup(transport.CloseIdleConnections)
 			requestEvent := model.Event{Method: http.MethodGet, Scheme: target.Scheme, Authority: target.Host, Path: "/"}
 
-			exec, err := eng.executeRequest(
-				context.Background(), transport, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{},
-			)
+			exec, err := eng.executeRequest(context.Background(), client, requestEvent, eng.effectiveRequestHeaders(nil), time.Time{})
 			if err != nil {
 				t.Fatalf("executeRequest(body size %d) error: %v", len(actualBody), err)
 			}
@@ -2791,17 +2873,13 @@ func TestSpecialAuthorityHeaderRewrite(t *testing.T) {
 		cfg.Header.Set = map[string]string{":authority": "replay.example.com"}
 		cfg.Replay.TLS.InsecureSkipVerify = true
 		eng := New(cfg, metrics.New(cfg.Metrics))
-		transport := eng.makePerConnectionTransport(true)
+		client, transport := eng.makePerConnectionClient(true)
 		defer transport.CloseIdleConnections()
 		requestEvent := model.Event{Protocol: "HTTP/2", Method: http.MethodGet,
 			Scheme: target.Scheme, Authority: target.Host, Path: "/"}
-		if _, err := eng.executeRequest(
-			context.Background(),
-			transport,
-			requestEvent,
+		if _, err := eng.executeRequest(context.Background(), client, requestEvent,
 			eng.effectiveRequestHeaders(requestEvent.Headers),
-			time.Time{},
-		); err != nil {
+			time.Time{}); err != nil {
 			t.Fatalf("executeRequest() error: %v", err)
 		}
 		got := <-observed
