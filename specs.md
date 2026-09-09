@@ -260,7 +260,8 @@ Replay MUST NOT automatically follow HTTP redirects (`301`, `302`, `303`,
 redirect status, headers, and body MUST remain available to configured
 response validation; latency, status, and response-byte metrics MUST describe
 that response rather than a redirect chain. Receiving a redirect alone MUST
-NOT be treated as a transport error or abort the connection. A follow-up
+NOT be treated as a transport error or abort the connection, even when its
+`Location` value is not a syntactically valid URL reference. A follow-up
 request MUST be sent only when its own captured request event is scheduled.
 Automatic redirect following is not a configurable mode.
 
@@ -274,7 +275,7 @@ Automatic redirect following is not a configurable mode.
 Two supported modes:
 
 1. Serialized mode, which sends requests one at a time in observed connection order.
-2. Multiplexed mode, which sends HTTP/2 requests concurrently on the shared per-connection client and joins in-flight requests at EOF.
+2. Multiplexed mode, which sends HTTP/2 requests concurrently on the shared per-connection transport and joins in-flight requests at EOF.
 
 Checkpoint advancement in multiplexed mode follows Section 4.2.
 

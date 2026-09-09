@@ -158,7 +158,7 @@ type ReplaySchedule struct {
 // bounded backpressure without buffering entire connections in memory.
 // Each worker maintains per-connection state and replays HTTP/1.1 requests
 // synchronously as they arrive. HTTP/2 multiplexed requests are dispatched
-// concurrently on the shared per-connection client and joined at close/EOF.
+// concurrently on the shared per-connection transport and joined at close/EOF.
 // A nil schedule selects the origin and start from input arrival. A supplied
 // schedule is copied at entry and its start is anchored to the local monotonic
 // clock. It does not enable pacing when replay.pacing.enabled is false.
@@ -272,8 +272,7 @@ type pacingClock struct {
 // connState holds per-connection state within an event worker.
 type connState struct {
 	connKey     model.ConnectionKey
-	client      *http.Client
-	transport   *http.Transport
+	transport   http.RoundTripper
 	http2       bool
 	multiplexed bool
 	detected    bool
@@ -292,7 +291,7 @@ type connState struct {
 	checkpointWatermark int
 	checkpointOrder     []int
 	checkpointCompleted map[int]struct{}
-	// H/2 multiplexed requests run concurrently on the same http.Client.
+	// H/2 multiplexed requests run concurrently on the same transport.
 	// h2Mu protects shared connection results and checkpoint ordering.
 	h2Mu sync.Mutex
 	h2WG sync.WaitGroup
@@ -365,7 +364,7 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 // runEventWorker processes events from its channel using per-connection state.
 // For HTTP/1.1, requests are processed synchronously as they arrive. For HTTP/2
 // multiplexed mode, requests are sent concurrently on the same per-connection
-// client and finalized when connection_close or EOF is observed.
+// transport and finalized when connection_close or EOF is observed.
 func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, activationDelay time.Duration, checkpoints *checkpointStore, timeline *replayTimeline) Summary {
 	if err := waitForWorkerActivation(ctx, activationDelay); err != nil {
 		return Summary{}
@@ -405,9 +404,7 @@ func (e *Engine) runEventWorker(ctx context.Context, events <-chan model.Event, 
 				if cs.multiplexed {
 					cs.checkpointWatermark = checkpoints.lastProcessed(connKey)
 				}
-				client, transport := e.makePerConnectionClient(cs.http2)
-				cs.client = client
-				cs.transport = transport
+				cs.transport = e.makePerConnectionTransport(cs.http2)
 			}
 
 			if cs.multiplexed {
@@ -458,10 +455,10 @@ func (e *Engine) finalizeConn(cs *connState, result *Summary) {
 }
 
 func (e *Engine) closeConnResources(cs *connState) {
-	if cs.transport != nil {
-		cs.transport.CloseIdleConnections()
-		cs.transport = nil
+	if transport, ok := cs.transport.(interface{ CloseIdleConnections() }); ok {
+		transport.CloseIdleConnections()
 	}
+	cs.transport = nil
 }
 
 func (e *Engine) collectConnResults(cs *connState, result *Summary) {
@@ -508,7 +505,7 @@ func (e *Engine) processRequest(ctx context.Context, cs *connState, requestEvent
 		return abort
 	}
 
-	exec, err := e.sendRequest(ctx, cs.client, requestEvent, effectiveHeaders, cs.pacing.nextRequestAt)
+	exec, err := e.sendRequest(ctx, cs.transport, requestEvent, effectiveHeaders, cs.pacing.nextRequestAt)
 	if err != nil {
 		e.finishRequestError(cs, requestEvent, err, exec)
 		return true
@@ -519,7 +516,7 @@ func (e *Engine) processRequest(ctx context.Context, cs *connState, requestEvent
 }
 
 // processRequestConcurrent handles a single HTTP/2 multiplexed request by
-// sending it on the shared per-connection client in its own goroutine. Go's
+// sending it on the shared per-connection transport in its own goroutine. Go's
 // http.Transport is safe for concurrent use and owns the actual H/2 stream
 // multiplexing below this abstraction.
 func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, requestEvent model.Event, checkpoints *checkpointStore) {
@@ -548,7 +545,7 @@ func (e *Engine) processRequestConcurrent(ctx context.Context, cs *connState, re
 	deadline := cs.pacing.nextRequestAt
 
 	cs.h2WG.Go(func() {
-		exec, err := e.sendRequest(ctx, cs.client, requestEvent, effectiveHeaders, deadline)
+		exec, err := e.sendRequest(ctx, cs.transport, requestEvent, effectiveHeaders, deadline)
 		if err != nil {
 			cs.h2Mu.Lock()
 			e.finishRequestError(cs, requestEvent, err, exec)
@@ -761,7 +758,7 @@ func (e *Engine) aggregateResults(results <-chan Summary) Summary {
 	return final
 }
 
-func (e *Engine) makePerConnectionClient(http2 bool) (*http.Client, *http.Transport) {
+func (e *Engine) makePerConnectionTransport(http2 bool) *http.Transport {
 	dialer := &net.Dialer{Timeout: e.cfg.Replay.Timeout.Connect, KeepAlive: e.cfg.Replay.Timeout.IdleConnection}
 	tlsConfig := &tls.Config{
 		MinVersion:         tls.VersionTLS12,
@@ -783,15 +780,7 @@ func (e *Engine) makePerConnectionClient(http2 bool) (*http.Client, *http.Transp
 	} else {
 		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	}
-	client := &http.Client{
-		Timeout:   e.cfg.Replay.Timeout.Request,
-		Transport: tr,
-		// Redirect destinations are replayed only through their captured events.
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	return client, tr
+	return tr
 }
 
 func (e *Engine) paceTimestamp(ctx context.Context, clock *pacingClock, currentRaw string) error {
@@ -899,7 +888,7 @@ func (e *Engine) effectiveRequestHeaders(recorded map[string][]string) http.Head
 	return headers
 }
 
-func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEvent model.Event, effectiveHeaders http.Header, deadline time.Time) (requestExecution, error) {
+func (e *Engine) sendRequest(ctx context.Context, transport http.RoundTripper, requestEvent model.Event, effectiveHeaders http.Header, deadline time.Time) (requestExecution, error) {
 	maxAttempts := e.cfg.Replay.Retry.MaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 1
@@ -908,7 +897,7 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 	var lastExec requestExecution
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		exec, err := e.executeRequest(ctx, client, requestEvent, effectiveHeaders, deadline)
+		exec, err := e.executeRequest(ctx, transport, requestEvent, effectiveHeaders, deadline)
 		// Retries are additional attempts, not additional recorded requests.
 		deadline = time.Time{}
 		if err != nil {
@@ -960,7 +949,7 @@ func (e *Engine) sendRequest(ctx context.Context, client *http.Client, requestEv
 	return lastExec, nil
 }
 
-func (e *Engine) executeRequest(ctx context.Context, client *http.Client, requestEvent model.Event, effectiveHeaders http.Header, deadline time.Time) (requestExecution, error) {
+func (e *Engine) executeRequest(ctx context.Context, transport http.RoundTripper, requestEvent model.Event, effectiveHeaders http.Header, deadline time.Time) (requestExecution, error) {
 	requestURL, err := e.buildRequestURL(requestEvent)
 	if err != nil {
 		return requestExecution{}, err
@@ -986,12 +975,26 @@ func (e *Engine) executeRequest(ctx context.Context, client *http.Client, reques
 	if host := req.Header.Get("Host"); host != "" {
 		req.Host = host
 	}
+	if user := req.URL.User; user != nil && req.Header.Get("Authorization") == "" {
+		// Preserve URL credentials without mutating headers shared by retries.
+		req.Header = req.Header.Clone()
+		password, _ := user.Password()
+		req.SetBasicAuth(user.Username(), password)
+	}
 
 	start := time.Now()
+	if timeout := e.cfg.Replay.Timeout.Request; timeout > 0 {
+		// Keep the deadline active through response-body consumption.
+		requestCtx, cancel := context.WithTimeout(req.Context(), timeout)
+		defer cancel()
+		req = req.WithContext(requestCtx)
+	}
 	if e.cfg.Metrics.Enabled && e.metrics != nil && e.metrics.ScheduleLatenessHistogram != nil && !deadline.IsZero() {
 		e.metrics.RecordScheduleLateness(e.metricLabelValues, e.metricLabelForRequest(requestEvent), start.Sub(deadline))
 	}
-	resp, err := client.Do(req)
+	// RoundTrip preserves the response without interpreting Location. Client.Do
+	// parses redirect URLs before CheckRedirect and discards malformed ones.
+	resp, err := transport.RoundTrip(req)
 	if err != nil {
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
