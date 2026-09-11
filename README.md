@@ -315,7 +315,7 @@ Run these commands directly on Linux or inside the VM on macOS:
 | `make staticcheck` | Run Staticcheck across all Go packages. |
 | `make test` | Run Staticcheck, then all Go tests with the test cache disabled. |
 | `go test ./internal/parser -count=1` | Run one package while developing. |
-| `make e2e` | Build Replay and exercise the bundled fixtures against a local test server. |
+| `make e2e` | Build Replay and exercise the bundled fixtures against a local test server on `localhost:6001`. |
 | `make alltests` | Run `make test` and `make e2e`; this is the CI check. |
 | `make build` | Build `bin/replay` for the current OS and architecture. |
 | `make tidy` | Update `go.mod` and `go.sum` after dependency changes. |

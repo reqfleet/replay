@@ -30,11 +30,11 @@ staticcheck:
 	$(GO) tool staticcheck ./...
 
 e2e-server-start:
-	@echo "Starting test server on localhost:6000..."
+	@echo "Starting test server on localhost:6001..."
 	@mkdir -p $(BIN_DIR)
 	@$(GO) build -o $(BIN_DIR)/e2e_test_server ./e2e/test_server.go
 	@$(BIN_DIR)/e2e_test_server > /dev/null 2>&1 & echo $$! > e2e_server.pid
-	@for i in $$(seq 1 30); do nc -z localhost 6000 && echo "Test server started." && exit 0 || sleep 0.1; done; echo "Test server failed to start."; exit 1
+	@for i in $$(seq 1 30); do nc -z localhost 6001 && echo "Test server started." && exit 0 || sleep 0.1; done; echo "Test server failed to start."; exit 1
 
 e2e-server-stop:
 	@if [ -f e2e_server.pid ]; then \
@@ -53,7 +53,7 @@ e2e: e2e-server-start
 	@$(E2E_REPLAY) -log e2e/requests-ndjson.log.zst -zstd -verbose || ($(MAKE) e2e-server-stop; exit 1)
 	@echo "Running generated canonical request body e2e test..."
 	@$(GO) run ./tools/generate_requests.go \
-		-base http://localhost:6000 \
+		-base http://localhost:6001 \
 		-subpath e2e/request-body \
 		-reqs 1 \
 		-conns 1 \
@@ -66,7 +66,7 @@ e2e: e2e-server-start
 	@$(E2E_REPLAY) -config e2e/response-validation.yaml -log $(E2E_GENERATED_LOG) -verbose || ($(MAKE) e2e-server-stop; exit 1)
 	@echo "Running generated DownstreamEnd-only request body e2e test..."
 	@$(GO) run ./tools/generate_requests.go \
-		-base http://localhost:6000 \
+		-base http://localhost:6001 \
 		-subpath e2e/request-body \
 		-reqs 1 \
 		-conns 1 \
