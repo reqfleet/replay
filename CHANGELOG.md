@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.2](https://github.com/reqfleet/replay/compare/v0.1.1...v0.1.2) (2026-09-11)
+
+
+### Bug Fixes
+
+* **config:** Enable replay pacing by default ([#117](https://github.com/reqfleet/replay/issues/117)) ([6b9d1a2](https://github.com/reqfleet/replay/commit/6b9d1a271a54b2082604e733ca7423d6da54ee15))
+* **engine:** Disable automatic redirect following ([#124](https://github.com/reqfleet/replay/issues/124)) ([66bfbc6](https://github.com/reqfleet/replay/commit/66bfbc63417e2443bfbc14d0fc6c540725cb83c4))
+* **engine:** Enforce recorded HTTP protocol fidelity ([#126](https://github.com/reqfleet/replay/issues/126)) ([b45521b](https://github.com/reqfleet/replay/commit/b45521bf851edafcf6f7da5eeaeb3951204c94a1))
+* **replay:** Add shared-origin pacing for cross-connection bursts ([#123](https://github.com/reqfleet/replay/issues/123)) ([b91f678](https://github.com/reqfleet/replay/commit/b91f6781f195506da3ef588782e6484f43a1d111)), closes [#120](https://github.com/reqfleet/replay/issues/120)
+* **tools:** Allow customizing generated HTTP method ([#119](https://github.com/reqfleet/replay/issues/119)) ([87bdee3](https://github.com/reqfleet/replay/commit/87bdee3653f1d2faafa1b8b58da12dc4efcf572d)), closes [#83](https://github.com/reqfleet/replay/issues/83)
+
 ## [0.1.1](https://github.com/reqfleet/replay/compare/v0.1.0...v0.1.1) (2026-08-27)
 
 
