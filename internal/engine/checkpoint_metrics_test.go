@@ -104,7 +104,7 @@ func TestReplayUsesConfiguredCheckpointSyncInterval(t *testing.T) {
 	t.Cleanup(closeEvents)
 
 	key := model.ConnectionKey{Node: "envoy-a", ConnectionID: 1}
-	events <- model.Event{Type: model.EventRequest,
+	events <- model.Event{Type: model.EventRequest, Protocol: "HTTP/1.1",
 		Node:         key.Node,
 		ConnectionID: key.ConnectionID,
 		Sequence:     1, Method: http.MethodGet,
@@ -356,7 +356,7 @@ func TestReplayStreamReturnsCheckpointPersistenceFailure(t *testing.T) {
 	events := []model.Event{
 		{Type: model.EventConnectionOpen, ConnectionID: 1},
 		{
-			Type:         model.EventRequest,
+			Type: model.EventRequest, Protocol: "HTTP/1.1",
 			ConnectionID: 1,
 			Sequence:     1,
 			Method:       http.MethodGet,
@@ -424,7 +424,7 @@ func TestCheckpointNotWrittenInDryRun(t *testing.T) {
 	e := New(cfg, metrics.New(cfg.Metrics))
 
 	req := model.Event{
-		Type:         model.EventRequest,
+		Type: model.EventRequest, Protocol: "HTTP/1.1",
 		Node:         "envoy-b",
 		ConnectionID: 2,
 		Sequence:     1,
@@ -455,7 +455,7 @@ func TestCheckpointWrittenOnIdempotencySkip(t *testing.T) {
 	e := New(cfg, metrics.New(cfg.Metrics))
 
 	req := model.Event{
-		Type:         model.EventRequest,
+		Type: model.EventRequest, Protocol: "HTTP/1.1",
 		Node:         "envoy-b",
 		ConnectionID: 42,
 		Sequence:     42,

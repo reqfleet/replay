@@ -214,7 +214,11 @@ func normalizeObservation(line int, raw rawObservation) (string, observation, er
 	if raw.Protocol == "" {
 		return "", observation{}, fmt.Errorf("line %d: observation missing protocol", line)
 	}
-	if len(raw.Protocol) >= 8 && strings.EqualFold(raw.Protocol[:8], "HTTP/1.1") {
+	protocol, err := model.NormalizeProtocol(raw.Protocol)
+	if err != nil {
+		return "", observation{}, fmt.Errorf("line %d: %w", line, err)
+	}
+	if protocol == model.ProtocolHTTP11 {
 		if raw.StreamID != 0 && raw.StreamID != 1 {
 			return "", observation{}, fmt.Errorf("line %d: HTTP/1.1 observations must omit stream_id or use stream_id=1", line)
 		}
@@ -251,7 +255,7 @@ func normalizeObservation(line int, raw rawObservation) (string, observation, er
 		Scheme:                  raw.Scheme,
 		Authority:               raw.Authority,
 		Path:                    raw.Path,
-		Protocol:                raw.Protocol,
+		Protocol:                protocol,
 		StreamID:                raw.StreamID,
 		DownstreamRemoteAddress: raw.DownstreamRemoteAddress,
 		UserAgent:               raw.UserAgent,

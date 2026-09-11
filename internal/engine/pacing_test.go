@@ -33,8 +33,8 @@ func TestReplaySharedPacingInitialOffsets(t *testing.T) {
 				cfg.Replay.MaxVirtualUsersPerEngine = workers
 				base := time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC)
 				events := make(chan model.Event, 2)
-				events <- model.Event{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, Method: "GET", Timestamp: base.Format(time.RFC3339Nano)}
-				events <- model.Event{Type: model.EventRequest, ConnectionID: 2, Sequence: 1, Method: "GET", Timestamp: base.Add(9 * time.Second).Format(time.RFC3339Nano)}
+				events <- model.Event{Type: model.EventRequest, Protocol: "HTTP/1.1", ConnectionID: 1, Sequence: 1, Method: "GET", Timestamp: base.Format(time.RFC3339Nano)}
+				events <- model.Event{Type: model.EventRequest, Protocol: "HTTP/1.1", ConnectionID: 2, Sequence: 1, Method: "GET", Timestamp: base.Add(9 * time.Second).Format(time.RFC3339Nano)}
 				close(events)
 				start := time.Now()
 				summary, err := New(cfg, nil).ReplayStream(context.Background(), events, nil)
@@ -160,9 +160,9 @@ func TestReplayPacingAndRampup(t *testing.T) {
 				for range 2 { // Each run needs a fresh origin/start, even on the same Engine.
 					start := time.Now()
 					events := []model.Event{
-						{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, Method: "GET", Timestamp: origin.Format(time.RFC3339Nano)},
-						{Type: model.EventRequest, ConnectionID: 2, Sequence: 1, Method: "GET", Timestamp: origin.Add(9 * time.Second).Format(time.RFC3339Nano)},
-						{Type: model.EventRequest, ConnectionID: 2, Sequence: 2, Method: "GET", Timestamp: origin.Add(10 * time.Second).Format(time.RFC3339Nano)},
+						{Type: model.EventRequest, Protocol: "HTTP/1.1", ConnectionID: 1, Sequence: 1, Method: "GET", Timestamp: origin.Format(time.RFC3339Nano)},
+						{Type: model.EventRequest, Protocol: "HTTP/1.1", ConnectionID: 2, Sequence: 1, Method: "GET", Timestamp: origin.Add(9 * time.Second).Format(time.RFC3339Nano)},
+						{Type: model.EventRequest, Protocol: "HTTP/1.1", ConnectionID: 2, Sequence: 2, Method: "GET", Timestamp: origin.Add(10 * time.Second).Format(time.RFC3339Nano)},
 					}
 					summary, err := runReplay(eng, events)
 					if err != nil {
@@ -205,8 +205,8 @@ func TestReplaySuppliedSchedule(t *testing.T) {
 				}
 				// This input lacks the capture origin, as a pre-sharded file may.
 				input := []model.Event{
-					{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, Method: "GET", Timestamp: schedule.CaptureOrigin.Add(9 * time.Second).Format(time.RFC3339Nano)},
-					{Type: model.EventRequest, ConnectionID: 2, Sequence: 1, Method: "GET", Timestamp: schedule.CaptureOrigin.Add(10 * time.Second).Format(time.RFC3339Nano)},
+					{Type: model.EventRequest, Protocol: "HTTP/1.1", ConnectionID: 1, Sequence: 1, Method: "GET", Timestamp: schedule.CaptureOrigin.Add(9 * time.Second).Format(time.RFC3339Nano)},
+					{Type: model.EventRequest, Protocol: "HTTP/1.1", ConnectionID: 2, Sequence: 1, Method: "GET", Timestamp: schedule.CaptureOrigin.Add(10 * time.Second).Format(time.RFC3339Nano)},
 				}
 				events := make(chan model.Event, len(input))
 				for _, event := range input {
@@ -259,8 +259,8 @@ func TestReplaySharedOriginBeforeShardFiltering(t *testing.T) {
 		}
 		start := time.Now()
 		summary, err := runReplay(New(cfg, nil), []model.Event{
-			{Type: model.EventRequest, ConnectionID: keys[1].ConnectionID, Timestamp: start.Format(time.RFC3339Nano)},
-			{Type: model.EventRequest, ConnectionID: keys[0].ConnectionID, Method: "GET", Timestamp: start.Add(9 * time.Second).Format(time.RFC3339Nano)},
+			{Type: model.EventRequest, Protocol: "HTTP/1.1", ConnectionID: keys[1].ConnectionID, Timestamp: start.Format(time.RFC3339Nano)},
+			{Type: model.EventRequest, Protocol: "HTTP/1.1", ConnectionID: keys[0].ConnectionID, Method: "GET", Timestamp: start.Add(9 * time.Second).Format(time.RFC3339Nano)},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -294,8 +294,8 @@ func TestSharedPacingResumeRetainsSkippedTimeline(t *testing.T) {
 		cfg.Replay.Checkpoint.File = path
 		start := time.Now()
 		summary, err := runReplay(New(cfg, nil), []model.Event{
-			{Type: model.EventRequest, ConnectionID: 1, Sequence: 1, Timestamp: start.Format(time.RFC3339Nano)},
-			{Type: model.EventRequest, ConnectionID: 2, Sequence: 1, Timestamp: start.Add(9 * time.Second).Format(time.RFC3339Nano)},
+			{Type: model.EventRequest, Protocol: "HTTP/1.1", ConnectionID: 1, Sequence: 1, Timestamp: start.Format(time.RFC3339Nano)},
+			{Type: model.EventRequest, Protocol: "HTTP/1.1", ConnectionID: 2, Sequence: 1, Timestamp: start.Add(9 * time.Second).Format(time.RFC3339Nano)},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -344,10 +344,10 @@ func TestSharedPacingSequentialSendsAndLateness(t *testing.T) {
 			if len(sends) == 1 {
 				time.Sleep(12 * time.Second)
 			}
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+			return &http.Response{StatusCode: 200, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
 		})}
 		for index, offset := range []time.Duration{0, 10 * time.Second} {
-			event := model.Event{ConnectionID: 1, Sequence: index + 1, Timestamp: start.Add(offset).Format(time.RFC3339Nano), Method: "GET", Scheme: "http", Authority: "example.test", Path: "/"}
+			event := model.Event{Protocol: "HTTP/1.1", ConnectionID: 1, Sequence: index + 1, Timestamp: start.Add(offset).Format(time.RFC3339Nano), Method: "GET", Scheme: "http", Authority: "example.test", Path: "/"}
 			if abort := eng.processRequest(context.Background(), cs, event, nil); abort {
 				t.Fatalf("request %d aborted", index+1)
 			}
@@ -377,7 +377,7 @@ func TestSharedPacingHTTP2CapturesEachDispatchDeadline(t *testing.T) {
 		cs := eng.newConnState(model.ConnectionKey{ConnectionID: 1})
 		cs.pacing.timeline = &replayTimeline{captureOrigin: start, replayStart: start}
 		cs.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: http.NoBody, Request: req}, nil
+			return &http.Response{StatusCode: 200, Proto: "HTTP/2.0", ProtoMajor: 2, ProtoMinor: 0, Header: make(http.Header), Body: http.NoBody, Request: req}, nil
 		})}
 		time.Sleep(12 * time.Second)
 		for index, offset := range []time.Duration{9 * time.Second, 10 * time.Second} {
@@ -437,10 +437,11 @@ func TestScheduleLatenessExcludesRetriesAndUnpacedSends(t *testing.T) {
 					if attempts == 1 {
 						status = 503
 					}
-					return &http.Response{StatusCode: status, Header: make(http.Header), Body: http.NoBody, Request: req}, nil
+					return &http.Response{StatusCode: status, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1, Header: make(http.Header), Body: http.NoBody, Request: req}, nil
 				})}
 				time.Sleep(2 * time.Second)
 				if abort := eng.processRequest(context.Background(), cs, model.Event{
+					Protocol:     "HTTP/1.1",
 					ConnectionID: 1, Sequence: 1, Timestamp: start.Format(time.RFC3339Nano),
 					Method: "GET", Scheme: "http", Authority: "example.test", Path: "/",
 				}, nil); abort {

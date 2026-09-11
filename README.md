@@ -33,7 +33,24 @@ observed request order within each downstream connection. Requests that shared
 the same client-to-Envoy connection remain grouped together during replay, and
 recorded connection-close signals are used when available. HTTP/1.1 requests
 remain sequential, while HTTP/2 traffic follows the configured serialized or
-multiplexed mode.
+multiplexed mode. Serialized HTTP/2 intentionally removes recorded concurrency;
+it does not change the wire protocol.
+
+Protocol fidelity is strict-only: Replay preserves recorded HTTP/1.1 or HTTP/2
+and fails rather than falling back to another protocol. Protocol names are
+case-insensitive and trimmed; `HTTP/1.1`, `HTTP/2`, and `HTTP/2.0` are accepted.
+Missing, unsupported, or mixed protocols within one connection are rejected.
+HTTPS HTTP/2 requires `h2` ALPN; plain HTTP/2 uses prior-knowledge h2c, not an
+HTTP/1 upgrade. The target must support the recorded protocol.
+If Go's HTTP/2 support is disabled (`GODEBUG=http2client=0` or a
+`nethttpomithttp2` build), sending recorded HTTP/2 fails before any application
+request is sent, for both TLS and cleartext targets.
+
+Protocol failures have a separate `protocol_failed` summary count and make the
+run fail with a nonzero exit status even with response validation disabled or
+`partial_success_exit_zero` enabled. See
+[protocol fidelity](connection-replay.md#strict-protocol-fidelity) for transport
+requirements and diagnostics.
 
 Pacing is enabled by default: Replay preserves recorded start
 offsets between connections and request gaps within each connection on one
@@ -77,6 +94,9 @@ go run ./cmd/replay \
   --disallow-recorded-targets
 ```
 
+`--override-url` changes the destination, not the recorded HTTP protocol; there
+is no protocol-override mode.
+
 ## Recording traffic
 
 Before we talk about traffic capture in detail, let's firstly explain the basic conceps of different access logs types in Envoy. We start from explaining the definition of downstream.
@@ -90,7 +110,10 @@ Envoy, which forwards them to configured upstream servers:
 clients (downstream) -> Envoy -> (upstream) servers
 ```
 
-Here, *downstream* describes the traffic between the client and Envoy.
+Here, *downstream* describes the traffic between the client and Envoy. The
+captured protocol belongs to that leg, not Envoy's upstream connection. Envoy
+may accept downstream HTTP/2 while forwarding upstream HTTP/1.1. Replaying that
+capture directly to the application still requires HTTP/2 support there.
 
 ### `DownstreamStart` access log
 

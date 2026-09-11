@@ -280,16 +280,47 @@ locations using a typed error, not Go's error-message wording. Other transport
 failures retain the existing retry and connection-abort behavior. Malformed
 `Location` values on non-redirect responses are not interpreted.
 
+Protocol fidelity is strict-only. Replay MUST trim outer whitespace and
+normalize case, accepting only `HTTP/1.1`, `HTTP/2`, and `HTTP/2.0`; both HTTP/2
+forms normalize to `HTTP/2.0`. Missing or unsupported protocols and inconsistent
+normalized protocols within one `(node, connection_id)` MUST be rejected,
+including during dry-run. Streaming rejection does not roll back requests
+already forwarded. There is no protocol override or automatic fallback.
+
+The captured protocol describes the client-to-Envoy downstream leg, not
+Envoy-to-application upstream traffic. A destination override MUST NOT change
+the recorded protocol; the new target must support it even if Envoy originally
+translated between downstream HTTP/2 and upstream HTTP/1.1.
+
+Replay MUST enforce the expected protocol on every response before treating it
+as usable or applying optional status/header/body validation. A protocol
+failure MUST NOT be retried, counted as a usable response, or reclassified as
+an ordinary network failure. See Section 6.3 for run and diagnostic behavior.
+
 ### HTTP/1.1
 
 * Sequential replay per connection
 * Preserve keep-alive behavior
+* MUST NOT negotiate or upgrade to HTTP/2.
 
 ### HTTP/2
 
+HTTP/2 over TLS MUST advertise only `h2` in ALPN and require its negotiation.
+Certificate verification remains enabled unless
+`replay.tls.insecure_skip_verify` is explicitly configured; that setting MUST
+NOT relax ALPN or response protocol enforcement. Cleartext HTTP/2 MUST use
+prior-knowledge h2c, not HTTP/1 upgrade or fallback. An incompatible HTTP/1
+server may expose the HTTP/2 preface (`PRI * HTTP/2.0`) to its request handler;
+this is not a replayed application request over HTTP/1.
+
+If Go's HTTP/2 implementation is disabled, including by `GODEBUG=http2client=0`
+or the `nethttpomithttp2` build tag, sending a recorded HTTP/2 request MUST fail
+as a non-retryable protocol failure before sending application bytes. This
+applies to TLS and cleartext destinations alike.
+
 Two supported modes:
 
-1. Serialized mode, which sends requests one at a time in observed connection order.
+1. Serialized mode, which sends requests one at a time in observed connection order. It intentionally changes recorded concurrency, not the HTTP/2 wire protocol.
 2. Multiplexed mode, which sends HTTP/2 requests concurrently on the shared per-connection client and joins in-flight requests at EOF.
 
 Checkpoint advancement in multiplexed mode follows Section 4.2.
@@ -461,6 +492,7 @@ Recommended behavior:
 3. When override is enabled, `Host`/`:authority` headers MUST be rewritten to match the override target unless an explicit allowlist says otherwise.
 4. Sensitive headers (for example, `authorization`, `cookie`) SHOULD be replaced, removed, or regenerated before send.
 5. Replay SHOULD fail fast if override is required by policy but missing.
+6. Destination overrides MUST preserve the recorded HTTP protocol; no protocol-override setting is supported.
 
 Example rewrite intent:
 
@@ -494,13 +526,13 @@ transport memory therefore depends on the number of simultaneously active
 Replay retains one aggregate `ConnectionResult` for every finalized connection
 until the run summary is consumed. It contains `node`, `connection_id`,
 `outcome`, and aggregate `requests_sent`, `responses_received`, `send_errors`,
-`validation_failed`, and `skipped` counters. `RequestResult` remains an API type
-for bounded request-detail output, but normal replay does not populate
-`Summary.RequestResults` or `ConnectionResult.Requests`.
+`protocol_failed`, `validation_failed`, and `skipped` counters. Protocol-failed
+`RequestResult` details are retained in `ConnectionResult.Requests`; successful
+request details are not retained, and `Summary.RequestResults` is not populated.
 
-Result memory therefore depends on the total connections processed, including
-identities already finalized by `connection_close`, rather than the total
-request count. Request concurrency additionally depends on HTTP mode and target
+Result memory therefore depends on total connections processed (including
+finalized identities) and retained protocol failures, not all successful
+requests. Request concurrency additionally depends on HTTP mode and target
 latency.
 
 Distributed replay note:
@@ -518,6 +550,7 @@ Request outcome classes:
 
 * `sent`: request was emitted to target.
 * `send_error`: request failed before receiving a usable HTTP response (for example connect timeout, TLS error, network reset, or malformed redirect location).
+* `protocol_failed`: the recorded protocol could not be preserved, independently of response validation.
 * `response_received`: response was received from target.
 * `validation_failed`: response was received but did not match configured validation rules.
 * `skipped`: request was intentionally not sent (for example policy guard or dry-run filter).
@@ -529,9 +562,9 @@ Connection outcome classes:
 
 Run outcome classes:
 
-* `success`: no fatal engine errors or send/validation failures, and all non-skipped requests reached terminal outcomes.
+* `success`: no fatal engine errors or send/protocol/validation failures, and all non-skipped requests reached terminal outcomes.
 * `partial_success`: replay completed with non-fatal send/validation failures.
-* `failed`: replay stopped early due to fatal conditions (for example invalid input, backend unavailable, policy violation).
+* `failed`: a fatal condition occurred (for example invalid input, backend unavailable, policy violation), or any request failed protocol fidelity, even if replay otherwise completed.
 
 Exit status guidance:
 
@@ -539,6 +572,13 @@ Exit status guidance:
 * Engine SHOULD return non-zero exit code for `failed`.
 * Engine SHOULD return exit code `0` for `partial_success` by default.
 * Engine MAY make `partial_success` exit behavior configurable when operators need non-zero behavior in CI-style contexts.
+
+Protocol failures MUST have a separate `protocol_failed` run-summary counter
+and MUST make the CLI exit nonzero, independently of response validation and
+`partial_success_exit_zero`. Their diagnostics MUST identify the connection,
+request, expected protocol, observed protocol when available, and destination.
+Normal connection, DNS, timeout, and certificate failures remain ordinary send
+errors rather than protocol failures.
 
 ### 6.4 Metrics Emission and Scrape Endpoint
 
