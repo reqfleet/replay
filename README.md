@@ -97,6 +97,31 @@ go run ./cmd/replay \
 `--override-url` changes the destination, not the recorded HTTP protocol; there
 is no protocol-override mode.
 
+### Container images
+
+`ghcr.io/reqfleet/replay:latest` is published only by the manual
+**Publish latest image** workflow, for testing unreleased changes. In GitHub,
+open **Actions → Publish latest image → Run workflow**, select `main`, and
+run the workflow. Alternatively, use the GitHub CLI:
+
+```bash
+gh workflow run publish-latest.yml --ref main
+```
+
+The workflow always checks out the head of `main` when the job starts,
+regardless of the selected workflow branch. Both architectures use that same
+checkout. Manual runs are serialized, and rerunning the job checks out `main`
+again. Commits merged while a build is running require another manual run.
+
+Ordinary PR merges do not publish images. Release-please releases still
+automatically publish version-tagged images (for example,
+`ghcr.io/reqfleet/replay:v0.1.1`) and CLI assets, without updating `latest`.
+Both image tags support Linux on `amd64` and `arm64`.
+
+```bash
+docker pull ghcr.io/reqfleet/replay:latest
+```
+
 ## Recording traffic
 
 Before we talk about traffic capture in detail, let's firstly explain the basic conceps of different access logs types in Envoy. We start from explaining the definition of downstream.

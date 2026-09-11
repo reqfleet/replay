@@ -1,0 +1,75 @@
+name: Publish latest image
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: publish-latest-image
+  cancel-in-progress: false
+
+jobs:
+  publish-latest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE_REF: ghcr.io/${{ github.repository }}:run-${{ github.run_id }}-${{ github.run_attempt }}
+      LATEST_IMAGE_REF: ghcr.io/${{ github.repository }}:latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build Replay binaries
+        run: |
+          make build BIN_DIR=bin/release BINARY=replay-linux-amd64 GOOS=linux GOARCH=amd64
+          make build BIN_DIR=bin/release BINARY=replay-linux-arm64 GOOS=linux GOARCH=arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE_REF }}-amd64
+          build-args: |
+            BIN_DIR=bin/release
+            BINARY=replay-linux-amd64
+
+      - name: Build and publish arm64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE_REF }}-arm64
+          build-args: |
+            BIN_DIR=bin/release
+            BINARY=replay-linux-arm64
+
+      - name: Publish latest multi-architecture manifest
+        run: >-
+          docker buildx imagetools create
+          --tag "$LATEST_IMAGE_REF"
+          "${IMAGE_REF}-amd64"
+          "${IMAGE_REF}-arm64"
