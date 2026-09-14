@@ -77,18 +77,49 @@ handshakes, or exact server responses.
 See the [replay semantics](specs.md#4-replay-semantics) and
 [non-goals](specs.md#5-non-goals) for the detailed contract.
 
-## Sample usage
+## Download
 
-Running replay will be looking like this:
+### Replay binary
+
+Download the binary for your operating system and architecture from the
+[latest GitHub release](https://github.com/reqfleet/replay/releases/latest):
+
+* Linux: `replay-linux-amd64` or `replay-linux-arm64`.
+* Windows: `replay-windows-amd64.exe` or `replay-windows-arm64.exe`.
+* macOS (Apple Silicon): `replay-darwin-arm64`.
+
+For example, download and run the Linux `amd64` binary:
 
 ```bash
-go run ./cmd/replay -log ./log.ndjson
+curl -fL https://github.com/reqfleet/replay/releases/latest/download/replay-linux-amd64 -o replay
+chmod +x replay
+./replay -help
+```
+
+### Docker image
+
+Pull an image from GitHub Container Registry using a release tag, for example:
+
+```bash
+docker pull ghcr.io/reqfleet/replay:v0.1.1
+```
+
+Images support Linux on `amd64` and `arm64`. Available versions are listed on
+the [releases page](https://github.com/reqfleet/replay/releases).
+
+## Sample usage
+
+The examples below assume the downloaded binary is saved as `replay` in the
+current directory:
+
+```bash
+./replay -log ./log.ndjson
 ```
 
 A more advanced usage that can protect the replay from targeting the production domain.
 
 ```bash
-go run ./cmd/replay \
+./replay \
   -log ./canonical.ndjson \
   --override-url http://staging.example \
   --disallow-recorded-targets
@@ -96,31 +127,6 @@ go run ./cmd/replay \
 
 `--override-url` changes the destination, not the recorded HTTP protocol; there
 is no protocol-override mode.
-
-### Container images
-
-`ghcr.io/reqfleet/replay:latest` is published only by the manual
-**Publish latest image** workflow, for testing unreleased changes. In GitHub,
-open **Actions → Publish latest image → Run workflow**, select `main`, and
-run the workflow. Alternatively, use the GitHub CLI:
-
-```bash
-gh workflow run publish-latest.yml --ref main
-```
-
-The workflow always checks out the head of `main` when the job starts,
-regardless of the selected workflow branch. Both architectures use that same
-checkout. Manual runs are serialized, and rerunning the job checks out `main`
-again. Commits merged while a build is running require another manual run.
-
-Ordinary PR merges do not publish images. Release-please releases still
-automatically publish version-tagged images (for example,
-`ghcr.io/reqfleet/replay:v0.1.1`) and CLI assets, without updating `latest`.
-Both image tags support Linux on `amd64` and `arm64`.
-
-```bash
-docker pull ghcr.io/reqfleet/replay:latest
-```
 
 ## Recording traffic
 
@@ -196,7 +202,7 @@ example therefore supports response-status validation only.
 5. Pair the observations into canonical replay input:
 
    ```bash
-   go run ./cmd/replay combine \
+   ./replay combine \
      -log ./requests.log \
      -out ./canonical.ndjson
    ```
@@ -204,13 +210,13 @@ example therefore supports response-status validation only.
 6. Parse the canonical NDJSON without sending requests:
 
    ```bash
-   go run ./cmd/replay -log ./canonical.ndjson -dry-run
+   ./replay -log ./canonical.ndjson -dry-run
    ```
 
 7. Replay the prepared capture against an explicitly selected target:
 
    ```bash
-   go run ./cmd/replay \
+   ./replay \
      -log ./canonical.ndjson \
      -config ./config.yaml \
      --override-url http://staging.example \
@@ -507,8 +513,8 @@ file so the original capture is not truncated:
 
 ```bash
 go run add-bodies.go < canonical.ndjson > with-bodies.ndjson
-go run ./cmd/replay -log ./with-bodies.ndjson -dry-run
-go run ./cmd/replay \
+./replay -log ./with-bodies.ndjson -dry-run
+./replay \
   -log ./with-bodies.ndjson \
   -config ./config.yaml \
   --override-url http://staging.example \
