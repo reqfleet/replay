@@ -7,7 +7,7 @@ replay system using an Envoy proxy for capture and a Go-based replay engine.
 Envoy may run as an application sidecar or as a standalone proxy.
 
 For operational capture and replay instructions, see
-[Recording traffic](README.md#recording-traffic).
+[Recording traffic](docs/guide.md#recording-traffic).
 
 Goals:
 
