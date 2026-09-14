@@ -6,6 +6,9 @@ This document defines the specification for an HTTP traffic recording and
 replay system using an Envoy proxy for capture and a Go-based replay engine.
 Envoy may run as an application sidecar or as a standalone proxy.
 
+For operational capture and replay instructions, see
+[Recording traffic](README.md#recording-traffic).
+
 Goals:
 
 * Record HTTP/1.1 and HTTP/2 traffic
@@ -49,6 +52,13 @@ Recording observations and replay events are different wire contracts. The
 recommended fidelity path sends paired Envoy stdout observations through
 `replay combine` and replays its canonical output. End-only completion logs MAY
 be replayed directly under the limited contract in Section 3.4.
+
+```text
+Envoy DownstreamStart/DownstreamEnd NDJSON
+  → replay combine
+  → canonical request/connection_close NDJSON
+  → replay -log
+```
 
 ### 3.1 Raw Recorder Observations
 
@@ -116,7 +126,8 @@ Run:
 replay combine -log mixed.ndjson -out canonical.ndjson
 ```
 
-`-zstd` selects compressed input. Output is plain NDJSON.
+`-zstd` selects compressed input. Output is plain NDJSON and is atomically
+installed only after the input and every complete pair validate.
 
 Each encoded input or canonical output line is limited to 16 MiB. A complete
 pair whose merged canonical record exceeds that limit is fatal, even when its
@@ -140,6 +151,21 @@ request descriptors. Missing Start request headers or body are filled from
 End. End supplies response code, duration, response headers, response body, and
 tokenized response flags. Serialized `sequence` is omitted; the parser derives
 it deterministically from canonical order for each connection key.
+
+For overlapping HTTP/2 requests:
+
+```text
+A starts, then B starts
+B ends, then A ends
+```
+
+End append order is `B, A`; canonical request order is `A, B`. Canonical order
+does not impose global execution order across connections: independent workers
+may execute different connections concurrently.
+
+Envoy's exact `DC` token means `DownstreamConnectionTermination`: evidence that
+the recorded downstream connection ended while HTTP work was active. It does
+not identify a clean idle close after the final request.
 
 If any paired End for a connection contains the exact `DC` token, the combiner emits
 one `connection_close` immediately after that connection's final canonical
@@ -172,7 +198,7 @@ representation.
 canonical request order independently for each `node` + `connection_id`. If a
 producer supplies `sequence`, replay preserves it and rejects a decrease.
 `connection_close` requires only `connection_id` plus optional `node`, passes
-directly to the engine, and does not advance request sequence.
+directly to the engine, and neither advances nor resets request sequence.
 
 Canonical `headers`, `body`, `response_headers`, and `response_body` use the
 same header-map and base64-envelope representations as raw payload fields.
@@ -280,6 +306,8 @@ locations using a typed error, not Go's error-message wording. Other transport
 failures retain the existing retry and connection-abort behavior. Malformed
 `Location` values on non-redirect responses are not interpreted.
 
+### Strict Protocol Fidelity
+
 Protocol fidelity is strict-only. Replay MUST trim outer whitespace and
 normalize case, accepting only `HTTP/1.1`, `HTTP/2`, and `HTTP/2.0`; both HTTP/2
 forms normalize to `HTTP/2.0`. Missing or unsupported protocols and inconsistent
@@ -297,13 +325,17 @@ as usable or applying optional status/header/body validation. A protocol
 failure MUST NOT be retried, counted as a usable response, or reclassified as
 an ordinary network failure. See Section 6.3 for run and diagnostic behavior.
 
-### HTTP/1.1
+Implementation note: each recorded connection uses a standard Go
+`http.Transport`, configured for the recorded protocol. Standard Go transport
+pooling, retry, and connection-lifecycle behavior still applies.
+
+#### HTTP/1.1
 
 * Sequential replay per connection
 * Preserve keep-alive behavior
 * MUST NOT negotiate or upgrade to HTTP/2.
 
-### HTTP/2
+#### HTTP/2
 
 HTTP/2 over TLS MUST advertise only `h2` in ALPN and require its negotiation.
 Certificate verification remains enabled unless
@@ -312,6 +344,11 @@ NOT relax ALPN or response protocol enforcement. Cleartext HTTP/2 MUST use
 prior-knowledge h2c, not HTTP/1 upgrade or fallback. An incompatible HTTP/1
 server may expose the HTTP/2 preface (`PRI * HTTP/2.0`) to its request handler;
 this is not a replayed application request over HTTP/1.
+
+For h2c, an HTTP/1 response to the connection preface is a protocol failure even
+when it arrives before the first request stream is admitted. Replay retains
+that wire evidence on the individual socket; an early EOF without protocol
+evidence remains an ordinary network failure and follows configured retries.
 
 If Go's HTTP/2 implementation is disabled, including by `GODEBUG=http2client=0`
 or the `nethttpomithttp2` build tag, sending a recorded HTTP/2 request MUST fail
@@ -368,6 +405,11 @@ monotonic completed-sequence watermark for each `node` + `connection_id` and
 skips input at or below a loaded watermark. Multiplexed HTTP/2 MUST advance the
 watermark only after every earlier admitted sequence reaches a terminal,
 checkpointable state.
+
+Parser-assigned sequences are stable across repeated parses of the same
+canonical file because `combine` omits serialized sequences and preserves
+Start order. Direct completion files instead use the sequences derived or
+preserved under Section 3.4.
 
 A malformed-redirect request failure is terminal and checkpointable even
 though its response cannot be validated; resuming MUST NOT resend it once
@@ -469,6 +511,26 @@ The system does NOT:
 
 The system operates at HTTP semantic level, not packet level.
 
+### Capture Fidelity Boundary
+
+Fidelity depends on the capture workflow (Section 3):
+
+| Property               | Combined Start/End input                                   | Direct End-only input                 |
+| ---------------------- | --------------------------------------------------------- | ------------------------------------- |
+| Request identity       | Exact `(node, connection_id, request_id)` pairing          | No pair validation                    |
+| Request order          | Start observation order                                   | End append order, possibly completion order |
+| Request headers/body   | Start wins; End fills omissions                           | Available End fields only             |
+| Response expectations  | End status, duration, headers, body, and flags when captured | Available End fields only           |
+| Connection termination | One close marker per connection with paired `DC`; otherwise EOF | EOF only, even with `DC`          |
+
+Neither path recovers data absent from the capture. Unmatched Start/End
+observations are discarded with a warning, not heuristically paired or emitted
+as partial canonical requests. Missing IDs, duplicate sides, and conflicting
+paired observations remain fatal under Section 3.1.
+
+Use combined input for replay fidelity; direct End-only input is intended for
+dry-run and quick verification.
+
 ---
 
 ## 6. Safety Considerations
@@ -516,6 +578,11 @@ Normative behavior:
 3. Each recorded connection SHOULD own its outbound transport until an explicit `connection_close` or EOF so keep-alive reuse and socket isolation are preserved.
 4. Implementations MUST preserve per-connection event ordering when a VU drives multiple connections.
 5. The specification does not require `max_requests_per_second` and does not use it as a primary control.
+
+Implementation note: the current router assigns connections statically and
+round-robin on their first event. It does not reassign them based on worker
+availability. This describes the current execution model, not an additional
+scheduling-policy requirement.
 
 The VU limit bounds replay workers only. It does not bound per-connection state
 or transports for currently active connections, nor concurrent streams

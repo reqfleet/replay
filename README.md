@@ -49,7 +49,7 @@ request is sent, for both TLS and cleartext targets.
 Protocol failures have a separate `protocol_failed` summary count and make the
 run fail with a nonzero exit status even with response validation disabled or
 `partial_success_exit_zero` enabled. See
-[protocol fidelity](connection-replay.md#strict-protocol-fidelity) for transport
+[protocol fidelity](specs.md#strict-protocol-fidelity) for transport
 requirements and diagnostics.
 
 Pacing is enabled by default: Replay preserves recorded start
@@ -180,6 +180,11 @@ original payload. Capturing bodies can increase log volume, may require request
 buffering, and can place sensitive application data in the capture. This
 example therefore supports response-status validation only.
 
+The example records `X-Request-ID` as `request_id`. Envoy generates a value when
+the header is absent but may preserve a caller-supplied value, so callers must
+follow the [request identity rules](specs.md#31-raw-recorder-observations) for
+retries and fan-out.
+
 1. Copy the manifest and change `socket_address.address` and `port_value` under
    `test_cluster` from `testhttp` and `8080` to the HTTP server being recorded.
 2. Apply the manifest and wait for the proxy:
@@ -229,6 +234,15 @@ observations. Direct End input preserves End append order and cannot reconstruct
 safe connection-close placement, so connections remain active until EOF. End
 records may appear in response-completion order: request A can arrive before B
 but finish after B, producing replay order B, A instead of A, B.
+
+Validate an End-only capture without sending requests:
+
+```bash
+./replay -log ./downstream-end.ndjson -dry-run
+```
+
+See the [input specification](specs.md#3-recording-and-replay-input) for accepted
+fields, combine validation, and input-family restrictions.
 
 ## Replay outcome and metrics
 
