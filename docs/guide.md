@@ -103,7 +103,7 @@ clients (downstream) -> Envoy -> (upstream) servers
 Here, *downstream* describes the traffic between the client and Envoy. The
 captured protocol belongs to that leg, not Envoy's upstream connection. Envoy
 may accept downstream HTTP/2 while forwarding upstream HTTP/1.1. Replaying that
-capture directly to the application still requires HTTP/2 support there.
+capture directly to the application will require application to support HTTP/2.
 
 ### `DownstreamStart` access log
 
@@ -116,7 +116,7 @@ start of a request lifecycle.
 `DownstreamEnd` is emitted after the response completes or the stream
 terminates. It can contain the response code, duration, response flags, and
 other response metadata when those fields are included in the configured log
-format.
+format. This is also the default access log type in Envoy.
 
 ### Combine `DownstreamStart` and `DownstreamEnd`
 
