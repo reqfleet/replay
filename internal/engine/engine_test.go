@@ -1173,6 +1173,7 @@ func TestReplayPreservesURLCredentials(t *testing.T) {
 			cfg := config.Default()
 			cfg.Target.OverrideURL = target.String()
 			cfg.Replay.Retry.MaxAttempts = 1
+			cfg.Header.Drop = nil // Explicitly allow captured credentials to check URL auth precedence.
 			event := model.Event{
 				Type: model.EventRequest, Protocol: "HTTP/1.1", ConnectionID: 1, Sequence: 1, Method: http.MethodGet, Path: "/",
 				Headers: map[string][]string{"Authorization": {authorization}},
@@ -1190,6 +1191,71 @@ func TestReplayPreservesURLCredentials(t *testing.T) {
 			}
 			if got := <-observed; got != want {
 				t.Errorf("target Authorization = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestReplayCredentialHeaderPolicy(t *testing.T) {
+	tests := []struct {
+		name              string
+		yaml              string
+		wantAuthorization string
+		wantCookie        string
+	}{
+		{name: "defaults"},
+		{
+			name:              "replacement credentials",
+			yaml:              "header_rewrite:\n  set:\n    authorization: Bearer staging-token\n    cookie: session=staging\n",
+			wantAuthorization: "Bearer staging-token",
+			wantCookie:        "session=staging",
+		},
+		{
+			name:              "explicit empty drop list",
+			yaml:              "header_rewrite:\n  drop: []\n",
+			wantAuthorization: "Bearer captured-token",
+			wantCookie:        "session=captured",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := config.Parse([]byte(tt.yaml))
+			if err != nil {
+				t.Fatalf("config.Parse(%q) error: %v", tt.yaml, err)
+			}
+			observed := make(chan http.Header, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				observed <- r.Header.Clone()
+				w.WriteHeader(http.StatusOK)
+			}))
+			t.Cleanup(srv.Close)
+			cfg.Target.OverrideURL = srv.URL
+
+			event := model.Event{
+				Type: model.EventRequest, Protocol: "HTTP/1.1", ConnectionID: 1, Sequence: 1, Method: http.MethodGet, Path: "/",
+				Headers: map[string][]string{
+					"aUtHoRiZaTiOn": {"Bearer captured-token"},
+					"cOoKiE":        {"session=captured"},
+					"X-Trace-ID":    {"preserved"},
+				},
+			}
+			summary, err := runReplay(New(cfg, metrics.New(cfg.Metrics)), []model.Event{event})
+			if err != nil {
+				t.Fatalf("ReplayStream(credential headers) error: %v", err)
+			}
+			if summary.ResponsesReceived != 1 {
+				t.Fatalf("ReplayStream(credential headers).ResponsesReceived = %d, want 1", summary.ResponsesReceived)
+			}
+			headers := <-observed
+			if got := headers.Get("Authorization"); got != tt.wantAuthorization {
+				t.Errorf("target Authorization = %q, want %q", got, tt.wantAuthorization)
+			}
+			if got := headers.Get("Cookie"); got != tt.wantCookie {
+				t.Errorf("target Cookie = %q, want %q", got, tt.wantCookie)
+			}
+			if got, want := headers.Get("X-Trace-ID"), "preserved"; got != want {
+				t.Errorf("target X-Trace-ID = %q, want %q", got, want)
 			}
 		})
 	}

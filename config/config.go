@@ -205,7 +205,10 @@ func Default() Config {
 			GracefulTerminationPeriod: 5 * time.Second,
 		},
 		Target: TargetOverrideConfig{},
-		Header: HeaderRewriteConfig{Set: map[string]string{}},
+		Header: HeaderRewriteConfig{
+			Drop: []string{"authorization", "cookie"},
+			Set:  map[string]string{},
+		},
 	}
 }
 
