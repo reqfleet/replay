@@ -265,6 +265,8 @@ complete transport and destination contract.
 [`config.yaml`](../config.yaml) contains a ready-to-use example for replay safety,
 retry, validation, pacing, sharding, checkpoints, and metrics. Configuration
 precedence is CLI flags, environment variables, YAML, then built-in defaults.
+Configuration files are optional and are loaded only when passed with
+`-config ./config.yaml`; placing a file in the working directory does not load it.
 
 See the [recorded timing specification](../specs.md#43-recorded-timing)
 for pacing semantics and limitations.
@@ -277,6 +279,12 @@ Notable safety controls:
 * `--override-url` / `REPLAY_OVERRIDE_URL`: rewrite the target host and URL.
 * `--disallow-recorded-targets` / `REPLAY_DISALLOW_RECORDED_TARGETS`: require an
   override instead of sending to captured destinations.
+
+By default, Replay removes recorded `authorization` and `cookie` headers before
+sending requests. Use `header_rewrite.set`
+to supply credentials for the replay target; these values are applied after
+headers are dropped. An explicit `header_rewrite.drop` list replaces the
+defaults, so `drop: []` deliberately allows captured credentials through.
 
 See the [runtime configuration specification](../specs.md#65-runtime-configuration-yaml)
 for the complete configuration contract and supported environment overrides.

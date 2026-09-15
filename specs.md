@@ -556,6 +556,13 @@ Recommended behavior:
 5. Replay SHOULD fail fast if override is required by policy but missing.
 6. Destination overrides MUST preserve the recorded HTTP protocol; no protocol-override setting is supported.
 
+Built-in header rewrite defaults MUST drop recorded `authorization` and `cookie`
+headers before send, including when no YAML configuration is provided. An
+explicit `header_rewrite.drop` list replaces these defaults; an empty list
+allows recorded credentials through. `header_rewrite.set` values MUST be
+applied after dropping headers so operators can supply credentials for the
+replay target.
+
 Example rewrite intent:
 
 * Captured: `https://api.prod.example.com/api/v1/login?redirect=/home`
