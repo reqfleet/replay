@@ -260,6 +260,26 @@ See [strict protocol fidelity](../specs.md#strict-protocol-fidelity) and
 [target override semantics](../specs.md#61-target-override-semantics) for the
 complete transport and destination contract.
 
+### Self-signed HTTPS certificates
+
+Replay verifies HTTPS server certificates by default. When testing an HTTPS
+endpoint with an untrusted self-signed certificate, you can skip verification
+by adding this setting to your YAML configuration:
+
+```yaml
+replay:
+  tls:
+    insecure_skip_verify: true
+```
+
+Pass the configuration file with `--config ./config.yaml` when running Replay
+to apply the setting.
+
+**Use this only for testing.** It disables both certificate-chain and hostname
+verification for all HTTPS requests in that run. Connections remain encrypted,
+but are vulnerable to man-in-the-middle attacks. Keep the default (`false`) for
+production.
+
 ## Replay Configuration
 
 [`config.yaml`](../config.yaml) contains a ready-to-use example for replay safety,
