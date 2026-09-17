@@ -1,5 +1,6 @@
 replay:
   max_virtual_users_per_engine: 20
+  queued_events_per_worker: 256 # Private buffered channel depth per worker; no borrowing
   rampup_duration: 0s # 0s disables ramp-up; set e.g. 30s to stage VUs linearly over 30 seconds
   http2:
     mode: serialized

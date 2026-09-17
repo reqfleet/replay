@@ -276,6 +276,14 @@ Replay engine MUST:
 10. On `connection_close`, wait for in-flight HTTP/2 work, close transport resources, and finalize the connection.
 11. At EOF, perform the same finalization for every remaining connection.
 
+Workers consume FIFO buffered channels, each with a depth of
+`replay.queued_events_per_worker` events (default `256`). Both this depth and
+`replay.max_virtual_users_per_engine` are Go `int` values and MUST be positive.
+When a worker's channel is full, the router MUST wait for that worker to
+dequeue an event or for cancellation. Slow requests can therefore delay other
+workers. The depth counts queued events, not payload bytes or in-flight work.
+Connection ownership and FIFO order, including close markers, are unchanged.
+
 DC-derived canonical close markers provide confirmed connection termination.
 Canonical connections without DC and all direct-completion connections remain
 active until EOF. Direct completion input cannot place a DC-derived close
@@ -747,7 +755,18 @@ Minimum configurable domains:
 * Validation: status, header, body, and ignored-header controls.
 * Pacing: enabled by default for uncapped shared-origin timing. Set `replay.pacing.enabled: false` to disable recorded-timing waits. See Section 4.3.
 * Metrics server: listen address/port, endpoint enable toggle (default enabled), path (default `/metrics`).
-* Capacity control: `max_virtual_users_per_engine`.
+* Capacity control: `max_virtual_users_per_engine` and `queued_events_per_worker`.
+
+`replay.max_virtual_users_per_engine` controls the worker count.
+`replay.queued_events_per_worker` (default `256`) sets the buffered channel
+depth for each worker. Both values are Go `int` values and MUST be positive;
+zero or negative values MUST be rejected before replay begins.
+
+A full channel blocks the router until that worker dequeues an event or replay
+is canceled, so slow requests can delay delivery to other workers. Larger
+channel depths retain more queued payloads before routing stalls; smaller
+values reduce buffering. The depth counts queued events, not bytes or in-flight
+work. Connections on the same worker still share its execution capacity.
 
 Configuration precedence (recommended):
 
@@ -778,6 +797,7 @@ Example:
 ```yaml
 replay:
   max_virtual_users_per_engine: 20
+  queued_events_per_worker: 256
   rampup_duration: 0s
   http2:
     mode: serialized

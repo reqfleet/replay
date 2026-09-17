@@ -35,6 +35,7 @@ type ReplayConfig struct {
 	Validation ValidationConfig `yaml:"validation"`
 
 	MaxVirtualUsersPerEngine int           `yaml:"max_virtual_users_per_engine"`
+	QueuedEventsPerWorker    int           `yaml:"queued_events_per_worker"`
 	RampupDuration           time.Duration `yaml:"rampup_duration"`
 
 	DryRun                 bool `yaml:"dry_run"`
@@ -153,6 +154,7 @@ func Default() Config {
 	return Config{
 		Replay: ReplayConfig{
 			MaxVirtualUsersPerEngine: 20,
+			QueuedEventsPerWorker:    256,
 			RampupDuration:           0,
 			HTTP2: HTTP2Config{
 				Mode: "serialized",
@@ -258,6 +260,9 @@ func LoadWithOverrides(path string, apply func(*Config)) (Config, error) {
 func (c Config) Validate() error {
 	if c.Replay.MaxVirtualUsersPerEngine <= 0 {
 		return errors.New("replay.max_virtual_users_per_engine must be > 0")
+	}
+	if c.Replay.QueuedEventsPerWorker <= 0 {
+		return errors.New("replay.queued_events_per_worker must be > 0")
 	}
 	if c.Replay.RampupDuration < 0 {
 		return errors.New("replay.rampup_duration must be >= 0")
