@@ -58,16 +58,16 @@ const (
 
 type RequestResult struct {
 	Node             string         `json:"node,omitempty"`
-	ConnectionID     int            `json:"connection_id"`
-	Sequence         int            `json:"sequence"`
 	Outcome          RequestOutcome `json:"outcome"`
-	StatusCode       int            `json:"status_code,omitempty"`
 	Error            string         `json:"error,omitempty"`
-	LatencyMS        float64        `json:"latency_ms,omitempty"`
-	ValidationFailed bool           `json:"validation_failed,omitempty"`
 	ExpectedProtocol string         `json:"expected_protocol,omitempty"`
 	ObservedProtocol string         `json:"observed_protocol,omitempty"`
 	Destination      string         `json:"destination,omitempty"`
+	ConnectionID     int            `json:"connection_id"`
+	Sequence         int            `json:"sequence"`
+	StatusCode       int            `json:"status_code,omitempty"`
+	LatencyMS        float64        `json:"latency_ms,omitempty"`
+	ValidationFailed bool           `json:"validation_failed,omitempty"`
 	Skipped          bool           `json:"skipped,omitempty"`
 }
 
@@ -99,25 +99,26 @@ type Summary struct {
 }
 
 type Engine struct {
-	cfg                 config.Config
+	targetOverrideErr error
+	cfg               config.Config
+
 	metrics             *metrics.Registry
-	metricLabelValues   []string
 	parsedPathTemplates map[int][]PathTemplate
 	parsedOverrideURL   *url.URL
-	targetOverrideErr   error
+	metricLabelValues   []string
 }
 
 const maxBodyRead = 10 * 1024 * 1024 // 10 MiB
 
 type requestExecution struct {
+	headers       map[string][]string
+	body          []byte
 	latencyMS     float64
 	statusCode    int
 	egressBytes   int64
-	attempted     bool
-	headers       map[string][]string
-	body          []byte
 	bodySize      int64
 	bodyDigest    [sha256.Size]byte
+	attempted     bool
 	bodyTruncated bool
 }
 
@@ -277,34 +278,37 @@ type pacingClock struct {
 
 // connState holds per-connection state within an event worker.
 type connState struct {
-	connKey     model.ConnectionKey
-	client      *http.Client
-	transport   *http.Transport
-	http2       bool
-	multiplexed bool
-	detected    bool
-	protocol    string
+	connKey   model.ConnectionKey
+	client    *http.Client
+	transport *http.Transport
+	protocol  string
 
 	// Per-connection event processing state
-	pacing            pacingClock
+	pacing          pacingClock
+	protocolResults []RequestResult
+
+	// Concurrent H/2 checkpointing advances the persisted watermark only after
+	// every earlier observed request has reached a terminal checkpointable state.
+	checkpointCompleted map[int]struct{}
+	checkpointOrder     []int
+	checkpointWatermark int
+
 	sent              int64
 	responsesReceived int64
 	sendErrors        int64
 	validationFailed  int64
 	protocolFailed    int64
-	protocolResults   []RequestResult
 	skipped           int64
-	aborted           bool
 
-	// Concurrent H/2 checkpointing advances the persisted watermark only after
-	// every earlier observed request has reached a terminal checkpointable state.
-	checkpointWatermark int
-	checkpointOrder     []int
-	checkpointCompleted map[int]struct{}
 	// H/2 multiplexed requests run concurrently on the same http.Client.
 	// h2Mu protects shared connection results and checkpoint ordering.
 	h2Mu sync.Mutex
 	h2WG sync.WaitGroup
+
+	http2       bool
+	multiplexed bool
+	detected    bool
+	aborted     bool
 }
 
 func (e *Engine) newConnState(connKey model.ConnectionKey) *connState {
