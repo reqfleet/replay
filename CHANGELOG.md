@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/reqfleet/replay/compare/v0.2.0...v0.2.1) (2026-09-18)
+
+
+### Performance Improvements
+
+* **engine:** Optimize struct field alignment ([#141](https://github.com/reqfleet/replay/issues/141)) ([e1b0653](https://github.com/reqfleet/replay/commit/e1b06538971fb8ca9be3c8233e369dba37c80a09))
+
 ## [0.2.0](https://github.com/reqfleet/replay/compare/v0.1.2...v0.2.0) (2026-09-18)
 
 
