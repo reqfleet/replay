@@ -162,8 +162,8 @@ type ReplaySchedule struct {
 }
 
 // ReplayStream processes events from the provided channel as they arrive.
-// Events are routed to per-worker channels by connection assignment, providing
-// bounded backpressure without buffering entire connections in memory.
+// Events are routed to per-worker buffered channels. A full destination channel
+// applies backpressure to the router, even when other workers have room.
 // Each worker maintains per-connection state and replays HTTP/1.1 requests
 // synchronously as they arrive. HTTP/2 multiplexed requests are dispatched
 // concurrently on the shared per-connection client and joined at close/EOF.
@@ -213,7 +213,7 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event, sc
 
 	workerChs := make([]chan model.Event, vus)
 	for i := range workerChs {
-		workerChs[i] = make(chan model.Event, eventChannelDepth)
+		workerChs[i] = make(chan model.Event, e.cfg.Replay.QueuedEventsPerWorker)
 	}
 
 	results := make(chan Summary, vus)
@@ -257,8 +257,6 @@ func (e *Engine) ReplayStream(ctx context.Context, events <-chan model.Event, sc
 
 	return summary, nil
 }
-
-const eventChannelDepth = 256
 
 // replayTimeline is initialized from the supplied schedule before workers start,
 // or by the router before sending the first valid request. Channel delivery
@@ -328,7 +326,18 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 	connWorker := make(map[model.ConnectionKey]int)
 	vus := len(workerChs)
 	nextWorker := 0
-	for ev := range events {
+	for {
+		var ev model.Event
+		var ok bool
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case ev, ok = <-events:
+			if !ok {
+				return nil
+			}
+		}
+
 		// Select the origin from input order, including requests owned by other
 		// shards. Do not let worker activation or connection assignment rebase it.
 		if e.cfg.Replay.Pacing.Enabled && !timeline.initialized && ev.Type == model.EventRequest {
@@ -367,8 +376,6 @@ func (e *Engine) routeEvents(ctx context.Context, events <-chan model.Event, wor
 			delete(connWorker, connKey)
 		}
 	}
-
-	return nil
 }
 
 // runEventWorker processes events from its channel using per-connection state.

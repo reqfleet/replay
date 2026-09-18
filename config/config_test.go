@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"reflect"
@@ -65,6 +66,27 @@ func TestValidateRejectsZeroLimits(t *testing.T) {
 	cfg.Replay.MaxVirtualUsersPerEngine = 0
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for zero virtual users")
+	}
+}
+
+func TestParseQueuedEventCapacity(t *testing.T) {
+	tests := []struct {
+		name      string
+		perWorker int
+		wantErr   bool
+	}{
+		{name: "minimum", perWorker: 1},
+		{name: "zero", perWorker: 0, wantErr: true},
+		{name: "negative", perWorker: -1, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := fmt.Sprintf("replay:\n  queued_events_per_worker: %d\n", tt.perWorker)
+			_, err := Parse([]byte(content))
+			if gotErr := err != nil; gotErr != tt.wantErr {
+				t.Errorf("Parse(queued_events_per_worker=%d) error = %v, want error = %t", tt.perWorker, err, tt.wantErr)
+			}
+		})
 	}
 }
 

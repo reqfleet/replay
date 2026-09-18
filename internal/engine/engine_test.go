@@ -1992,8 +1992,11 @@ func TestRouteEventsSkipsNonShardEventsBeforeLifecycleTracking(t *testing.T) {
 	if err := eng.routeEvents(context.Background(), events, workerChs, &replayTimeline{}); err != nil {
 		t.Fatalf("routeEvents(non-shard request without open) error = %v, want nil", err)
 	}
-	if got := len(workerChs[0]) + len(workerChs[1]); got != 0 {
-		t.Fatalf("routeEvents(non-shard request) routed %d events, want 0", got)
+	for worker, ch := range workerChs {
+		close(ch)
+		if event, ok := <-ch; ok {
+			t.Fatalf("routeEvents(non-shard request) delivered %+v to worker %d, want no events", event, worker)
+		}
 	}
 }
 
@@ -2013,18 +2016,19 @@ func TestRouteEventsSendsCloseToOwningWorker(t *testing.T) {
 		t.Fatalf("routeEvents() error = %v", err)
 	}
 
-	if got := len(workerChs[0]); got != 3 {
-		t.Fatalf("worker 0 received %d events, want 3", got)
+	for _, ch := range workerChs {
+		close(ch)
 	}
-	if got := len(workerChs[1]); got != 0 {
-		t.Fatalf("worker 1 received %d events, want 0", got)
+	for index, want := range []model.EventType{model.EventConnectionOpen, model.EventRequest, model.EventConnectionClose} {
+		event, ok := <-workerChs[0]
+		if !ok || event.Type != want || event.ConnectionID != 1 {
+			t.Fatalf("worker 0 event %d = %+v, %t; want type %s on connection 1", index, event, ok, want)
+		}
 	}
-
-	<-workerChs[0]
-	<-workerChs[0]
-	closeEvent := <-workerChs[0]
-	if closeEvent.Type != model.EventConnectionClose {
-		t.Fatalf("third worker-0 event = %s, want %s", closeEvent.Type, model.EventConnectionClose)
+	for worker, ch := range workerChs {
+		if event, ok := <-ch; ok {
+			t.Fatalf("worker %d received unexpected event %+v after connection close", worker, event)
+		}
 	}
 }
 
