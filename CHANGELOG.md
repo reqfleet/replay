@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/reqfleet/replay/compare/v0.1.2...v0.2.0) (2026-09-18)
+
+
+### Features
+
+* **engine:** Make worker channel buffering configurable ([#139](https://github.com/reqfleet/replay/issues/139)) ([f92fe76](https://github.com/reqfleet/replay/commit/f92fe76b285a70382a19784b71b18a639b328856))
+
 ## [0.1.2](https://github.com/reqfleet/replay/compare/v0.1.1...v0.1.2) (2026-09-15)
 
 
