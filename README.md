@@ -33,6 +33,23 @@ such as capture limitations, protocol requirements, and timing behavior will be 
 
 ## Download
 
+### Homebrew
+
+On macOS (Apple Silicon) or Linux (`amd64` or `arm64`), install Replay with
+[Homebrew](https://brew.sh/):
+
+```bash
+brew install reqfleet/tap/replay
+replay -help
+```
+
+To upgrade an existing installation:
+
+```bash
+brew update
+brew upgrade reqfleet/tap/replay
+```
+
 ### Replay binary
 
 Download the binary for your operating system and architecture from the
@@ -64,6 +81,7 @@ the [releases page](https://github.com/reqfleet/replay/releases).
 ## Quickstart
 
 The commands below assume the downloaded binary is saved as `./replay`.
+If you installed Replay with Homebrew, use `replay` instead of `./replay`.
 No configuration file is required; these commands use Replay's built-in defaults.
 
 1. [Capture paired Envoy access logs](docs/guide.md#recording-traffic) as
