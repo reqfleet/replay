@@ -1,57 +1,40 @@
-# Traffic Recording & Replay Specification
+# Technical reference
 
-## 1. Overview
+[README](../README.md) · [Replay guide](guide.md) · [Development](development.md)
 
-This document defines the specification for an HTTP traffic recording and
-replay system using an Envoy proxy for capture and a Go-based replay engine.
-Envoy may run as an application sidecar or as a standalone proxy.
+This reference defines Replay's input formats, configuration, observable
+behavior, guarantees, and limitations. For capture workflows and safe replay
+commands, see the [Replay guide](guide.md).
 
-For operational capture and replay instructions, see
-[Recording traffic](docs/guide.md#recording-traffic).
+`MUST` and `MUST NOT` identify requirements; `SHOULD` identifies recommendations;
+`MAY` identifies permitted behavior.
 
-Goals:
+## Contents
 
-* Record HTTP/1.1 and HTTP/2 traffic
-* Preserve per-connection request ordering and keep-alive reuse
-* Support deterministic replay
-* Support keep-alive behavior
-* Support future schema evolution
-* Enable optional response validation
+* [Recording and replay input](#recording-and-replay-input)
+  * [Raw recorder observations](#raw-recorder-observations)
+  * [Combine semantics](#combine-semantics)
+  * [Canonical replay events](#canonical-replay-events)
+  * [Direct completion replay input](#direct-completion-replay-input)
+  * [Capture data handling](#capture-data-handling)
+* [Replay semantics](#replay-semantics)
+  * [Strict protocol fidelity](#strict-protocol-fidelity)
+  * [Distributed replay](#distributed-replay)
+  * [Checkpoint persistence](#checkpoint-persistence)
+  * [Recorded timing](#recorded-timing)
+* [Fidelity limits](#fidelity-limits)
+* [Safety controls](#safety-controls)
+* [Capacity limits](#capacity-limits)
+* [Outcomes](#outcomes)
+* [Metrics](#metrics)
+* [Runtime configuration](#runtime-configuration)
 
-File format: **NDJSON (newline-delimited JSON)**
-Encoding: UTF-8
-Body encoding: Base64
-Raw observation order: observed append order; either pair member may appear first
-Canonical request order: global `DownstreamStart` observation order
-
----
-
-## 2. Architecture
-
-```
-Client → Envoy Proxy → Application
-             ↓
-       Recorder Service
-             ↓
-       traffic.ndjson
-             ↓
-       Replay Engine (Go)
-```
-
-Responsibilities:
-
-* Envoy (sidecar or standalone proxy): HTTP parsing and structured access-log emission
-* Recorder Service: Convert structured logs into canonical NDJSON format
-* Replay Engine: Reconstruct connections and replay requests deterministically
-
----
-
-## 3. Recording and Replay Input
+## Recording and replay input
 
 Recording observations and replay events are different wire contracts. The
 recommended fidelity path sends paired Envoy stdout observations through
 `replay combine` and replays its canonical output. End-only completion logs MAY
-be replayed directly under the limited contract in Section 3.4.
+be replayed directly under the limited [direct completion contract](#direct-completion-replay-input).
 
 ```text
 Envoy DownstreamStart/DownstreamEnd NDJSON
@@ -60,7 +43,7 @@ Envoy DownstreamStart/DownstreamEnd NDJSON
   → replay -log
 ```
 
-### 3.1 Raw Recorder Observations
+### Raw recorder observations
 
 Raw input is UTF-8 NDJSON. Each JSON-looking line MUST be one flat Envoy
 observation with an explicit, case-sensitive `type`:
@@ -118,13 +101,7 @@ connection identities remain a fatal conflict. A file containing
 `DownstreamStart` or both observation sides is combiner input and MUST NOT be
 sent directly to replay.
 
-### 3.2 Combine Semantics
-
-Run:
-
-```bash
-replay combine -log mixed.ndjson -out canonical.ndjson
-```
+### Combine semantics
 
 `-zstd` selects compressed input. Output is plain NDJSON and is atomically
 installed only after the input and every complete pair validate.
@@ -174,7 +151,7 @@ position because later-started HTTP/2 streams may already belong to the same
 recorded connection. A connection without `DC` has no synthetic close marker
 and is finalized at EOF.
 
-### 3.3 Canonical Replay Events
+### Canonical replay events
 
 Canonical input uses explicit `request` and optional `connection_close` events:
 
@@ -207,7 +184,7 @@ Within the canonical family, malformed JSON, absent or invalid explicit types,
 raw Envoy observations, `connection_open`, and unknown event types are rejected
 with the physical input line number.
 
-### 3.4 Direct Completion Replay Input
+### Direct completion replay input
 
 Direct completion input is a quick-verification convenience, not the
 recommended fidelity path. Every record MUST either use the exact,
@@ -250,7 +227,7 @@ Direct input does not synthesize `connection_close`, including for the exact
 `DC` flag. Safe marker placement requires Start order. Direct-input connections
 therefore finalize only at EOF.
 
-### 3.5 Capture Data Handling
+### Capture data handling
 
 Capture files can contain credentials, cookies, and personal data. Operators
 MUST restrict their storage and access and SHOULD redact sensitive fields before
@@ -260,7 +237,7 @@ file.
 
 ---
 
-## 4. Replay Semantics
+## Replay semantics
 
 Replay engine MUST:
 
@@ -270,19 +247,14 @@ Replay engine MUST:
 4. Open one replay connection state on the first request for each `node` + `connection_id`.
 5. Replay requests in observed connection order for HTTP/1.1 and serialized HTTP/2.
 6. In multiplexed HTTP/2 mode, dispatch request sends concurrently as request events arrive.
-7. When pacing is enabled, schedule requests on a shared recorded timeline (Section 4.3), with pacing state per connection even when a worker owns multiple connections.
+7. When pacing is enabled, schedule requests on a [shared recorded timeline](#recorded-timing), with pacing state per connection even when a worker owns multiple connections.
 8. Time elapsed while replaying a request MUST consume the corresponding timestamp delta; synchronous request latency MUST NOT be followed by another sleep for the full recorded delta.
 9. When pacing timestamps move backward or stay equal, keep the existing pacing clock and do not sleep.
 10. On `connection_close`, wait for in-flight HTTP/2 work, close transport resources, and finalize the connection.
 11. At EOF, perform the same finalization for every remaining connection.
 
-Workers consume FIFO buffered channels, each with a depth of
-`replay.queued_events_per_worker` events (default `256`). Both this depth and
-`replay.max_virtual_users_per_engine` are Go `int` values and MUST be positive.
-When a worker's channel is full, the router MUST wait for that worker to
-dequeue an event or for cancellation. Slow requests can therefore delay other
-workers. The depth counts queued events, not payload bytes or in-flight work.
-Connection ownership and FIFO order, including close markers, are unchanged.
+Worker queue limits and their backpressure behavior are defined under
+[capacity limits](#capacity-limits).
 
 DC-derived canonical close markers provide confirmed connection termination.
 Canonical connections without DC and all direct-completion connections remain
@@ -308,13 +280,11 @@ NOT abort the recorded connection or clear an abort caused by another request;
 it counts as a send error and makes the run `partial_success`. Reusing the
 same underlying TCP connection is not guaranteed after discarding the response.
 
-Replay retains `http.Client` timeouts, authentication, and error wrapping.
-A wrapper around the standard transport identifies malformed redirect
-locations using a typed error, not Go's error-message wording. Other transport
-failures retain the existing retry and connection-abort behavior. Malformed
-`Location` values on non-redirect responses are not interpreted.
+Request timeouts and authentication still apply. Other transport failures retain
+the configured retry and connection-abort behavior. Malformed `Location` values
+on non-redirect responses are not interpreted.
 
-### Strict Protocol Fidelity
+### Strict protocol fidelity
 
 Protocol fidelity is strict-only. Replay MUST trim outer whitespace and
 normalize case, accepting only `HTTP/1.1`, `HTTP/2`, and `HTTP/2.0`; both HTTP/2
@@ -331,11 +301,12 @@ translated between downstream HTTP/2 and upstream HTTP/1.1.
 Replay MUST enforce the expected protocol on every response before treating it
 as usable or applying optional status/header/body validation. A protocol
 failure MUST NOT be retried, counted as a usable response, or reclassified as
-an ordinary network failure. See Section 6.3 for run and diagnostic behavior.
+an ordinary network failure. See [outcomes](#outcomes) for run and diagnostic
+behavior.
 
-Implementation note: each recorded connection uses a standard Go
-`http.Transport`, configured for the recorded protocol. Standard Go transport
-pooling, retry, and connection-lifecycle behavior still applies.
+Each recorded connection has an isolated transport. Transport-level pooling,
+retries, and reconnections still apply; logical connection identity does not
+guarantee reuse of one physical socket throughout replay.
 
 #### HTTP/1.1
 
@@ -354,9 +325,9 @@ server may expose the HTTP/2 preface (`PRI * HTTP/2.0`) to its request handler;
 this is not a replayed application request over HTTP/1.
 
 For h2c, an HTTP/1 response to the connection preface is a protocol failure even
-when it arrives before the first request stream is admitted. Replay retains
-that wire evidence on the individual socket; an early EOF without protocol
-evidence remains an ordinary network failure and follows configured retries.
+when it arrives before the first request stream is admitted. That failure is
+associated with the affected connection; an early EOF without protocol evidence
+remains an ordinary network failure and follows configured retries.
 
 If Go's HTTP/2 implementation is disabled, including by `GODEBUG=http2client=0`
 or the `nethttpomithttp2` build tag, sending a recorded HTTP/2 request MUST fail
@@ -368,7 +339,8 @@ Two supported modes:
 1. Serialized mode, which sends requests one at a time in observed connection order. It intentionally changes recorded concurrency, not the HTTP/2 wire protocol.
 2. Multiplexed mode, which sends HTTP/2 requests concurrently on the shared per-connection client and joins in-flight requests at EOF.
 
-Checkpoint advancement in multiplexed mode follows Section 4.2.
+Checkpoint advancement in multiplexed mode follows the
+[checkpoint persistence contract](#checkpoint-persistence).
 
 Replay consumes HTTP/2 requests in input append order and does not reorder them
 by `timestamp`, `stream_id`, or `sequence`. `replay combine` establishes
@@ -378,7 +350,7 @@ append order instead. Multiplexed mode may execute requests concurrently; a
 canonical close marker waits for all admitted streams before finalizing the
 connection.
 
-### 4.1 Distributed Replay for Large Captures
+### Distributed replay
 
 When capture logs are too large for a single replay process, replay MAY be distributed across multiple replay engines.
 
@@ -386,27 +358,23 @@ Requirements:
 
 1. Shard assignment MUST be derived from `node` + `connection_id` (for example, hash-based partitioning).
 2. All events for a single `node` + `connection_id` MUST be handled by exactly one replay engine.
-3. Per-connection ordering rules in Section 4 MUST still hold within each shard.
+3. [Per-connection ordering rules](#replay-semantics) MUST still hold within each shard.
 4. Sharding by byte offsets or naive timestamp windows MUST NOT split a single connection across shards.
 5. Each shard MAY be replayed independently, but deterministic behavior is defined primarily per connection, not as a single global wall-clock schedule.
 6. Shard sizing SHOULD bound the number of unique connection identities retained by each replay engine.
 
-Recommended implementation pattern:
-
-* Use a dispatcher to read NDJSON and route events to shard-specific queues/files by `node` + `connection_id`.
-* Preserve append order within each shard output.
-* Apply capacity controls per replay engine (see Section 6.2).
+[Capacity limits](#capacity-limits) apply independently to each replay engine.
 
 By default, engines reading the same complete input select the same capture
 origin before shard filtering, but independently select their replay starts.
 Pre-sharded files may additionally select different origins. The engine API
-accepts a common origin/start pair (Section 4.3), but does not distribute
+accepts a [common origin/start pair](#recorded-timing), but does not distribute
 schedules, ensure engine readiness, or synchronize host clocks. The CLI uses
 automatic timing and MUST NOT claim cross-shard burst fidelity. Coordinated
 callers need the same origin/start pair across engines, comparable capture
 timestamps, sufficiently synchronized host clocks, and engines ready in time.
 
-### 4.2 Checkpoint Persistence
+### Checkpoint persistence
 
 Setting `replay.checkpoint.file` enables resumable replay. The engine records a
 monotonic completed-sequence watermark for each `node` + `connection_id` and
@@ -417,7 +385,7 @@ checkpointable state.
 Parser-assigned sequences are stable across repeated parses of the same
 canonical file because `combine` omits serialized sequences and preserves
 Start order. Direct completion files instead use the sequences derived or
-preserved under Section 3.4.
+preserved under the [direct completion contract](#direct-completion-replay-input).
 
 A malformed-redirect request failure is terminal and checkpointable even
 though its response cannot be validated; resuming MUST NOT resend it once
@@ -440,7 +408,7 @@ non-skipped request. With automatic timing, replaying the full file therefore
 waits through the skipped prefix. Checkpoint data does not persist timing state
 or provide a fast-forward clock.
 
-### 4.3 Recorded Timing
+### Recorded timing
 
 `replay.pacing.enabled` defaults to `true` and is configured in YAML.
 Disabling pacing MUST disable recorded-timing waits; it does not disable
@@ -448,22 +416,15 @@ ramp-up, retry backoff, or protocol ordering. Dry-run MUST exercise pacing
 without sending requests.
 
 `Engine.ReplayStream(ctx, events, schedule)` accepts an optional per-invocation
-`*ReplaySchedule`:
-
-```go
-type ReplaySchedule struct {
-    CaptureOrigin time.Time
-    ReplayStart   time.Time
-}
-```
+`*ReplaySchedule` with `CaptureOrigin` and `ReplayStart` timestamps.
 
 A nil schedule selects automatic timing. A supplied schedule MUST contain both
-nonzero timestamps; an incomplete schedule MUST fail initialization. The engine
-MUST copy the supplied pair at invocation entry and anchor its wall-clock
-`ReplayStart` to the local monotonic clock once. Later wall-clock adjustments,
-input arrival, and worker activation MUST NOT rebase that schedule. Past starts
-are accepted: overdue requests proceed without extra timing waits. Supplying a
-schedule MUST NOT override `replay.pacing.enabled: false`.
+nonzero timestamps; an incomplete schedule MUST fail initialization. Each
+invocation fixes the supplied pair at entry. Later changes to that pair,
+wall-clock adjustments, input arrival, and worker activation MUST NOT rebase
+the schedule. Past starts are accepted: overdue requests proceed without extra
+timing waits. A supplied schedule MUST NOT override
+`replay.pacing.enabled: false`.
 
 The CLI passes a nil schedule; there are no YAML or CLI schedule controls.
 
@@ -502,12 +463,12 @@ it; a full worker channel can block routing to other workers. HTTP/1.1 MUST
 remain sequential, so slow responses can delay later requests. Input delivery,
 HTTP/2 stream admission, transport behavior, target latency, and generator
 capacity also affect achieved burst fidelity. Send-attempt lateness can be
-measured using the optional histogram defined in Section 6.4; pacing does
+measured using the [optional schedule-lateness histogram](#metrics); pacing does
 not add a global timestamp sorter or change connection ownership.
 
 ---
 
-## 5. Non-Goals
+## Fidelity limits
 
 The system does NOT:
 
@@ -519,9 +480,9 @@ The system does NOT:
 
 The system operates at HTTP semantic level, not packet level.
 
-### Capture Fidelity Boundary
+### Capture fidelity boundary
 
-Fidelity depends on the capture workflow (Section 3):
+Fidelity depends on the [capture workflow](#recording-and-replay-input):
 
 | Property               | Combined Start/End input                                   | Direct End-only input                 |
 | ---------------------- | --------------------------------------------------------- | ------------------------------------- |
@@ -534,28 +495,23 @@ Fidelity depends on the capture workflow (Section 3):
 Neither path recovers data absent from the capture. Unmatched Start/End
 observations are discarded with a warning, not heuristically paired or emitted
 as partial canonical requests. Missing IDs, duplicate sides, and conflicting
-paired observations remain fatal under Section 3.1.
+paired observations remain fatal under the [raw observation contract](#raw-recorder-observations).
 
 Use combined input for replay fidelity; direct End-only input is intended for
 dry-run and quick verification.
 
 ---
 
-## 6. Safety Considerations
+## Safety controls
 
-Replay engine SHOULD support:
+Replay supports dry-run, target overrides, header rewriting, credential
+replacement, and idempotency safeguards. See the guide's
+[operator checklist](guide.md#operator-checklist) for safe execution steps.
 
-* Dry-run mode
-* Target host override
-* Header rewriting
-* Authorization token replacement
-* Idempotency safeguards
+### Target override semantics
 
-### 6.1 Target Override Semantics
-
-To avoid replaying captured production traffic back into production, replay tooling SHOULD support explicit destination overrides.
-
-Recommended behavior:
+Destination overrides allow replaying captured traffic against a different
+target. The following rules apply:
 
 1. A runtime override target (for example, `https://staging.example.com`) replaces captured destination authority.
 2. By default, replay SHOULD preserve original `path` and query string while overriding `scheme` and `authority`.
@@ -577,9 +533,10 @@ Example rewrite intent:
 * Override target: `https://api.staging.example.com`
 * Replayed URL: `https://api.staging.example.com/api/v1/login?redirect=/home`
 
-### 6.2 Per-Engine Capacity Limits (VU Model)
+## Capacity limits
 
-Replay engines SHOULD expose virtual-user (VU) worker controls rather than treating VU count as a request-per-second or total-load throttle.
+Virtual-user (VU) controls bound replay workers, not requests per second or
+total load.
 
 Definitions:
 
@@ -589,15 +546,23 @@ Definitions:
 Normative behavior:
 
 1. A replay engine MUST NOT exceed `max_virtual_users_per_engine` replay workers.
-2. Connections MAY be assigned to VUs round-robin, but every event for one `node` + `connection_id` identity MUST remain on the same VU.
+2. Every event for one `node` + `connection_id` identity MUST remain on the same VU.
 3. Each recorded connection SHOULD own its outbound transport until an explicit `connection_close` or EOF so keep-alive reuse and socket isolation are preserved.
 4. Implementations MUST preserve per-connection event ordering when a VU drives multiple connections.
-5. The specification does not require `max_requests_per_second` and does not use it as a primary control.
 
-Implementation note: the current router assigns connections statically and
-round-robin on their first event. It does not reassign them based on worker
-availability. This describes the current execution model, not an additional
-scheduling-policy requirement.
+Connections are not reassigned based on worker availability.
+
+`replay.queued_events_per_worker` sets each worker's FIFO queue depth in events
+(default `256`). Both this depth and `replay.max_virtual_users_per_engine` are
+Go `int` values and MUST be positive; zero or negative values MUST be rejected
+before replay begins.
+
+When a worker's queue is full, routing MUST wait for that worker to dequeue an
+event or for cancellation. Slow requests can therefore delay other workers.
+Larger queues retain more queued payloads before routing stalls; smaller queues
+reduce buffering. The depth counts queued events, not payload bytes or in-flight
+work. Connection ownership and FIFO order, including close markers, are
+unchanged. Connections on the same worker still share its execution capacity.
 
 The VU limit bounds replay workers only. It does not bound per-connection state
 or transports for currently active connections, nor concurrent streams
@@ -624,7 +589,7 @@ Distributed replay note:
   load ceiling. Operators SHOULD size and shard replay engines for each shard's
   unique connection count and multiplexed stream concurrency.
 
-### 6.3 Replay Outcome Model
+## Outcomes
 
 Replay execution MUST produce deterministic run outcomes at three levels: request, connection, and run.
 
@@ -662,7 +627,7 @@ request, expected protocol, observed protocol when available, and destination.
 Normal connection, DNS, timeout, and certificate failures remain ordinary send
 errors rather than protocol failures.
 
-### 6.4 Metrics Emission and Scrape Endpoint
+## Metrics
 
 Replay engines MUST expose Prometheus metrics over HTTP for pull-based scraping.
 
@@ -692,12 +657,10 @@ Metric catalog with the default `replay` namespace:
 worker starts and decrements when that worker finishes.
 
 Schedule-lateness collection is opt-in through the YAML setting
-`metrics.schedule_lateness_enabled`, which defaults to `false`. The registry
-MUST NOT construct or register the histogram unless both `metrics.enabled` and
-`metrics.schedule_lateness_enabled` are true. Recording lateness through a
-registry without the collector is a no-op. The engine MUST skip
-lateness-specific label work when the collector is absent. This switch MUST NOT
-change pacing or request execution behavior.
+`metrics.schedule_lateness_enabled`, which defaults to `false`. The histogram
+MUST be absent unless both `metrics.enabled` and
+`metrics.schedule_lateness_enabled` are true. This switch MUST NOT change
+pacing or request execution behavior.
 
 `replay_schedule_lateness_seconds` is a histogram of
 `max(0, first_client_send_attempt - intended_deadline)` in seconds, with common
@@ -743,32 +706,24 @@ metrics endpoint MUST remain scrapeable for the configured period and then
 gracefully drain in-flight scrapes. Failure to bind the configured metrics
 listener MUST fail startup.
 
-### 6.5 Runtime Configuration (YAML)
+## Runtime configuration
 
-Replay runtime behavior SHOULD be configurable via a YAML file.
+Replay accepts an optional YAML configuration file selected with `-config`;
+files in the working directory are not loaded automatically. See
+[`config.yaml`](../config.yaml) for the maintained example and the guide's
+[configuration instructions](guide.md#replay-configuration) for usage.
 
-Minimum configurable domains:
+Configurable domains include:
 
 * Timeouts: connect timeout, request timeout, optional idle/keepalive timeout.
 * HTTP/2 replay mode: serialized or multiplexed.
 * Retry policy: max retries, retryable error classes/statuses, backoff strategy.
 * Validation: status, header, body, and ignored-header controls.
-* Pacing: enabled by default for uncapped shared-origin timing. Set `replay.pacing.enabled: false` to disable recorded-timing waits. See Section 4.3.
+* Pacing: enabled by default for [uncapped shared-origin timing](#recorded-timing). Set `replay.pacing.enabled: false` to disable recorded-timing waits.
 * Metrics server: listen address/port, endpoint enable toggle (default enabled), path (default `/metrics`).
-* Capacity control: `max_virtual_users_per_engine` and `queued_events_per_worker`.
+* Capacity control: [`max_virtual_users_per_engine` and `queued_events_per_worker`](#capacity-limits).
 
-`replay.max_virtual_users_per_engine` controls the worker count.
-`replay.queued_events_per_worker` (default `256`) sets the buffered channel
-depth for each worker. Both values are Go `int` values and MUST be positive;
-zero or negative values MUST be rejected before replay begins.
-
-A full channel blocks the router until that worker dequeues an event or replay
-is canceled, so slow requests can delay delivery to other workers. Larger
-channel depths retain more queued payloads before routing stalls; smaller
-values reduce buffering. The depth counts queued events, not bytes or in-flight
-work. Connections on the same worker still share its execution capacity.
-
-Configuration precedence (recommended):
+Configuration precedence, from lowest to highest:
 
 1. Built-in defaults
 2. YAML file
@@ -789,66 +744,8 @@ Replay recognizes these environment overrides:
 * `METRICS_MAX_LABELS`
 * `METRICS_GRACEFUL_TERMINATION_PERIOD`
 
-Configured common-label environment references follow the resolution rules in
-Section 6.4.
-
-Example:
-
-```yaml
-replay:
-  max_virtual_users_per_engine: 20
-  queued_events_per_worker: 256
-  rampup_duration: 0s
-  http2:
-    mode: serialized
-  timeout:
-    connect: 3s
-    request: 30s
-    idle_connection: 60s
-  retry:
-    max_attempts: 2
-    backoff: exponential
-    retry_on_statuses: [429, 502, 503, 504]
-    retry_on_errors: [timeout, connection_reset, network, tls]
-  validation:
-    status: true
-    headers: false
-    body: false
-    ignore_headers: [x-request-id, date]
-  pacing:
-    enabled: true
-  idempotency:
-    enabled: true
-    block_methods: [POST, PUT, PATCH, DELETE]
-    require_header_for_allow: [idempotency-key, x-idempotency-key]
-  sharding:
-    shard_index: 0
-    shard_count: 1
-  checkpoint:
-    file: "./checkpoint.json"
-    sync_interval: 1s
-metrics:
-  enabled: true
-  schedule_lateness_enabled: false
-  namespace: "replay"
-  listen_address: "0.0.0.0:9102"
-  path: "/metrics"
-  max_labels: 20
-  graceful_termination_period: 5s
-  path_templates:
-    - "/users/{id}"
-    - "/users/{id}/orders"
-  common_labels:
-    - name: "run_id"
-      value: "unknown"
-      env: "REPLAY_RUN_ID"
-    - name: "worker_id"
-      value: "0"
-      env: "REPLAY_WORKER_ID"
-    - name: "zone"
-      value: "unknown"
-      env: "REPLAY_ZONE"
-```
+Configured common-label environment references follow the
+[metrics resolution rules](#metrics).
 
 Each `validation.status`, `validation.headers`, and `validation.body` field
 directly enables that check; there is no aggregate validation toggle.
@@ -857,38 +754,3 @@ When idempotency safeguards are enabled, configured mutation methods are
 recorded as `skipped` unless an allow header is present.
 
 POST and mutation requests may cause side effects if replayed against production systems.
-
----
-
-## 7. Future Extensions (Optional)
-
-Example replay hints:
-
-```json
-"replay_hints": {
-  "idempotent": false,
-  "mutates_state": true,
-  "requires_auth_refresh": true
-}
-```
-
-Example tagging:
-
-```json
-"tags": ["oauth", "login-flow"]
-```
-
----
-
-## 8. Summary
-
-This specification provides:
-
-* Connection-aware recording
-* Deterministic replay ordering
-* HTTP/1.1 and HTTP/2 compatibility
-* TLS metadata support
-* Future-proof schema design
-* Production-safe extensibility
-
-This format is intended for long-term stability and production-grade traffic replay systems.
