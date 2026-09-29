@@ -1,6 +1,6 @@
 # Development
 
-[README](../README.md) · [Replay guide](guide.md) · [Specification](../specs.md)
+[README](../README.md) · [Replay guide](guide.md) · [Technical reference](reference.md)
 
 Replay can be developed directly on Linux with `make` and the Go version
 declared in [`go.mod`](../go.mod). Lima also supports Linux, but it is not required

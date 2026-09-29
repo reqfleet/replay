@@ -127,5 +127,5 @@ See the [operator checklist](docs/guide.md#operator-checklist) for details.
 | --- | --- |
 | [Replay guide](docs/guide.md) | Recording, target compatibility, configuration, safety, outcomes, metrics, Go library usage, and request-body recipes. |
 | [Development](docs/development.md) | Linux and macOS setup, Lima lifecycle, tests, and fixture generation. |
-| [Specification](specs.md) | Normative input formats, replay semantics, and configuration contract. |
+| [Technical reference](docs/reference.md) | Input formats, configuration, replay guarantees and limitations, outcomes, and metrics. |
 | [Example configuration](config.yaml) | Ready-to-use replay safety, timing, retry, validation, and metrics settings. |

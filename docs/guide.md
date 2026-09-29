@@ -1,6 +1,6 @@
 # Replay guide
 
-[README](../README.md) · [Development](development.md) · [Specification](../specs.md)
+[README](../README.md) · [Development](development.md) · [Technical reference](reference.md)
 
 This guide covers capturing and replaying traffic, selecting a compatible
 target, and using Replay from Go. For installation and a safe quickstart, see
@@ -55,7 +55,7 @@ request is sent, for both TLS and cleartext targets.
 Protocol failures have a separate `protocol_failed` summary count and make the
 run fail with a nonzero exit status even with response validation disabled or
 `partial_success_exit_zero` enabled. See
-[protocol fidelity](../specs.md#strict-protocol-fidelity) for transport
+[protocol fidelity](reference.md#strict-protocol-fidelity) for transport
 requirements and diagnostics.
 
 Pacing is enabled by default: Replay preserves recorded start
@@ -83,8 +83,8 @@ retries may intentionally change the resulting traffic. Replay focuses on HTTP
 behavior rather than reproducing raw network packets, header ordering, TLS
 handshakes, or exact server responses.
 
-See the [replay semantics](../specs.md#4-replay-semantics) and
-[non-goals](../specs.md#5-non-goals) for the detailed contract.
+See the [replay semantics](reference.md#replay-semantics) and
+[fidelity limits](reference.md#fidelity-limits) for the detailed contract.
 
 ## Recording traffic
 
@@ -142,7 +142,7 @@ example therefore supports response-status validation only.
 
 The example records `X-Request-ID` as `request_id`. Envoy generates a value when
 the header is absent but may preserve a caller-supplied value, so callers must
-follow the [request identity rules](../specs.md#31-raw-recorder-observations) for
+follow the [request identity rules](reference.md#raw-recorder-observations) for
 retries and fan-out.
 
 1. Copy the manifest and change `socket_address.address` and `port_value` under
@@ -202,7 +202,7 @@ Validate an End-only capture without sending requests:
 ./replay -log ./downstream-end.ndjson -dry-run
 ```
 
-See the [input specification](../specs.md#3-recording-and-replay-input) for accepted
+See the [input reference](reference.md#recording-and-replay-input) for accepted
 fields, combine validation, and input-family restrictions.
 
 ## Choosing a replay target
@@ -256,8 +256,8 @@ it does not downgrade HTTP/2 to HTTP/1.1. Recorded HTTP/2 sent to an HTTP URL
 requires prior-knowledge h2c support at that target, not an HTTP/1 upgrade.
 Recorded HTTP/2 sent to an HTTPS URL requires `h2` ALPN negotiation.
 
-See [strict protocol fidelity](../specs.md#strict-protocol-fidelity) and
-[target override semantics](../specs.md#61-target-override-semantics) for the
+See [strict protocol fidelity](reference.md#strict-protocol-fidelity) and
+[target override semantics](reference.md#target-override-semantics) for the
 complete transport and destination contract.
 
 ### Self-signed HTTPS certificates
@@ -288,7 +288,7 @@ precedence is CLI flags, environment variables, YAML, then built-in defaults.
 Configuration files are optional and are loaded only when passed with
 `-config ./config.yaml`; placing a file in the working directory does not load it.
 
-See the [recorded timing specification](../specs.md#43-recorded-timing)
+See the [recorded timing reference](reference.md#recorded-timing)
 for pacing semantics and limitations.
 
 ### Safety controls
@@ -306,7 +306,7 @@ to supply credentials for the replay target; these values are applied after
 headers are dropped. An explicit `header_rewrite.drop` list replaces the
 defaults, so `drop: []` deliberately allows captured credentials through.
 
-See the [runtime configuration specification](../specs.md#65-runtime-configuration-yaml)
+See the [runtime configuration reference](reference.md#runtime-configuration)
 for the complete configuration contract and supported environment overrides.
 
 ## Operator checklist
@@ -323,7 +323,7 @@ for the complete configuration contract and supported environment overrides.
   `replay.checkpoint.file: "./checkpoint.json"`. Reusing that file skips
   sequences already recorded as complete; remove it or choose a new path for
   an independent run. See
-  [checkpoint persistence](../specs.md#42-checkpoint-persistence) for durability
+  [checkpoint persistence](reference.md#checkpoint-persistence) for durability
   and sharding behavior.
 
 ## Replay outcome and metrics
@@ -334,7 +334,7 @@ Replay reports `success`, `partial_success`, or `failed`. `partial_success`
 returns exit code `0` by default; set
 `REPLAY_PARTIAL_SUCCESS_EXIT_ZERO=false` when it must return `1`.
 
-See the [outcome specification](../specs.md#63-replay-outcome-model) for request,
+See the [outcome reference](reference.md#outcomes) for request,
 connection, and run outcome definitions.
 
 ### Metrics
@@ -346,7 +346,7 @@ disabled, and the bind address, path, namespace, common labels,
 label-cardinality limits, path templates, and graceful termination period are
 configurable under `metrics` in [`config.yaml`](../config.yaml).
 
-See the [metrics specification](../specs.md#64-metrics-emission-and-scrape-endpoint)
+See the [metrics reference](reference.md#metrics)
 for the metric catalog and exact label, path-template, and endpoint behavior.
 
 ## Go library
