@@ -2,6 +2,10 @@
 
 Replay helps engineers to reproduce production traffic patterns. As a start, Replay replays the traffic based on Envoy logs.
 
+> [!NOTE]
+> **Announcement:** Replay is fully supported by [Reqfleet](https://reqfleet.com).
+> Read the [introduction to Replay](https://reqfleet.com/blog/replay).
+
 ## Motivation and Design Goal
 
 Most load tests use synthetic traffic. Tools such as JMeter and Locust can
