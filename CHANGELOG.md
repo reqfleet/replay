@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/reqfleet/replay/compare/v0.2.1...v0.2.2) (2026-10-16)
+
+
+### Bug Fixes
+
+* **metrics:** add the missing bucket ([#147](https://github.com/reqfleet/replay/issues/147)) ([b7a5cf3](https://github.com/reqfleet/replay/commit/b7a5cf3a3bfd22b6db9c7b401f6ad18ea5a0e5bc))
+
 ## [0.2.1](https://github.com/reqfleet/replay/compare/v0.2.0...v0.2.1) (2026-09-29)
 
 
