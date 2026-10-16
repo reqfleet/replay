@@ -37,14 +37,13 @@ type Registry struct {
 
 func New(cfg config.MetricsConfig) *Registry {
 	r := prometheus.NewRegistry()
-	buckets := prometheus.DefBuckets
 	commonLabels := cfg.CommonLabelNames()
 
 	out := &Registry{
 		LabelLatencyHistogram: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: cfg.Namespace,
 			Name:      "latency_label_milliseconds",
-			Buckets:   toMillisecondsBuckets(buckets),
+			Buckets:   []float64{1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000},
 		}, appendLabels(commonLabels, "label")),
 		StatusCounter: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: cfg.Namespace,
@@ -372,13 +371,5 @@ func appendLabelValues(commonLabelValues []string, values ...string) []string {
 	out := make([]string, 0, len(commonLabelValues)+len(values))
 	out = append(out, commonLabelValues...)
 	out = append(out, values...)
-	return out
-}
-
-func toMillisecondsBuckets(b []float64) []float64 {
-	out := make([]float64, len(b))
-	for i, v := range b {
-		out[i] = v * 1000
-	}
 	return out
 }
