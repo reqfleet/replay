@@ -67,6 +67,55 @@ func TestRegistryUsesConfiguredNamespaceAndCommonLabels(t *testing.T) {
 	}
 }
 
+func TestRecordRequestLowLatencyBuckets(t *testing.T) {
+	cfg := config.Default().Metrics
+	r := New(cfg)
+	for _, latency := range []float64{0.5, 1, 1.5, 2.5, 3} {
+		r.RecordRequest(cfg.CommonLabelValues(), "/fast", latency, "200", 0)
+	}
+
+	families, err := r.r.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() != cfg.Namespace+"_latency_label_milliseconds" {
+			continue
+		}
+		if got := len(family.GetMetric()); got != 1 {
+			t.Fatalf("latency histogram series count = %d, want 1", got)
+		}
+		histogram := family.GetMetric()[0].GetHistogram()
+		if got := histogram.GetSampleCount(); got != 5 {
+			t.Errorf("latency observation count = %d, want 5", got)
+		}
+		if got := histogram.GetSampleSum(); got != 8.5 {
+			t.Errorf("latency sum = %g ms, want 8.5 ms", got)
+		}
+		wantBuckets := map[float64]uint64{
+			1: 2, 2.5: 4, 5: 5, 10: 5, 25: 5, 50: 5, 100: 5,
+			250: 5, 500: 5, 1000: 5, 2500: 5, 5000: 5, 10000: 5,
+		}
+		for _, bucket := range histogram.GetBucket() {
+			bound := bucket.GetUpperBound()
+			want, ok := wantBuckets[bound]
+			if !ok {
+				t.Errorf("unexpected latency bucket <= %g ms", bound)
+				continue
+			}
+			if got := bucket.GetCumulativeCount(); got != want {
+				t.Errorf("latency bucket <= %g ms count = %d, want %d", bound, got, want)
+			}
+			delete(wantBuckets, bound)
+		}
+		for bound := range wantBuckets {
+			t.Errorf("missing latency bucket <= %g ms", bound)
+		}
+		return
+	}
+	t.Fatal("latency histogram missing after recording requests")
+}
+
 func TestRecordScheduleLateness(t *testing.T) {
 	cfg := config.Default().Metrics
 	cfg.ScheduleLatenessEnabled = true

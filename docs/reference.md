@@ -653,6 +653,16 @@ Metric catalog with the default `replay` namespace:
 * `replay_cpu_gauge`
 * `replay_mem_gauge`
 
+The request-latency histogram uses cumulative upper bounds of
+`1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, +Inf`
+milliseconds. The 1 ms and 2.5 ms buckets preserve sub-5 ms latency detail and
+align the profile with Shibuya's JMeter and Locust metrics for cross-engine
+quantiles. `_sum` is in milliseconds and `_count` counts observations.
+All producers combined in one histogram aggregation MUST use the same bucket
+boundaries; older Replay versions without the first two buckets are not
+compatible with that aggregation. This does not change the separate
+schedule-lateness histogram's seconds-based buckets.
+
 `replay_threads_gauge` reports active virtual users. It increments when a replay
 worker starts and decrements when that worker finishes.
 
