@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/reqfleet/replay/compare/v0.2.2...v0.2.3) (2026-11-01)
+
+
+### Build System
+
+* **go:** Update Go to 1.26.10 ([#149](https://github.com/reqfleet/replay/issues/149)) ([da0d942](https://github.com/reqfleet/replay/commit/da0d942819179628d49f20d5323678d5070853bc))
+
 ## [0.2.2](https://github.com/reqfleet/replay/compare/v0.2.1...v0.2.2) (2026-10-16)
 
 
